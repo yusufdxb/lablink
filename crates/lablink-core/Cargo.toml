@@ -1,0 +1,19 @@
+[package]
+name = "lablink-core"
+description = "LabLink core: configuration, device model, identity, health state machines, IPC protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+ipnet.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,18 @@
+[Unit]
+Description=LabLink daemon (device discovery, SSH health, identity tracking)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lablinkd --no-color
+Restart=on-failure
+RestartSec=5s
+# Stop cleanly on SIGTERM; the daemon flushes its cache and removes its socket.
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+Environment=LABLINK_LOG=info
+# Guard rails: the daemon needs a handful of threads and no privileges.
+NoNewPrivileges=yes
+TasksMax=64
+
+[Install]
+WantedBy=default.target

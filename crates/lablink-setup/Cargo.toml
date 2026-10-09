@@ -1,0 +1,21 @@
+[package]
+name = "lablink-setup"
+description = "LabLink: first-run setup, service control, settings files, export/import and support bundles (shared by CLI and GUI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lablink-core.workspace = true
+lablink-platform.workspace = true
+lablink-doctor.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+ipnet.workspace = true
+libc.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]

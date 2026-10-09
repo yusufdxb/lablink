@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the exact toolchain pinned in rust-toolchain.toml.
+      - run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # ssh-keygen is used by the OpenSSH cross-check tests (skipped if absent).
+      - run: sudo apt-get update && sudo apt-get install -y openssh-client
+      # Includes: site migration, two-site detection fixtures, AWAY semantics,
+      # ambiguous names, completion, support-bundle redaction (adversarial),
+      # import hardening. Every test uses temporary HOME/XDG/state/socket
+      # directories and a simulated network; none touches this runner's
+      # network, configuration or systemd user manager.
+      - run: cargo test --workspace --locked
+
+  dependencies:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+      - run: cargo deny check
+      - run: cargo audit --deny warnings
+      # THIRD_PARTY_LICENSES.md must describe exactly this Cargo.lock.
+      - name: third-party notices match Cargo.lock
+        run: |
+          grep -q "Cargo.lock sha256: $(sha256sum Cargo.lock | cut -d' ' -f1)" THIRD_PARTY_LICENSES.md
+
+  release:
+    # Artifacts are built by scripts/release.sh in the pinned Ubuntu 20.04
+    # container (glibc 2.31 baseline) from a clean `git archive` of HEAD.
+    runs-on: ubuntu-24.04
+    needs: [lint, test, dependencies]
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/release.sh
+      - name: binaries need at most glibc 2.31
+        run: |
+          d=$(mktemp -d)
+          dpkg-deb -x dist/lablink_*_amd64.deb "$d"
+          for b in "$d"/usr/bin/*; do
+            v=$(objdump -T "$b" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "$(basename "$b"): GLIBC_$v"
+            [ "$(printf '%s\n2.31\n' "$v" | sort -V | tail -1)" = 2.31 ]
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lablink-dist
+          path: dist/
+
+  cleanroom:
+    # Fresh users install the .deb and the tarball on clean Ubuntu containers
+    # with systemd: init with a site, discover, adopt, trust, copy-id,
+    # exec/ssh, doctor, GUI (wizard and full GUI-only workflow on Xvfb),
+    # export/import, support bundle, two sites (AWAY, auto-detection, manual
+    # override, ambiguous names, scan restriction), security stop, package
+    # removal, tarball install/uninstall. No lab hardware.
+    runs-on: ubuntu-24.04
+    needs: [release]
+    strategy:
+      fail-fast: false
+      matrix:
+        base: ["ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: lablink-dist
+          path: dist/
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: BASE=${{ matrix.base }} scripts/cleanroom.sh "$RUNNER_TEMP/cleanroom"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanroom-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/cleanroom/
+
+  aarch64-check:
+    # Keep the CLI and daemon portable to Jetson-class aarch64 Linux (compile only).
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p lablink-daemon -p lablink-cli

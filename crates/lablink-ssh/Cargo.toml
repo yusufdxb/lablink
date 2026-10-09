@@ -1,0 +1,18 @@
+[package]
+name = "lablink-ssh"
+description = "LabLink: thin, auditable wrapper around the system OpenSSH client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lablink-core.workspace = true
+sha2.workspace = true
+base64.workspace = true
+libc.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

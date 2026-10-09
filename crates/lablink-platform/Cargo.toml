@@ -1,0 +1,11 @@
+[package]
+name = "lablink-platform"
+description = "LabLink: platform-specific network signals (default gateways, Wi-Fi SSID, ARP table) for site detection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc.workspace = true

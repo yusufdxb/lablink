@@ -1,0 +1,50 @@
+digraph lablink {
+  graph [rankdir=LR, fontname="Helvetica", fontsize=11, bgcolor="white", pad=0.3, nodesep=0.35, ranksep=0.6];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10, color="#3b5b8c", fillcolor="#eef3fb"];
+  edge  [fontname="Helvetica", fontsize=9, color="#555555"];
+
+  subgraph cluster_clients {
+    label="Clients (separate processes, no network logic)"; style="rounded,dashed"; color="#888888";
+    cli [label="lablink CLI\n(no async runtime)"];
+    gui [label="lablink-gui\n(egui / eframe)"];
+    agent [label="Claude Code /\nscripts\n(lablink ... --json)", fillcolor="#f6f6f6"];
+  }
+
+  subgraph cluster_daemon {
+    label="lablinkd (one process, Tokio current-thread runtime)"; style="rounded"; color="#3b5b8c";
+    ipc [label="IPC server\nUnix socket 0600\nSO_PEERCRED uid check"];
+    reg [label="Registry\nidentity + hysteresis\nhistory (transitions)", fillcolor="#dfe9f8"];
+    mon [label="Device monitors\n1 task per device\ntimer or event wake"];
+    disc [label="Discovery coordinator\nstaged, bounded"];
+    nl [label="rtnetlink monitor\nlinks / addrs / ARP"];
+    mdns [label="mDNS\n(mdns-sd thread)"];
+    persist [label="Persistence\ndebounced batches"];
+    svc [label="Service checks\n(extension point)"];
+  }
+
+  db [label="SQLite cache\n(WAL)", shape=cylinder, fillcolor="#fff7e6", color="#b07d2b"];
+  kh [label="LabLink known_hosts\n(pinned keys, 0600)", shape=note, fillcolor="#fff7e6", color="#b07d2b"];
+  ssh [label="System OpenSSH\nssh / ssh-keyscan / ssh-keygen", fillcolor="#eaf6ea", color="#3c7a3c"];
+  lan [label="Allowlisted lab networks\n(ICMP, TCP/22, ARP)", shape=box3d, fillcolor="#eaf6ea", color="#3c7a3c"];
+  kernel [label="Linux kernel\nnetlink", shape=box3d, fillcolor="#eaf6ea", color="#3c7a3c"];
+
+  cli -> ipc [label="JSON lines"];
+  gui -> ipc;
+  agent -> cli;
+  cli -> ssh [label="ssh / exec\n(resolved target)", style=dashed];
+  gui -> ssh [label="terminal / run", style=dashed];
+  ipc -> reg;
+  mon -> reg [dir=both];
+  disc -> reg [dir=both];
+  nl -> reg [label="neighbor sightings"];
+  mdns -> reg [label="sightings"];
+  reg -> persist;
+  persist -> db;
+  persist -> kh;
+  mon -> lan;
+  disc -> lan;
+  mon -> ssh [label="keyscan / login check"];
+  svc -> ssh;
+  mon -> svc;
+  kernel -> nl;
+}

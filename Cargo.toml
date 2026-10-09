@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lablink-core",
+    "crates/lablink-ssh",
+    "crates/lablink-platform",
+    "crates/lablink-discovery",
+    "crates/lablink-doctor",
+    "crates/lablink-setup",
+    "crates/lablink-daemon",
+    "crates/lablink-cli",
+    "crates/lablink-gui",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+lablink-core = { path = "crates/lablink-core" }
+lablink-ssh = { path = "crates/lablink-ssh" }
+lablink-discovery = { path = "crates/lablink-discovery" }
+lablink-platform = { path = "crates/lablink-platform" }
+lablink-doctor = { path = "crates/lablink-doctor" }
+lablink-setup = { path = "crates/lablink-setup" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+tokio = { version = "1.40", default-features = false }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi", "std"] }
+clap = { version = "4.5", features = ["derive"] }
+ipnet = { version = "2.9", features = ["serde"] }
+libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }
+sha2 = "0.10"
+base64 = "0.22"
+rusqlite = { version = "0.40", features = ["bundled"] }
+mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

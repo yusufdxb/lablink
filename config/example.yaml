@@ -1,0 +1,107 @@
+# LabLink configuration example. Writing this file by hand is optional:
+# `lablink init`, `lablink site add` and the app write a working file for you.
+#
+# Copy to ~/.config/lablink/config.yaml and validate it with:
+#   lablink check-config ~/.config/lablink/config.yaml
+# No credentials belong here: LabLink uses your SSH keys, ssh-agent and
+# ~/.ssh/config, and never stores passwords.
+
+daemon:
+  check_interval_s: 5          # health checks of reachable devices
+  offline_backoff_max_s: 30    # back-off ceiling for unreachable devices
+  degraded_after: 2            # consecutive failures before DEGRADED
+  offline_after: 4             # consecutive failures before OFFLINE (RED)
+  recover_after: 2             # consecutive successes to leave OFFLINE
+  port_check_interval_s: 30    # TCP/22 probe rate while healthy (ICMP in between)
+  scan_interval_s: 120         # background scan of the active site's networks (0 = off)
+  max_scan_hosts: 1024         # per-scan limit (/22); hard ceiling 4096
+  history_retention: 10000     # state transitions kept in the local cache
+  mdns: true
+
+# A site is a place you work at. LabLink detects which one you are at
+# (`lablink site`), checks only that site's devices, and never reports the
+# devices of a site you are not at (AWAY) as failed. Device names only need
+# to be unique within a site; `site-alpha/jetson-a` always names one device.
+sites:
+  - id: site-alpha             # used in site/device references: [a-z0-9-]
+    name: Site Alpha
+    # Only these networks are ever actively scanned, only while this
+    # computer is attached to them, and only while you are at this site.
+    networks:
+      - name: lab
+        cidr: 10.42.0.0/24     # lab LAN or Wi-Fi
+        active_scan: true
+        # Detection hints, recorded by `lablink init` / `site add` / the app
+        # for attached networks. They identify the place; they grant nothing.
+        interface: wlan0
+        gateway: 10.42.0.1
+        gateway_mac: "02:00:5e:00:42:01"   # tells this lab apart from another
+                                           # place that uses the same subnet
+        ssid: Example Lab WiFi             # a hint only
+      - name: robot_net
+        cidr: 192.168.50.0/24  # a robot's internal network (cable to its switch)
+        active_scan: true
+      - name: building
+        cidr: 10.20.0.0/16     # large network: passive only (scans are limited to /22)
+
+    devices:
+      - name: jetson-a             # `lablink ssh jetson-a`
+        label: Jetson A
+        profile: jetson            # picks the doctor checks: disk, Jetson GPU, temperature
+        usernames: [ops]           # tried in order by the login check
+        hostnames: [jetson-a-host, jetson-a-host.local]
+        expected_networks: [robot_net, lab]
+        # capabilities: [ros2]     # extra capabilities beyond the profile
+        # ssh_host: <alias>        # optional ~/.ssh/config Host block to inherit; it must
+        #                          # allow public-key auth for unattended checks
+        # host_key_fingerprints: ["SHA256:..."]   # optional pin; otherwise trust it
+        #                                         # with `lablink trust jetson-a`
+        # services:                               # optional checks (extension point)
+        #   - name: ros2
+        #     command: "timeout 5 bash -lc 'ros2 node list' | grep -q ."
+
+      - name: robot-a              # a robot base without SSH, reached through the Jetson
+        profile: network_only
+        ssh: false
+        via: jetson-a
+        expected_ips: [192.168.50.161]
+
+      - name: gpu-workstation
+        profile: gpu_workstation   # disk, NVIDIA GPU, temperature
+        usernames: [lab]
+        hostnames: [gpu-ws, gpu-ws.local]
+
+    # Read-only health checks for `lablink doctor`, keyed by device name
+    # (adopted devices work too). They replace the profile's defaults.
+    # Each entry is a catalog name or a one-key map; there are no user
+    # commands. Every check only reads state over one batch SSH session.
+    # checks:
+    #   jetson-a:
+    #     - disk                                  # path /, warn 85 %, fail 95 %
+    #     - jetson_gpu
+    #     - thermal                               # warn 85 C, fail 95 C
+    #     - ros2: { distro: humble }
+    #     - dds: { interface: eth1, config: /home/ops/cyclonedds.xml }
+    #     - reach: { target: robot-a, label: "robot link" }   # ping from the Jetson
+    #   robot-a:
+    #     - reach                                 # ssh: false + via: runs on its gateway
+    #   gpu-workstation:
+    #     - disk: { path: /, warn_pct: 80 }
+    #     - nvidia_gpu: { expect: "RTX" }
+    #     - ros2: { distro: jazzy }
+
+  - id: site-beta
+    name: Site Beta
+    # auto_detect: false         # only use this site when chosen by hand
+    networks:
+      - name: club
+        cidr: 10.20.30.0/24
+        active_scan: true
+    devices:
+      - name: jetson               # may share a name with a device of another site
+        usernames: [ops]
+        expected_ips: [10.20.30.31]
+
+# Client preferences (GUI). The daemon ignores this section.
+# preferences:
+#   terminal: gnome-terminal

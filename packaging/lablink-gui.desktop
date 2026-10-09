@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LabLink
+GenericName=Lab Device Manager
+Comment=Find lab machines and robots, verify their identity, and SSH to them by name
+Exec=lablink-gui
+Icon=lablink
+Terminal=false
+Categories=Network;Utility;
+Keywords=ssh;robot;lab;jetson;network;
+StartupWMClass=lablink-gui

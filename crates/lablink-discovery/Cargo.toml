@@ -1,0 +1,22 @@
+[package]
+name = "lablink-discovery"
+description = "LabLink: passive and bounded active host discovery on Linux (rtnetlink, ICMP, TCP, mDNS)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lablink-core.workspace = true
+lablink-platform.workspace = true
+libc.workspace = true
+socket2.workspace = true
+ipnet.workspace = true
+tokio = { workspace = true, features = ["net", "time", "rt", "sync", "macros"] }
+tokio-util.workspace = true
+tracing.workspace = true
+mdns-sd = { workspace = true, features = ["async"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "time", "rt", "sync", "macros", "rt-multi-thread"] }

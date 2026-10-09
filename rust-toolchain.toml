@@ -1,0 +1,6 @@
+# Exact compiler for development, CI and release builds (reproducible
+# artifacts). The minimum supported Rust is `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

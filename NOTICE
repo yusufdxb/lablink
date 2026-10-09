@@ -1,0 +1,8 @@
+LabLink
+Copyright 2026 The LabLink Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The binaries include third-party components (Rust crates and the fonts
+bundled by the egui GUI toolkit) under their own licenses, listed with their
+license texts in THIRD_PARTY_LICENSES.md.
