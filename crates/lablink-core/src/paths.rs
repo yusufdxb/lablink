@@ -78,9 +78,14 @@ const PRIVATE_GROUP_TTL: std::time::Duration = std::time::Duration::from_secs(60
 
 /// This user's private group, the group a umask of 002 is meant for, if it
 /// has one: the primary group from the password database, named like the
-/// user (`pam_umask` usergroups), with no other members listed and no other
-/// account in /etc/passwd having it as primary group. Looked up at most once
-/// per [`PRIVATE_GROUP_TTL`]; any lookup failure means no private group.
+/// user (`pam_umask` usergroups), with no other members listed, no other
+/// account in /etc/passwd having it as primary group and no other line of
+/// /etc/group using its number. Only when every account and group is local:
+/// /etc/nsswitch.conf must list nothing but `files` and `systemd` for
+/// `passwd` and `group`, because accounts of a directory service (LDAP,
+/// SSSD, NIS, winbind, extrausers) cannot be listed, so one of them could
+/// share the group unseen. Looked up at most once per [`PRIVATE_GROUP_TTL`];
+/// any lookup failure means no private group.
 fn private_group() -> Option<u32> {
     use std::sync::Mutex;
     use std::time::Instant;
@@ -131,13 +136,79 @@ fn lookup_private_group() -> Option<u32> {
         i += 1;
     }
     // Another account whose primary group this is can write the files too,
-    // without being listed as a member. Only the local file is searched:
-    // enumerating a directory server is slow and often disabled.
+    // without being listed as a member, and so can the members of another
+    // group with the same number. Only local files can be searched (a
+    // directory server often refuses to list its accounts), so a private
+    // group exists only where every account and group comes from them.
+    let nsswitch = std::fs::read("/etc/nsswitch.conf").ok()?;
+    if !accounts_are_local(&nsswitch, b"passwd") || !accounts_are_local(&nsswitch, b"group") {
+        return None;
+    }
     let passwd = std::fs::read("/etc/passwd").ok()?;
     if others_with_primary_group(&passwd, user, gid) {
         return None;
     }
+    let group = std::fs::read("/etc/group").ok()?;
+    if other_groups_with_gid(&group, user, gid) {
+        return None;
+    }
     Some(gid)
+}
+
+/// Whether /etc/nsswitch.conf (`conf`) takes `database` (`passwd`, `group`)
+/// only from sources whose accounts this host lists itself: `files`
+/// (/etc/passwd, /etc/group) and `systemd` (accounts root defines through
+/// systemd). A missing or repeated line, `compat` (NIS `+` entries) and any
+/// other service (`ldap`, `sss`, `nis`, `winbind`, `extrausers`, ...) are
+/// not local.
+fn accounts_are_local(conf: &[u8], database: &[u8]) -> bool {
+    let mut lines = conf.split(|&b| b == b'\n').filter_map(|line| {
+        let line = line.split(|&b| b == b'#').next().unwrap_or_default();
+        let colon = line.iter().position(|&b| b == b':')?;
+        (line[..colon].trim_ascii() == database).then(|| &line[colon + 1..])
+    });
+    let (Some(sources), None) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    // Actions such as `[NOTFOUND=return]` sit between brackets.
+    let mut depth = 0usize;
+    let mut words = Vec::new();
+    let mut word = Vec::new();
+    for &b in sources {
+        match b {
+            b'[' => depth += 1,
+            b']' => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            b if b.is_ascii_whitespace() => words.push(std::mem::take(&mut word)),
+            b => word.push(b),
+        }
+    }
+    words.push(word);
+    words.retain(|w| !w.is_empty());
+    !words.is_empty()
+        && words
+            .iter()
+            .all(|w| w.as_slice() == b"files" || w.as_slice() == b"systemd")
+}
+
+/// Whether a line of `group` (the /etc/group format) with number `gid` is
+/// named other than `user` or lists a member other than `user`.
+fn other_groups_with_gid(group: &[u8], user: &[u8], gid: u32) -> bool {
+    group.split(|&b| b == b'\n').any(|line| {
+        let mut f = line.split(|&b| b == b':');
+        let (Some(name), Some(_), Some(g), members) = (f.next(), f.next(), f.next(), f.next())
+        else {
+            return false;
+        };
+        if std::str::from_utf8(g).ok().and_then(|g| g.parse().ok()) != Some(gid) {
+            return false;
+        }
+        name != user
+            || members
+                .unwrap_or_default()
+                .split(|&b| b == b',')
+                .any(|m| !m.is_empty() && m != user)
+    })
 }
 
 /// Whether a line of `passwd` (the /etc/passwd format) other than `user`'s
@@ -781,5 +852,40 @@ mod tests {
         assert!(others_with_primary_group(passwd, b"alice", 1001));
         assert!(others_with_primary_group(passwd, b"carol", 1000));
         assert!(!others_with_primary_group(b"", b"alice", 1000));
+    }
+
+    #[test]
+    fn a_group_a_directory_service_could_share_is_not_private() {
+        let local = b"# comment\npasswd:         files systemd\ngroup:          files [SUCCESS=merge] systemd\nhosts: files dns\n";
+        assert!(accounts_are_local(local, b"passwd"));
+        assert!(accounts_are_local(local, b"group"));
+        for conf in [
+            &b"passwd: files ldap\ngroup: files ldap\n"[..],
+            b"passwd: files sss systemd\ngroup: files sss systemd\n",
+            b"passwd: compat\ngroup: compat\n",
+            b"passwd: files extrausers\ngroup: files extrausers\n",
+            b"passwd: files [NOTFOUND=continue] nis\ngroup: nis files\n",
+            b"passwd: files\npasswd: ldap\ngroup: files\n",
+            b"group: files\n",
+            b"passwd:\ngroup: files\n",
+            b"",
+        ] {
+            assert!(
+                !accounts_are_local(conf, b"passwd") || !accounts_are_local(conf, b"group"),
+                "{}",
+                String::from_utf8_lossy(conf)
+            );
+        }
+        let group = b"root:x:0:\nalice:x:1000:\nlab:x:3000:alice,mallory\n";
+        assert!(!other_groups_with_gid(group, b"alice", 1000));
+        assert!(!other_groups_with_gid(b"alice:x:1000:alice\n", b"alice", 1000));
+        assert!(other_groups_with_gid(b"alice:x:1000:mallory\n", b"alice", 1000));
+        // `groupadd -o`: a second group with the same number.
+        assert!(other_groups_with_gid(
+            b"alice:x:1000:\nshadow2:x:1000:mallory\n",
+            b"alice",
+            1000
+        ));
+        assert!(other_groups_with_gid(b"alice:x:1000:\nempty:x:1000:\n", b"alice", 1000));
     }
 }
