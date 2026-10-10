@@ -878,14 +878,26 @@ mod tests {
         }
         let group = b"root:x:0:\nalice:x:1000:\nlab:x:3000:alice,mallory\n";
         assert!(!other_groups_with_gid(group, b"alice", 1000));
-        assert!(!other_groups_with_gid(b"alice:x:1000:alice\n", b"alice", 1000));
-        assert!(other_groups_with_gid(b"alice:x:1000:mallory\n", b"alice", 1000));
+        assert!(!other_groups_with_gid(
+            b"alice:x:1000:alice\n",
+            b"alice",
+            1000
+        ));
+        assert!(other_groups_with_gid(
+            b"alice:x:1000:mallory\n",
+            b"alice",
+            1000
+        ));
         // `groupadd -o`: a second group with the same number.
         assert!(other_groups_with_gid(
             b"alice:x:1000:\nshadow2:x:1000:mallory\n",
             b"alice",
             1000
         ));
-        assert!(other_groups_with_gid(b"alice:x:1000:\nempty:x:1000:\n", b"alice", 1000));
+        assert!(other_groups_with_gid(
+            b"alice:x:1000:\nempty:x:1000:\n",
+            b"alice",
+            1000
+        ));
     }
 }

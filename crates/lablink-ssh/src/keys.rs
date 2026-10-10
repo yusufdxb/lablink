@@ -250,13 +250,19 @@ mod tests {
         write_known_hosts(&kh, std::slice::from_ref(&e)).unwrap();
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
         assert!(std::fs::read_to_string(&kh).unwrap().contains("lablink.a"));
-        assert!(!std::fs::symlink_metadata(&kh).unwrap().file_type().is_symlink());
+        assert!(!std::fs::symlink_metadata(&kh)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         // A directory others can write is refused before anything is written.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
         let err = write_known_hosts(&kh, &[]).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
         assert!(std::fs::read_to_string(&kh).unwrap().contains("lablink.a"));
-        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         assert_eq!(left.len(), 2, "{left:?}");
     }
 }
