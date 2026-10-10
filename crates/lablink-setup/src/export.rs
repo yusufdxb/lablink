@@ -172,6 +172,8 @@ pub fn parse(text: &str) -> Result<ExportDoc, String> {
             "the file is larger than {MAX_CONFIG_BYTES} bytes; not a LabLink export"
         ));
     }
+    lablink_core::config::check_yaml_nesting(text)
+        .map_err(|e| format!("not a LabLink export: {e}"))?;
     let doc: ExportDoc =
         serde_yaml_ng::from_str(text).map_err(|e| format!("not a LabLink export: {e}"))?;
     if doc.lablink_export != FORMAT {

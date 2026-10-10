@@ -472,6 +472,70 @@ fn ssh_option_problem(k: &str, v: &str) -> Option<String> {
 /// Largest configuration file LabLink reads (import files too).
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+/// Deepest flow-collection (`[...]`, `{...}`) nesting a configuration may
+/// use. Real configs need 2; the YAML parser's cost grows faster than
+/// linearly with depth, so a 64 KB file of nested brackets would otherwise
+/// cost seconds of CPU and a 400 KB one minutes.
+pub const MAX_YAML_FLOW_DEPTH: usize = 64;
+
+/// Refuse YAML whose flow collections nest deeper than
+/// [`MAX_YAML_FLOW_DEPTH`], before handing it to the parser. Quoted scalars
+/// and comments are skipped; a quote only opens a scalar at the start of a
+/// token, as in YAML, so an apostrophe inside a plain word cannot hide
+/// brackets from the count.
+pub fn check_yaml_nesting(text: &str) -> Result<(), String> {
+    let b = text.as_bytes();
+    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
+    let token_start = |i: usize| {
+        i == 0
+            || matches!(
+                b[i - 1],
+                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b'{' | b',' | b':' | b'-'
+            )
+    };
+    while i < b.len() {
+        match b[i] {
+            b'#' if token_start(i) => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'"' if token_start(i) => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'\'' if token_start(i) => {
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\'' {
+                        if b.get(i + 1) == Some(&b'\'') {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            b'[' | b'{' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    if max > MAX_YAML_FLOW_DEPTH {
+        return Err(format!(
+            "brackets nest {max} levels deep; LabLink configurations allow at most {MAX_YAML_FLOW_DEPTH}"
+        ));
+    }
+    Ok(())
+}
+
 impl Config {
     /// Load and validate a configuration file.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
@@ -498,6 +562,10 @@ impl Config {
                 message: format!("text is larger than {MAX_CONFIG_BYTES} bytes"),
             });
         }
+        check_yaml_nesting(text).map_err(|message| ConfigError::Parse {
+            path: origin.to_string(),
+            message,
+        })?;
         let cfg: Config = if text.trim().is_empty() {
             Config::default()
         } else {
@@ -1617,6 +1685,31 @@ mod site_tests {
         assert!(e[0].contains("ssh.options"), "{e:?}");
         let e = errs("ssh:\n  options:\n    ServerAliveInterval: \"10\\nProxyCommand x\"\n");
         assert!(e[0].contains("ssh.options"), "{e:?}");
+    }
+
+    #[test]
+    fn deeply_nested_yaml_is_refused_quickly() {
+        let n = 32_000;
+        for deep in [
+            format!("sites: {}{}\n", "[".repeat(n), "]".repeat(n)),
+            format!("sites: {}1{}\n", "{a: ".repeat(n), "}".repeat(n)),
+            // An apostrophe inside a word does not open a quoted scalar.
+            format!("sites: it's{}\n", "[".repeat(n)),
+        ] {
+            let t0 = std::time::Instant::now();
+            let e = errs(&deep);
+            assert!(e[0].contains("nest"), "{e:?}");
+            assert!(t0.elapsed() < std::time::Duration::from_millis(200));
+        }
+        // Brackets in quoted scalars and comments are text, not nesting.
+        let quoted = format!(
+            "# {}\nsites:\n  - id: a\n    name: \"{}\"\n    devices:\n      - name: d\n        notes: '{}'\n",
+            "[".repeat(100),
+            "[".repeat(60),
+            "{".repeat(100)
+        );
+        assert!(errs(&quoted).is_empty(), "{:?}", errs(&quoted));
+        assert!(check_yaml_nesting(&format!("a: {}{}", "[".repeat(64), "]".repeat(64))).is_ok());
     }
 
     #[test]
