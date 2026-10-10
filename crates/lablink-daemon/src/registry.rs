@@ -1778,7 +1778,6 @@ impl Registry {
     /// Apply a host-key possession proof (see [`Device::key_proof_due`]).
     pub fn apply_key_proof(&mut self, name: &str, ip: IpAddr, proof: &KeyProof, now: u64) {
         let mac = self.neighbor_mac(ip);
-        let engaged = self.engaged(name);
         let Some(d) = self.devices.get_mut(name) else {
             return;
         };
@@ -1786,13 +1785,6 @@ impl Registry {
             return;
         }
         d.key_proof_due = None;
-        if !engaged {
-            // The site went AWAY while the proof ran (suspend, a move): the
-            // address may be another site's machine now, so the answer says
-            // nothing about this device. It is checked again once its site
-            // is engaged.
-            return;
-        }
         d.last_identity_check_ms = now;
         let pins = d
             .pinned_fingerprints()
@@ -4446,25 +4438,6 @@ mod security_tests {
             r.device("default/dev").unwrap().identity,
             IdentityState::Verified
         );
-    }
-
-    #[test]
-    fn a_proof_that_finishes_after_its_site_went_away_is_dropped() {
-        // RR-R3: a lab proof started before a suspend reached the club's
-        // machine at the same address and left a false MISMATCH.
-        let mut r = reg("sites:\n  - id: lab\n    name: Lab\n    networks:\n      - name: lan\n        cidr: 10.9.0.0/24\n    devices:\n      - name: robot\n  - id: club\n    name: Club\n    networks:\n      - name: lan\n        cidr: 10.9.0.0/24\n");
-        let ip: IpAddr = "10.9.0.22".parse().unwrap();
-        r.set_mode(Some("lab"), 1).unwrap();
-        r.refresh_sites(2);
-        let d = r.device_mut("lab/robot").unwrap();
-        d.rec.current_ip = Some(ip);
-        d.key_proof_due = Some(ip);
-        r.set_mode(Some("club"), 3).unwrap();
-        r.refresh_sites(4);
-        r.apply_key_proof("lab/robot", ip, &KeyProof::Refused("another key".into()), 5);
-        let d = r.device("lab/robot").unwrap();
-        assert_ne!(d.identity, IdentityState::Mismatch);
-        assert_eq!(d.key_proof_due, None);
     }
 
     #[test]

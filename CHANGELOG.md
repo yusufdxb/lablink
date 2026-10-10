@@ -54,8 +54,6 @@ All notable changes are listed here. The format follows
   socket private, so its own default state directory is not refused later.
 - A device last seen at an address now held by another site's machine no
   longer stops that machine from being scanned and identified.
-- A possession proof that finishes after its site went AWAY (suspend, a
-  move) is dropped instead of raising a false identity mismatch.
 - INSTALL.md says that a tarball install next to the `.deb` uses the
   packaged daemon unit, and how to switch back after removing the package.
 
