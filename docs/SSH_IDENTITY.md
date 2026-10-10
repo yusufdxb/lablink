@@ -49,7 +49,11 @@ Other ways a key gets pinned, all explicit:
   hostname, `ssh_host` or name, or under its address when that address is a
   configured `expected_ips` entry or the address where you adopted it (within
   10 minutes). Names and addresses announced by the network (mDNS, DNS,
-  learned hostnames, MAC matches) never select a known_hosts entry.
+  learned hostnames, MAC matches) never select a known_hosts entry. With
+  more than one site, `~/.ssh/known_hosts` is not consulted at all for an
+  address that another site's networks also contain (or that is outside this
+  site's networks): a bare address or name there may belong to the other
+  site's machine. Pin those devices with `lablink trust --fingerprint`.
 
 There is no automatic trust on first use. `lablink ssh` / `lablink exec` to a
 device without a pin are refused (exit 7) unless you pass `--unpinned`, which

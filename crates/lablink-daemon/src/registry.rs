@@ -1571,6 +1571,17 @@ impl Registry {
         // address (recently). MAC and mDNS/DNS answers do not count: anyone on
         // the network can forge them and point the device at a host whose key
         // the user once accepted for an unrelated reason.
+        // With several sites, the same private address (and the same bare
+        // name) can be a different machine at each: an entry the user
+        // accepted at another site would be imported here. Only an address
+        // in a network of this device's site alone can vouch for it.
+        if let Some(other) = self.address_shared_with(&self.devices[name].site, ip) {
+            let detail = format!(
+                "host key at {ip} is not pinned; ~/.ssh/known_hosts is not consulted because {ip} may be a machine of site '{other}' too; verify it, then run `lablink trust {name} --fingerprint SHA256:...`"
+            );
+            self.set_identity(name, IdentityState::Unverified, signal, ip, detail);
+            return;
+        }
         let d = &self.devices[name];
         let recently_adopted = d
             .rec
@@ -1598,7 +1609,7 @@ impl Registry {
             .collect();
         if trusted.is_empty() {
             let detail = format!(
-                "host key at {ip} is not pinned and not in ~/.ssh/known_hosts ({}); run `lablink trust {name}` after verifying it",
+                "host key at {ip} is not pinned and not in ~/.ssh/known_hosts ({}); verify it, then run `lablink trust {name} --fingerprint SHA256:...`",
                 keys.first().map(|k| k.fingerprint.as_str()).unwrap_or("?")
             );
             self.set_identity(name, IdentityState::Unverified, signal, ip, detail);
@@ -1626,6 +1637,29 @@ impl Registry {
         self.devices.get_mut(name).unwrap().key_proof_due = Some(ip);
         self.mark(name);
         self.urgent = true;
+    }
+
+    /// Another site (by id) where `ip` could also be a machine: any other
+    /// site when `ip` is not in one of `site`'s networks, else one whose
+    /// networks contain `ip` too. `None` with a single site.
+    fn address_shared_with(&self, site: &str, ip: IpAddr) -> Option<String> {
+        let contains = |s: &lablink_core::config::SiteConfig| {
+            s.networks
+                .iter()
+                .any(|n| lablink_core::net::parse_cidr(&n.cidr).is_ok_and(|c| c.contains(&ip)))
+        };
+        let own = self
+            .cfg
+            .sites
+            .iter()
+            .find(|s| s.id.eq_ignore_ascii_case(site))
+            .is_some_and(contains);
+        self.cfg
+            .sites
+            .iter()
+            .filter(|s| !s.id.eq_ignore_ascii_case(site))
+            .find(|s| !own || contains(s))
+            .map(|s| s.id.clone())
     }
 
     /// The target for a pending host-key possession proof (same addressing

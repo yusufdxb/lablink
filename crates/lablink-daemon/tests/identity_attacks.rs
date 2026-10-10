@@ -387,3 +387,58 @@ fn name_answers_cannot_point_outside_the_lab_or_inject_names() {
         .iter()
         .all(|h| h.hostname.as_deref().is_none_or(|n| !n.contains('\u{1b}'))));
 }
+
+const TWO_SITES: &str = "sites:\n  - id: lab\n    name: Lab\n    networks:\n      - name: lan\n        cidr: 192.168.50.0/24\n    devices:\n      - name: robot\n        expected_ips: [192.168.50.10]\n  - id: club\n    name: Club\n    networks:\n      - name: lan\n        cidr: 192.168.50.0/24\n    devices:\n      - name: laptop\n";
+
+/// Scans the expected address of lab/robot and offers `user` as the user's
+/// ~/.ssh/known_hosts matches; returns the registry afterwards.
+fn import_at_expected_ip(yaml: &str, key: &HostKey, user: UserKnown) -> Registry {
+    let dir = tempfile::tempdir().unwrap();
+    let now = 5_000_000;
+    let cfg = Config::parse(yaml, "test").unwrap();
+    let mut r = Registry::new(cfg, dir.path().join("known_hosts"));
+    let at = "192.168.50.10";
+    r.apply_probe("lab/robot", &up(at, PortState::Open), now);
+    r.apply_keys("lab/robot", ip(at), Ok(vec![key.clone()]), &user, now + 10);
+    r
+}
+
+/// Two sites share a subnet. The user once logged in to the other site's
+/// machine at the same bare address (or under the same bare name), so
+/// ~/.ssh/known_hosts holds its key. That entry must not pin this site's
+/// device: LabLink would then verify, and send the user's key and commands
+/// to, the wrong machine.
+#[test]
+fn known_hosts_of_another_site_at_a_shared_address_is_not_imported() {
+    let club = fake_key("club-robot-at-the-same-address");
+    for user in [
+        UserKnown {
+            by_name: vec![],
+            by_ip: vec![club.clone()],
+        },
+        UserKnown {
+            by_name: vec![club.clone()],
+            by_ip: vec![],
+        },
+    ] {
+        let r = import_at_expected_ip(TWO_SITES, &club, user);
+        assert!(r.pinned_view("lab/robot").is_empty());
+        assert!(!has_event(&r, "key_pinned"));
+        assert_eq!(
+            r.device("lab/robot").unwrap().identity,
+            IdentityState::Unverified
+        );
+    }
+    // One site: the address can only be this site's machine, so the import
+    // the user relies on still happens.
+    let one = TWO_SITES.split("  - id: club").next().unwrap();
+    let r = import_at_expected_ip(
+        one,
+        &club,
+        UserKnown {
+            by_name: vec![],
+            by_ip: vec![club.clone()],
+        },
+    );
+    assert_eq!(r.pinned_view("lab/robot").len(), 1);
+}
