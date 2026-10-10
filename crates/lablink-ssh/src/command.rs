@@ -99,13 +99,15 @@ fn supports_option(binary: &str, setting: &str) -> bool {
     }
     // -F /dev/null: no config file is read, so a `Match` block that only
     // breaks this probe cannot make LabLink leave the option out.
-    let v = std::process::Command::new(binary)
-        .args(option_probe_args(setting))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    let args: Vec<String> = option_probe_args(setting).map(String::from).into();
+    let v = crate::run::run_captured(
+        binary,
+        &args,
+        std::time::Duration::from_secs(5),
+        crate::run::OutputMode::Capture,
+        true,
+    )
+    .is_ok_and(|o| o.exit_code == Some(0));
     cache.lock().unwrap().insert(key, v);
     v
 }

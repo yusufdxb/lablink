@@ -480,7 +480,8 @@ pub async fn flush(state: &State) {
 pub async fn ensure_known_hosts(state: &State) {
     let entries = {
         let mut reg = state.reg();
-        if !reg.known_hosts_dirty {
+        // Also rewrite a file that was deleted behind LabLink's back.
+        if !reg.known_hosts_dirty && state.paths.known_hosts.exists() {
             return;
         }
         reg.known_hosts_dirty = false;

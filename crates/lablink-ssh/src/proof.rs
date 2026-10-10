@@ -22,6 +22,8 @@ use crate::command::{build_args, Mode, Target};
 use crate::run::{classify_unproven, reader, KeyProof};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -117,8 +119,10 @@ impl ClientWatch {
 enum Transport {
     Tcp(TcpStream),
     /// The gateway hop (`ssh -W ip:port gateway`), run by LabLink instead of
-    /// by ssh.
-    Hop(Child),
+    /// by ssh, on one end of a socket pair: shutting down LabLink's end ends
+    /// both relay threads even if something the hop started keeps the other
+    /// end open.
+    Hop(Child, UnixStream),
 }
 
 impl Transport {
@@ -143,17 +147,23 @@ impl Transport {
                     })
             }
             Some(p) => {
-                let cmd = expand_proxy_tokens(p, &t.ip, t.port)?;
+                let ip: IpAddr =
+                    t.ip.parse()
+                        .map_err(|_| format!("not an IP address: {}", t.ip))?;
+                let cmd = expand_proxy_tokens(p, &ip.to_string(), t.port)?;
+                let fail = |e: std::io::Error| format!("cannot start the gateway hop: {e}");
+                let (ours, theirs) = UnixStream::pair().map_err(fail)?;
+                let theirs_in = OwnedFd::from(theirs.try_clone().map_err(fail)?);
                 Command::new("/bin/sh")
                     .arg("-c")
                     .arg(format!("exec {cmd}"))
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
+                    .stdin(Stdio::from(theirs_in))
+                    .stdout(Stdio::from(OwnedFd::from(theirs)))
                     .stderr(Stdio::null())
                     .process_group(0)
                     .spawn()
-                    .map(Transport::Hop)
-                    .map_err(|e| format!("cannot start the gateway hop: {e}"))
+                    .map(|c| Transport::Hop(c, ours))
+                    .map_err(fail)
             }
         }
     }
@@ -162,10 +172,7 @@ impl Transport {
     fn split(&mut self) -> std::io::Result<(Box<dyn Write + Send>, Box<dyn Read + Send>)> {
         match self {
             Transport::Tcp(s) => Ok((Box::new(s.try_clone()?), Box::new(s.try_clone()?))),
-            Transport::Hop(c) => match (c.stdin.take(), c.stdout.take()) {
-                (Some(i), Some(o)) => Ok((Box::new(i), Box::new(o))),
-                _ => Err(std::io::Error::other("gateway hop has no pipes")),
-            },
+            Transport::Hop(_, s) => Ok((Box::new(s.try_clone()?), Box::new(s.try_clone()?))),
         }
     }
 
@@ -174,7 +181,8 @@ impl Transport {
             Transport::Tcp(s) => {
                 let _ = s.shutdown(Shutdown::Both);
             }
-            Transport::Hop(c) => {
+            Transport::Hop(c, s) => {
+                let _ = s.shutdown(Shutdown::Both);
                 kill_group(c.id());
                 let _ = c.wait();
             }
@@ -341,8 +349,10 @@ pub fn prove_host_key(t: &Target, timeout: Duration) -> KeyProof {
     let err = reader(ssh.stderr.take());
 
     let mut timed_out = false;
+    let mut reaped = false;
     while !newkeys.load(Ordering::SeqCst) && !malformed.load(Ordering::SeqCst) {
         if matches!(ssh.try_wait(), Ok(Some(_)) | Err(_)) {
+            reaped = true;
             break;
         }
         if Instant::now() >= deadline {
@@ -351,8 +361,12 @@ pub fn prove_host_key(t: &Target, timeout: Duration) -> KeyProof {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    kill_group(ssh.id());
-    let _ = ssh.wait();
+    // Never signal a process group whose leader was already reaped: its id
+    // may belong to someone else by now.
+    if !reaped {
+        kill_group(ssh.id());
+        let _ = ssh.wait();
+    }
     transport.close();
     // ssh may have sent NEWKEYS just before it exited: let the watcher
     // finish reading what it wrote.
