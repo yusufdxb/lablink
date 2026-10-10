@@ -77,8 +77,10 @@ Text the server can send must never count as that proof: before the key
 exchange a server can send a disconnect reason, and OpenSSH before 9.0 prints
 it with newlines unescaped, so a fake server could print a line that looks
 like the client's own "Permission denied". The proof therefore runs at
-`LogLevel=FATAL` (OpenSSH logs disconnect reasons at ERROR level, so they are
-not printed) and is refused whenever stderr shows a disconnect or any other
+`LogLevel=FATAL` (OpenSSH logs disconnect reasons at ERROR level and
+negotiation errors at INFO level, so they are not printed), counts only when
+stderr is exactly the one line `user@<device address>: Permission denied
+(...)`, and is refused whenever stderr shows a disconnect or any other
 server-originated message.
 
 | Result of the proof | Device |

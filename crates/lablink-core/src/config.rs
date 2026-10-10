@@ -484,6 +484,12 @@ pub const MAX_YAML_FLOW_DEPTH: usize = 64;
 /// hand-written configs need a handful.
 pub const MAX_YAML_FLOW_OPENERS: usize = 4096;
 
+/// Most alias references (`*name`) a configuration may contain. Each one
+/// is a full copy of its anchor when parsed, so many references to one deep
+/// anchor cost seconds even though nothing is nested deeply. LabLink writes
+/// no anchors.
+pub const MAX_YAML_ALIASES: usize = 64;
+
 /// Refuse YAML whose flow collections nest deeper than
 /// [`MAX_YAML_FLOW_DEPTH`], before handing it to the parser. Quoted scalars
 /// and comments are skipped; a quote only opens a scalar at the start of a
@@ -497,7 +503,7 @@ pub fn check_yaml_nesting(text: &str) -> Result<(), String> {
             "the file has {openers} '[' or '{{' characters; LabLink configurations allow at most {MAX_YAML_FLOW_OPENERS} (use block style)"
         ));
     }
-    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
+    let (mut depth, mut max, mut i, mut aliases) = (0usize, 0usize, 0usize, 0usize);
     let token_start = |i: usize| {
         i == 0
             || matches!(
@@ -531,6 +537,14 @@ pub fn check_yaml_nesting(text: &str) -> Result<(), String> {
                         }
                     }
                     i += 1;
+                }
+            }
+            b'*' if token_start(i) => {
+                aliases += 1;
+                if aliases > MAX_YAML_ALIASES {
+                    return Err(format!(
+                        "more than {MAX_YAML_ALIASES} YAML aliases (*name); LabLink configurations do not need them"
+                    ));
                 }
             }
             b'[' | b'{' => {
@@ -1754,6 +1768,15 @@ mod site_tests {
         );
         assert!(errs(&quoted).is_empty(), "{:?}", errs(&quoted));
         assert!(check_yaml_nesting(&format!("a: {}{}", "[".repeat(64), "]".repeat(64))).is_ok());
+        // Many references to one deep anchor (re-review: 1 MiB cost 3.96 s).
+        let mut wide = format!("a: &a {}{}\nl:\n", "[".repeat(64), "]".repeat(64));
+        for _ in 0..5000 {
+            wide.push_str("- *a\n");
+        }
+        let t0 = std::time::Instant::now();
+        assert!(errs(&wide)[0].contains("aliases"), "{:?}", errs(&wide));
+        assert!(t0.elapsed() < std::time::Duration::from_millis(200));
+        assert!(check_yaml_nesting("a: &x 1\nb: *x\nc: 2 * 3\n").is_ok());
         // Below the opener cap, the depth lexer itself counts brackets after
         // a quote that follows '-'.
         let e = check_yaml_nesting(&format!("zz: [-', {}{}]", "[".repeat(100), "]".repeat(100)));
