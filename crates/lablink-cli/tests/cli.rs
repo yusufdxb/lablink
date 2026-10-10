@@ -615,3 +615,29 @@ fn doctor_runs_read_only_checks_through_the_exec_path() {
     assert_eq!(code(&o), exit::USAGE);
     assert_eq!(code(&lablink(None, &["doctor"])), exit::DAEMON_UNAVAILABLE);
 }
+
+/// `lablink forget` asks first (refuses without a terminal unless --yes),
+/// then clears the pin so the device must be trusted again.
+#[test]
+fn forget_needs_confirmation_and_clears_the_pin() {
+    let e = setup("  - name: fresh\n    expected_ips: [10.9.0.51]\n");
+    e.net.add(
+        "10.9.0.51",
+        FakeHost::ssh_host(vec![fake_key("fresh")], "aa:00:00:00:00:51"),
+    );
+    wait_color(&e, "fresh", "yellow");
+    let fp = fake_key("fresh").fingerprint;
+    let o = lablink(Some(&e), &["trust", "fresh", "--fingerprint", &fp]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    let o = lablink(Some(&e), &["forget", "fresh"]);
+    assert_eq!(code(&o), exit::REFUSED);
+    let pinned =
+        || json(&lablink(Some(&e), &["inspect", "fresh", "--json"]))["pinned_keys"].to_string();
+    assert!(pinned().contains(&fp));
+    let o = lablink(Some(&e), &["forget", "fresh", "--yes"]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("lablink trust"));
+    assert_eq!(pinned(), "[]");
+    let o = lablink(Some(&e), &["forget", "nosuch", "--yes"]);
+    assert_ne!(code(&o), 0);
+}

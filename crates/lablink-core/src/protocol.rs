@@ -67,6 +67,11 @@ pub enum Request {
         #[serde(default)]
         replace: bool,
     },
+    /// Forget everything LabLink learned about a device: pinned keys,
+    /// addresses, MACs and runtime settings. An adopted device is removed;
+    /// a configured one starts over as if just added. Returns
+    /// `{device, removed}`.
+    Forget { device: String },
     /// Change runtime overrides for a device.
     Set {
         device: String,

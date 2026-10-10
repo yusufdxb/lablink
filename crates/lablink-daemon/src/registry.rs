@@ -212,8 +212,14 @@ pub struct Device {
     /// the daemon started). Only proofs after the current default gateways
     /// appeared count as evidence of where the user is.
     pub proven_ms: u64,
+    /// Distinct for every device the registry starts tracking: a monitor
+    /// stops when its device is forgotten, even if one is adopted again
+    /// under the same name.
+    pub epoch: u64,
     persisted_last_seen_ms: u64,
 }
+
+static NEXT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Device {
     fn new(cfg: DeviceConfig, site: &str, configured: bool) -> Self {
@@ -262,6 +268,7 @@ impl Device {
             attributed_names: Vec::new(),
             key_proof_due: None,
             proven_ms: 0,
+            epoch: NEXT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             persisted_last_seen_ms: 0,
         }
     }
@@ -599,6 +606,7 @@ impl Registry {
         events: Vec<HistoryEvent>,
     ) -> Vec<String> {
         let mut warnings = Vec::new();
+        let mut forgotten = Vec::new();
         for (key, json) in devices {
             let mut rec: DeviceRecord = match serde_json::from_str(json) {
                 Ok(r) => r,
@@ -641,10 +649,16 @@ impl Registry {
                                 Some((id, false))
                             }
                         }
-                        _ => None,
+                        _ => {
+                            forgotten.push(key.clone());
+                            None
+                        }
                     }
                 }
-                [] => None, // removed from config: kept on disk, not tracked.
+                [] => {
+                    forgotten.push(key.clone());
+                    None
+                }
                 _ => {
                     warnings.push(format!(
                         "cache record '{key}' matches devices at several sites; it was not restored"
@@ -735,6 +749,17 @@ impl Registry {
                 e
             })
             .collect();
+        // A device (or site) removed from the config is forgotten with its
+        // pins and addresses: a device added later under the same name may
+        // be another machine, and must not inherit the old one's trust.
+        for key in forgotten {
+            self.removed_devices.insert(key.clone());
+            self.event(
+                None,
+                "device_forgotten",
+                format!("'{key}' is no longer in the config: its pinned keys and addresses were forgotten"),
+            );
+        }
         self.known_hosts_dirty = true;
         warnings
     }
@@ -2939,6 +2964,42 @@ impl Registry {
     }
 
     // ----------------------------------------------------------- overrides --
+
+    /// Forget a device's pinned keys, addresses, learned MACs and runtime
+    /// settings. An adopted device is removed; a configured device starts
+    /// over unpinned. Returns the device id and whether it was removed.
+    pub fn forget(&mut self, name: &str) -> Result<(String, bool), ApiError> {
+        let id = self.require(name)?;
+        let d = &self.devices[&id];
+        let removed = !d.configured;
+        if removed {
+            self.devices.remove(&id);
+            self.dirty_devices.remove(&id);
+            self.removed_devices.insert(id.clone());
+        } else {
+            let mut fresh = Device::new(d.cfg.clone(), &d.site, true);
+            fresh.epoch = d.epoch;
+            self.devices.insert(id.clone(), fresh);
+            self.mark(&id);
+        }
+        self.key_sightings.remove(&id);
+        self.known_hosts_dirty = true;
+        self.sites_stale = true;
+        self.urgent = true;
+        let what = if removed {
+            "removed"
+        } else {
+            "reset to its config"
+        };
+        self.event(
+            None,
+            "device_forgotten",
+            format!(
+                "'{id}' forgotten by the user ({what}): its pinned keys and addresses were deleted"
+            ),
+        );
+        Ok((id, removed))
+    }
 
     pub fn set(&mut self, name: &str, c: &DeviceChanges) -> Result<DeviceStatus, ApiError> {
         let name = self.require(name)?;

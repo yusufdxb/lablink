@@ -102,7 +102,7 @@ are not fallback triggers either: report them.
 | 4 | Unknown device or site | device commands, `--site` |
 | 5 | Device has no usable address, is offline, or belongs to an AWAY site (pass `--force` to `ssh`/`exec`/`resolve` to try anyway) | `ssh`, `exec`, `resolve`, `trust` |
 | 6 | SSH host key does not match the pinned identity (never overridable by flags) | `ssh`, `exec`, `resolve` |
-| 7 | Refused by policy: scan outside limits, trust not confirmed, device has no pinned host key (`ssh`/`exec`; `--unpinned` to let OpenSSH decide), address not identity-verified (`resolve`; `--force` prints it anyway) | `discover --scan-cidr`, `trust`, `adopt`, `ssh`, `exec`, `resolve` |
+| 7 | Refused by policy: scan outside limits, trust or forget not confirmed, device has no pinned host key (`ssh`/`exec`; `--unpinned` to let OpenSSH decide), address not identity-verified (`resolve`; `--force` prints it anyway) | `discover --scan-cidr`, `trust`, `forget`, `adopt`, `ssh`, `exec`, `resolve` |
 | 8 | Ambiguous device name: it exists at several sites; use `site/name` | device commands |
 | 10 / 11 / 12 | `status <device>` is YELLOW / RED / GRAY (GRAY includes AWAY) | `status <device>`, `doctor` |
 | 124 | `exec --timeout` expired; the remote command was killed | `exec` |

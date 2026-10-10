@@ -1626,3 +1626,156 @@ fn changed_key_seen_by_the_login_check_is_reverified_at_once() {
     assert!(e.security_stop, "{e:?}");
     d.stop().unwrap();
 }
+
+fn trust_what_it_shows(d: &TestDaemon, name: &str) {
+    let p: TrustReport = d
+        .client()
+        .call_typed(&Request::Trust {
+            device: name.into(),
+            confirm: None,
+            replace: false,
+        })
+        .unwrap();
+    let confirm = p.scanned.iter().map(|k| k.fingerprint.clone()).collect();
+    let t: TrustReport = d
+        .client()
+        .call_typed(&Request::Trust {
+            device: name.into(),
+            confirm: Some(confirm),
+            replace: false,
+        })
+        .unwrap();
+    assert_eq!(t.action, "pinned");
+}
+
+/// Final qualification wsF-F3: a device removed from the config is forgotten
+/// with its pin and address, so another machine added later under the same
+/// name does not inherit them; `forget` clears a configured device and
+/// removes an adopted one.
+#[test]
+fn removed_devices_are_forgotten_and_forget_clears_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let net = FakeNet::new(&["10.9.0.2/24"]);
+    net.add(
+        "10.9.0.51",
+        FakeHost::ssh_host(vec![fake_key("old-machine")], "aa:00:00:00:00:51"),
+    );
+    net.add(
+        "10.9.0.52",
+        FakeHost::ssh_host(vec![fake_key("new-machine")], "aa:00:00:00:00:52"),
+    );
+    net.add(
+        "10.9.0.53",
+        FakeHost::ssh_host(vec![fake_key("spare")], "aa:00:00:00:00:53"),
+    );
+    let at = |ip: &str| {
+        fast_config(&format!("networks:\n  - name: lab\n    cidr: 10.9.0.0/24\n    active_scan: true\ndevices:\n  - name: dev1\n    expected_ips: [{ip}]\n  - name: other\n    expected_ips: [10.9.0.60]\n"))
+    };
+    let d = TestDaemon::start(at("10.9.0.51"), net.clone(), dir.path().into(), true).unwrap();
+    trust_what_it_shows(&d, "dev1");
+    wait_for(&d, "dev1", 15, "verified", |s| {
+        s.identity == IdentityState::Verified
+    });
+    d.stop().unwrap();
+    // dev1 removed from the config, then a different machine added as dev1.
+    let gone = fast_config("networks:\n  - name: lab\n    cidr: 10.9.0.0/24\n    active_scan: true\ndevices:\n  - name: other\n    expected_ips: [10.9.0.60]\n");
+    TestDaemon::start(gone, net.clone(), dir.path().into(), false)
+        .unwrap()
+        .stop()
+        .unwrap();
+    let d = TestDaemon::start(at("10.9.0.52"), net.clone(), dir.path().into(), false).unwrap();
+    let s = wait_for(&d, "dev1", 15, "located at the new address", |s| {
+        s.ip.as_deref() == Some("10.9.0.52")
+    });
+    assert_ne!(s.identity, IdentityState::Verified, "{s:#?}");
+    let i: DeviceDetail = d
+        .client()
+        .call_typed(&Request::Inspect {
+            device: "dev1".into(),
+        })
+        .unwrap();
+    assert!(i.pinned_keys.is_empty(), "{:?}", i.pinned_keys);
+
+    // `forget` on a configured device: trust is gone, the device stays.
+    trust_what_it_shows(&d, "dev1");
+    wait_for(&d, "dev1", 15, "verified", |s| {
+        s.identity == IdentityState::Verified
+    });
+    let v = d
+        .client()
+        .call(&Request::Forget {
+            device: "dev1".into(),
+        })
+        .unwrap();
+    assert_eq!(v["removed"], false);
+    let i: DeviceDetail = d
+        .client()
+        .call_typed(&Request::Inspect {
+            device: "dev1".into(),
+        })
+        .unwrap();
+    assert!(i.pinned_keys.is_empty());
+    wait_for(&d, "dev1", 15, "located again", |s| {
+        s.ip.as_deref() == Some("10.9.0.52")
+    });
+    let r: ResolveResult = d
+        .client()
+        .call_typed(&Request::Resolve {
+            device: "dev1".into(),
+        })
+        .unwrap();
+    assert!(r.host_key_alias.is_none(), "{r:?}");
+
+    // `forget` on an adopted device removes it; adopting the name again
+    // starts unpinned.
+    let adopt = |d: &TestDaemon| {
+        d.client()
+            .call(&Request::Discover { scan_cidr: None })
+            .unwrap();
+        d.client()
+            .call_typed::<DeviceStatus>(&Request::Adopt {
+                site: None,
+                ip: "10.9.0.53".into(),
+                name: "spare".into(),
+                label: None,
+                username: None,
+                profile: None,
+                ssh: None,
+            })
+            .unwrap()
+    };
+    adopt(&d);
+    trust_what_it_shows(&d, "spare");
+    let v = d
+        .client()
+        .call(&Request::Forget {
+            device: "spare".into(),
+        })
+        .unwrap();
+    assert_eq!(v["removed"], true);
+    assert!(d
+        .client()
+        .call(&Request::Inspect {
+            device: "spare".into()
+        })
+        .is_err());
+    adopt(&d);
+    let i: DeviceDetail = d
+        .client()
+        .call_typed(&Request::Inspect {
+            device: "spare".into(),
+        })
+        .unwrap();
+    assert!(i.pinned_keys.is_empty());
+    d.stop().unwrap();
+    // Nothing of the forgotten pins survives a restart either.
+    let d = TestDaemon::start(at("10.9.0.52"), net, dir.path().into(), false).unwrap();
+    let i: DeviceDetail = d
+        .client()
+        .call_typed(&Request::Inspect {
+            device: "dev1".into(),
+        })
+        .unwrap();
+    assert!(i.pinned_keys.is_empty());
+    d.stop().unwrap();
+}

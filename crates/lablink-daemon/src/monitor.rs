@@ -27,7 +27,12 @@ pub async fn run(state: Arc<State>, name: String) {
     let mut last_check: Option<Instant> = None;
     // First check promptly but staggered slightly so startup is not a burst.
     let mut first = true;
+    let epoch = state.reg().device(&name).map(|d| d.epoch);
     loop {
+        if epoch.is_none() || state.reg().device(&name).map(|d| d.epoch) != epoch {
+            // Forgotten (and maybe adopted again, with a monitor of its own).
+            break;
+        }
         let monitoring = state.reg().engaged(&name);
         let woken = if !monitoring {
             tokio::select! {

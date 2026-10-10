@@ -373,6 +373,13 @@ async fn dispatch(state: &Arc<State>, req: Request) -> Result<serde_json::Value,
                 }
             }
         }
+        Request::Forget { device } => {
+            let (id, removed) = state.reg().forget(&device)?;
+            flush(state).await;
+            // A removed device's monitor sees it is gone and stops.
+            state.wake(&id);
+            to_value(&serde_json::json!({ "device": id, "removed": removed }))
+        }
         Request::Set { device, changes } => {
             let s = state.reg().set(&device, &changes)?;
             state.wake(&s.id);

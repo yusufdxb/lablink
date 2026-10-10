@@ -135,6 +135,18 @@ lablink trust <device> --replace     # shows old and new, asks
 Fingerprints written in the config cannot be replaced at runtime; edit the
 config.
 
+## Forgetting a device
+
+```bash
+lablink forget <device>     # asks; --yes to skip the question
+```
+
+deletes the device's pinned keys, addresses, learned MACs and runtime
+settings. An adopted device is removed; a configured one starts over
+unpinned and must be trusted again. A device (or a whole site) removed from
+the config is forgotten the same way the next time the daemon starts, so a
+machine added later under the same name never inherits the old one's pin.
+
 An unknown key at an address the device merely *used* to have (DHCP gave it
 to another machine) is not a mismatch: LabLink releases the address and lists
 the newcomer as discovered, without connecting to it.

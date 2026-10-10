@@ -169,6 +169,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Forget a device's pinned keys, addresses and runtime settings. An
+    /// adopted device is removed; a configured one starts over unpinned.
+    Forget {
+        device: String,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Change runtime settings for a device (stored in the cache, not the config file).
     Set {
         device: String,
@@ -549,6 +559,7 @@ fn main() {
             | Cmd::Resolve { json: true, .. }
             | Cmd::Exec { json: true, .. }
             | Cmd::Trust { json: true, .. }
+            | Cmd::Forget { json: true, .. }
             | Cmd::Set { json: true, .. }
             | Cmd::Adopt { json: true, .. }
             | Cmd::Metrics { json: true }
@@ -597,6 +608,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::Ssh { .. } => "ssh",
         Cmd::Exec { .. } => "exec",
         Cmd::Trust { .. } => "trust",
+        Cmd::Forget { .. } => "forget",
         Cmd::Set { .. } => "set",
         Cmd::Adopt { .. } => "adopt",
         Cmd::Metrics { .. } => "metrics",
@@ -847,6 +859,7 @@ fn run(cli: Cli, client: &Client) -> R {
             replace,
             json,
         } => cmd_trust(client, &device, yes, &fingerprints, replace, json),
+        Cmd::Forget { device, yes, json } => cmd_forget(client, &device, yes, json),
         Cmd::Set {
             device,
             label,
@@ -1460,6 +1473,39 @@ fn cmd_exec(
         );
     }
     Ok(code)
+}
+
+fn cmd_forget(client: &Client, device: &str, yes: bool, json: bool) -> Result<i32, Fail> {
+    if !yes {
+        if json || !std::io::stdin().is_terminal() {
+            eprintln!("lablink: nothing forgotten; pass --yes to forget '{device}'");
+            return Ok(exit::REFUSED);
+        }
+        print!(
+            "Forget the pinned keys, addresses and settings of '{device}'? It must be trusted again before use. [y/N] "
+        );
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            eprintln!("lablink: nothing forgotten");
+            return Ok(exit::REFUSED);
+        }
+    }
+    let v = client.call(&Request::Forget {
+        device: device.to_string(),
+    })?;
+    if json {
+        print_json(&v);
+    } else {
+        let id = v["device"].as_str().unwrap_or(device);
+        if v["removed"].as_bool() == Some(true) {
+            println!("forgot {id}: removed");
+        } else {
+            println!("forgot {id}: pins and addresses cleared; run `lablink trust {id} --fingerprint SHA256:...` before using it");
+        }
+    }
+    Ok(exit::OK)
 }
 
 fn cmd_trust(
