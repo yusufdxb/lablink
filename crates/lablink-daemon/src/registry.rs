@@ -2985,8 +2985,11 @@ pub fn validate_changes(
         }
     }
     if let Some(n) = &c.notes {
-        if n.len() > 2000 {
-            return bad("notes must be at most 2000 characters".into());
+        if !lablink_core::config::valid_notes(n) {
+            return bad(
+                "notes must be at most 2000 characters, without control characters other than newline and tab"
+                    .into(),
+            );
         }
     }
     let profile = match c.profile.as_deref() {

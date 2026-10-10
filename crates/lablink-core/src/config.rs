@@ -912,6 +912,13 @@ fn validate_site(cfg: &Config, site: &SiteConfig, at_site: &str, errs: &mut Vec<
                 "{at}: name must match [A-Za-z0-9_.-]+ (1-64 chars)"
             ));
         }
+        if let Some(n) = &dev.notes {
+            if !valid_notes(n) {
+                errs.push(format!(
+                    "{at}: notes must be at most 2000 characters, without control characters other than newline and tab"
+                ));
+            }
+        }
         for n in std::iter::once(&dev.name).chain(dev.aliases.iter()) {
             let key = n.to_ascii_lowercase();
             if n != &dev.name && !valid_name(n) {
@@ -1247,6 +1254,12 @@ pub fn valid_site_id(s: &str) -> bool {
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !s.starts_with('-')
+}
+
+/// Free-text notes: at most 2000 characters; newlines and tabs are fine,
+/// other control characters (terminal escape sequences) are not.
+pub fn valid_notes(s: &str) -> bool {
+    s.chars().count() <= 2000 && !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
 }
 
 /// A display name (site name, label): 1-64 printable characters.
@@ -1685,6 +1698,13 @@ mod site_tests {
         assert!(e[0].contains("ssh.options"), "{e:?}");
         let e = errs("ssh:\n  options:\n    ServerAliveInterval: \"10\\nProxyCommand x\"\n");
         assert!(e[0].contains("ssh.options"), "{e:?}");
+    }
+
+    #[test]
+    fn notes_with_terminal_escapes_are_refused() {
+        let e = errs("devices:\n  - name: d\n    notes: \"hi\\e[2J\"\n");
+        assert!(e[0].contains("notes"), "{e:?}");
+        assert!(errs("devices:\n  - name: d\n    notes: \"line 1\\nline 2\\tok\"\n").is_empty());
     }
 
     #[test]

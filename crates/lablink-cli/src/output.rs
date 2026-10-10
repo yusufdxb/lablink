@@ -59,6 +59,21 @@ pub fn identity_word(s: IdentityState) -> &'static str {
 
 /// Render rows as an aligned table (two-space gutters). The last column is
 /// not padded. ANSI sequences in a cell do not count toward its width.
+/// Text that came from outside LabLink (ssh error lines, notes, history
+/// messages) with control characters shown escaped, so it can never move the
+/// cursor, rewrite lines or change the terminal title.
+pub fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
     let visible = |s: &str| {
         let mut n = 0;
@@ -304,10 +319,10 @@ pub fn device_detail(d: &DeviceDetail) -> String {
         );
     }
     if let Some(e) = &d.last_error {
-        kv("last error", e.clone());
+        kv("last error", printable(e));
     }
     if let Some(n) = &d.notes {
-        kv("notes", n.clone());
+        kv("notes", printable(n));
     }
     kv(
         "monitoring",
@@ -332,10 +347,10 @@ pub fn history_lines(events: &[HistoryEvent], show_device: bool) -> String {
             o.push_str(&format!(
                 "{t}  {:<10} {}\n",
                 e.device.clone().unwrap_or_else(|| "-".into()),
-                e.message
+                printable(&e.message)
             ));
         } else {
-            o.push_str(&format!("  {t}  {}\n", e.message));
+            o.push_str(&format!("  {t}  {}\n", printable(&e.message)));
         }
     }
     o
@@ -638,5 +653,19 @@ mod tests {
         let lines: Vec<&str> = t.lines().collect();
         assert_eq!(lines[0], "A      B");
         assert_eq!(lines[2], "RED    y");
+    }
+}
+
+#[cfg(test)]
+mod printable_tests {
+    use super::printable;
+
+    #[test]
+    fn control_characters_are_shown_not_executed() {
+        assert_eq!(
+            printable("ok\x1b[2J\x07\r\nnext"),
+            "ok\\u{1b}[2J\\u{7}\\r\\nnext"
+        );
+        assert_eq!(printable("plain text, é"), "plain text, é");
     }
 }
