@@ -48,6 +48,9 @@ pub const ALIAS_PREFIX: &str = "lablink.";
 const KEY_SIGHTING_TTL_MS: u64 = 600_000;
 /// Gateway MACs remembered per network for site detection.
 const MAX_LEARNED_GATEWAYS: usize = 4;
+/// A pinned host that showed only other key types is scanned again after
+/// this long (or the regular interval, if shorter).
+const PARTIAL_KEYSCAN_RECHECK_MS: u64 = 30_000;
 
 /// A pinned SSH host key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,6 +377,19 @@ impl Device {
         KnownIdentity {
             name: self.id.clone(),
             pinned: self.pinned_fingerprints(),
+            pinned_types: self
+                .rec
+                .pinned
+                .iter()
+                .filter(|p| !p.key_type.is_empty())
+                .map(|p| p.key_type.clone())
+                .collect(),
+            pin_types_known: self.pinned_fingerprints().iter().all(|f| {
+                self.rec
+                    .pinned
+                    .iter()
+                    .any(|p| &p.fingerprint == f && !p.key_type.is_empty())
+            }),
             macs: self
                 .cfg
                 .normalized_macs()
@@ -1602,6 +1618,33 @@ impl Registry {
         signal: Option<Signal>,
         now: u64,
     ) {
+        // A pinned device is verified by its pins only. Here the host showed
+        // no key of a pinned type: not a mismatch, not a match. Look again
+        // soon instead of waiting for the next regular check.
+        let pins = self.devices[name].pinned_fingerprints();
+        if !pins.is_empty() {
+            let types = |it: &mut dyn Iterator<Item = &String>| {
+                let v: BTreeSet<&String> = it.collect();
+                v.into_iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let offered = types(&mut keys.iter().map(|k| &k.key_type));
+            let d = &self.devices[name];
+            let pinned = types(&mut d.rec.pinned.iter().map(|p| &p.key_type));
+            let detail = if keys.is_empty() {
+                format!("{ip} offered no host key; pinned key not proven")
+            } else {
+                format!("{ip} offered only host key types that are not pinned ({offered}; pinned: {pinned}); not accepted, checking again")
+            };
+            let id_interval = self.cfg.daemon.identity_check_interval_s * 1000;
+            let soon = id_interval.min(PARTIAL_KEYSCAN_RECHECK_MS);
+            self.devices.get_mut(name).unwrap().last_identity_check_ms =
+                now.saturating_sub(id_interval).saturating_add(soon);
+            self.set_identity(name, IdentityState::Unverified, signal, ip, detail);
+            return;
+        }
         // Entries keyed by the device's configured names always count. Entries
         // keyed by the bare IP count only when the user tied this address to
         // the device: a configured static IP, or adopting the device at this

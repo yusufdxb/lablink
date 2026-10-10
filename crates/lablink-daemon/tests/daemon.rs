@@ -1779,3 +1779,40 @@ fn removed_devices_are_forgotten_and_forget_clears_trust() {
     assert!(i.pinned_keys.is_empty());
     d.stop().unwrap();
 }
+
+/// Final qualification WSD-F8: the genuine host offering only key types
+/// that are not pinned (a partial ssh-keyscan, a restarting sshd) is not a
+/// MISMATCH; it is verified again once it shows the pinned key.
+#[test]
+fn a_partial_key_scan_of_the_genuine_host_is_not_a_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let net = lab_with_jetson("10.9.0.31");
+    let cfg = fast_config(&jetson_cfg("    expected_ips: [10.9.0.31]\n"));
+    let d = TestDaemon::start(cfg, net.clone(), dir.path().into(), true).unwrap();
+    wait_for(&d, "jetson-a", 15, "green", |s| s.color == Color::Green);
+    let mut ecdsa = fake_key("jetson-a-ecdsa");
+    ecdsa.key_type = "ecdsa-sha2-nistp256".into();
+    let cycle_port = |d: &TestDaemon| {
+        net.host("10.9.0.31", |h| h.port = PortMode::Refused);
+        wait_for(d, "jetson-a", 15, "port closed", |s| {
+            s.ssh_port == PortState::Closed
+        });
+        net.host("10.9.0.31", |h| h.port = PortMode::Open);
+    };
+    net.host("10.9.0.31", |h| h.keys = vec![ecdsa.clone()]);
+    cycle_port(&d);
+    let s = wait_for(&d, "jetson-a", 15, "unverified", |s| {
+        s.identity == IdentityState::Unverified
+    });
+    assert!(s.reasons.iter().any(|r| r.contains("not pinned")), "{s:#?}");
+    // The full set again: verified without a restart or `trust --replace`
+    // (the recheck comes within 30 s on its own).
+    net.host("10.9.0.31", |h| h.keys = vec![fake_key("jetson-a"), ecdsa]);
+    wait_for(&d, "jetson-a", 45, "verified again", |s| {
+        s.identity == IdentityState::Verified
+    });
+    assert!(!history(&d, "jetson-a")
+        .iter()
+        .any(|e| e.kind == "identity_mismatch"));
+    d.stop().unwrap();
+}

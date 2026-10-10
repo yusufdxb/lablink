@@ -39,6 +39,11 @@ pub struct KnownIdentity {
     pub name: String,
     /// Pinned fingerprints (config, user known_hosts, explicit trust).
     pub pinned: BTreeSet<String>,
+    /// Key types of the pins whose type is known (`ssh-ed25519`, ...).
+    pub pinned_types: BTreeSet<String>,
+    /// Every pin's key type is known (`pinned_types`). Until then (a config
+    /// fingerprint never seen) any other key contradicts the pins.
+    pub pin_types_known: bool,
     /// Normalized MACs (configured + learned).
     pub macs: BTreeSet<String>,
     /// Normalized hostnames (configured + learned + mDNS).
@@ -116,9 +121,18 @@ impl KnownIdentity {
             .iter()
             .any(|k| self.pinned.contains(&k.fingerprint))
     }
-    /// The observation carries host keys, the device has pins, and none match.
+    /// The observation carries host keys, the device has pins, none match,
+    /// and one of them is of a pinned type. A host that offers only other
+    /// types (a partial scan, a restarting sshd) proves nothing either way.
     fn key_conflict(&self, obs: &Observation) -> bool {
-        !obs.host_keys.is_empty() && !self.pinned.is_empty() && !self.key_hit(obs)
+        !obs.host_keys.is_empty()
+            && !self.pinned.is_empty()
+            && !self.key_hit(obs)
+            && (!self.pin_types_known
+                || obs
+                    .host_keys
+                    .iter()
+                    .any(|k| self.pinned_types.contains(&k.key_type)))
     }
     fn mac_hit(&self, obs: &Observation) -> bool {
         obs.mac
@@ -279,6 +293,7 @@ mod tests {
                 static_ips: vec![ip("192.168.50.18")],
                 current_ip: Some(ip("192.168.10.70")),
                 previous_ips: vec![ip("192.168.10.2"), ip("192.168.10.4")],
+                ..Default::default()
             },
             KnownIdentity {
                 name: "jetson-b".into(),
@@ -499,5 +514,52 @@ mod tests {
             &[FP_EVIL],
         );
         assert_eq!(classify(&o, &devices()), MatchOutcome::Unknown);
+    }
+
+    /// Final qualification WSD-F8: the genuine host offering only key types
+    /// that are not pinned (a partial scan) is not a mismatch; a different
+    /// key of a pinned type still is, and so is any key while a pin's type
+    /// is unknown.
+    #[test]
+    fn only_a_key_of_a_pinned_type_contradicts_the_pin() {
+        let typed = |known: bool| KnownIdentity {
+            name: "dev7".into(),
+            pinned: [FP_JETSON_A.to_string()].into(),
+            pinned_types: ["ssh-ed25519".to_string()].into(),
+            pin_types_known: known,
+            macs: ["aa:bb:cc:00:00:07".to_string()].into(),
+            ..Default::default()
+        };
+        let other = |t: &str, fp: &str| HostKey {
+            key_type: t.into(),
+            fingerprint: fp.into(),
+            public_key: None,
+        };
+        let obs = |keys: Vec<HostKey>| Observation {
+            ip: Some(ip("10.0.0.7")),
+            mac: Some("aa:bb:cc:00:00:07".into()),
+            names: vec![],
+            host_keys: keys,
+        };
+        let partial = obs(vec![
+            other("ecdsa-sha2-nistp256", "SHA256:ecdsa"),
+            other("ssh-rsa", "SHA256:rsa"),
+        ]);
+        assert!(matches!(
+            classify(&partial, &[typed(true)]),
+            MatchOutcome::Matched {
+                verified: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify(&partial, &[typed(false)]),
+            MatchOutcome::Mismatch { .. }
+        ));
+        let swapped = obs(vec![key(FP_EVIL)]);
+        assert!(matches!(
+            classify(&swapped, &[typed(true)]),
+            MatchOutcome::Mismatch { .. }
+        ));
     }
 }
