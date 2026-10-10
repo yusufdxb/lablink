@@ -770,22 +770,28 @@ fn run(cli: Cli, client: &Client) -> R {
             force,
         } => {
             let r: ResolveResult = client.call_typed(&Request::Resolve { device })?;
-            if !force && (r.site_away || r.identity != IdentityState::Verified) {
+            if r.site_away && !force {
+                return Err(Fail::new(
+                    exit::DEVICE_UNREACHABLE,
+                    "unreachable",
+                    format!(
+                        "'{}' belongs to {}, which is AWAY: its last address ({}) may belong to another machine here. Switch with `lablink site use {}`, or pass --force",
+                        shown(&r),
+                        r.site_name,
+                        r.ip,
+                        r.id.split('/').next().unwrap_or_default()
+                    ),
+                ));
+            }
+            if r.identity != IdentityState::Verified && !force {
                 return Err(Fail::new(
                     exit::REFUSED,
                     "unverified",
                     format!(
-                        "'{}' at {} is {}: tools given this address (scp, rsync, ssh) would not check its identity. Use `lablink ssh`/`lablink exec`, verify it with `lablink trust {}`, or pass --force",
+                        "'{}' at {} is not identity-verified ({}): tools given this address (scp, rsync, ssh) would not check who answers. Use `lablink ssh`/`lablink exec`, verify it with `lablink trust {}`, or pass --force",
                         shown(&r),
                         r.ip,
-                        if r.site_away {
-                            format!("at {}, which is AWAY", r.site_name)
-                        } else {
-                            format!(
-                                "not identity-verified ({})",
-                                format!("{:?}", r.identity).to_lowercase()
-                            )
-                        },
+                        format!("{:?}", r.identity).to_lowercase(),
                         shown(&r)
                     ),
                 ));

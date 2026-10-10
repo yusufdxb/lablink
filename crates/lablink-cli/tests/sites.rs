@@ -127,6 +127,11 @@ fn sites_status_scopes_and_away_semantics() {
     let o = lablink(&e, &["exec", "site-beta/jetson", "true"]);
     assert_eq!(code(&o), exit::DEVICE_UNREACHABLE, "{}", err(&o));
     assert!(err(&o).contains("which is AWAY"), "{}", err(&o));
+    // resolve: the address of an AWAY device is not handed out either (exit 5
+    // like ssh/exec), unless --force; the daemon refuses one it has no
+    // address for.
+    let o = lablink(&e, &["resolve", "site-beta/jetson"]);
+    assert_eq!(code(&o), exit::DEVICE_UNREACHABLE, "{}", err(&o));
     // Doctor with --all: AWAY devices are listed but never fail the run.
     let o = lablink(&e, &["doctor", "--all", "--json", "site-beta/robot-a"]);
     let v: Value = serde_json::from_str(&out(&o)).unwrap();
