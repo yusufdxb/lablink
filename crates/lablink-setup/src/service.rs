@@ -45,15 +45,53 @@ pub fn find_daemon() -> Result<PathBuf, String> {
         for dir in std::env::split_paths(&path) {
             let p = dir.join("lablinkd");
             if p.is_file() {
-                return Ok(p);
+                // A relative PATH entry must not become a relative ExecStart.
+                return p
+                    .canonicalize()
+                    .map_err(|e| format!("cannot resolve {}: {e}", p.display()));
             }
         }
     }
     Err("cannot find the lablinkd binary next to lablink or on PATH".into())
 }
 
-pub fn unit_text(daemon: &Path) -> String {
-    format!(
+/// The daemon path as one systemd `ExecStart` word: absolute, no control
+/// characters (a newline would start a new unit directive), quoted when it
+/// contains anything beyond `[A-Za-z0-9_./+-]`, with systemd's `%` and `$`
+/// expansion escaped.
+fn exec_word(daemon: &Path) -> Result<String, String> {
+    let s = daemon
+        .to_str()
+        .ok_or_else(|| format!("{} is not valid UTF-8", daemon.display()))?;
+    if !daemon.is_absolute() || s.chars().any(char::is_control) {
+        return Err(format!(
+            "the daemon path must be absolute and without control characters: {s:?}"
+        ));
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_./+-".contains(c))
+    {
+        return Ok(s.to_string());
+    }
+    let mut q = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' | '\\' => {
+                q.push('\\');
+                q.push(c);
+            }
+            '%' => q.push_str("%%"),
+            '$' => q.push_str("$$"),
+            _ => q.push(c),
+        }
+    }
+    q.push('"');
+    Ok(q)
+}
+
+pub fn unit_text(daemon: &Path) -> Result<String, String> {
+    let exec = exec_word(daemon)?;
+    Ok(format!(
         "[Unit]
 Description=LabLink daemon (device discovery, SSH health, identity tracking)
 
@@ -73,8 +111,8 @@ TasksMax=64
 [Install]
 WantedBy=default.target
 ",
-        daemon.display()
-    )
+        exec
+    ))
 }
 
 fn systemctl_output(args: &[&str]) -> Result<std::process::Output, String> {
@@ -252,7 +290,7 @@ pub fn install(enable: bool) -> Result<Vec<String>, String> {
                 std::fs::create_dir_all(d)
                     .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
             }
-            std::fs::write(&user, unit_text(&daemon))
+            std::fs::write(&user, unit_text(&daemon)?)
                 .map_err(|e| format!("cannot write {}: {e}", user.display()))?;
             log.push(format!("wrote {}", user.display()));
         }
@@ -351,10 +389,29 @@ mod tests {
 
     #[test]
     fn unit_has_absolute_exec_and_install_target() {
-        let t = super::unit_text(std::path::Path::new("/opt/lablink/lablinkd"));
+        let t = super::unit_text(std::path::Path::new("/opt/lablink/lablinkd")).unwrap();
         assert!(t.contains("ExecStart=/opt/lablink/lablinkd --no-color"));
         assert!(t.contains("WantedBy=default.target"));
         assert!(t.contains("Restart=on-failure"));
+    }
+
+    #[test]
+    fn exec_start_is_one_quoted_word_and_never_a_new_directive() {
+        let t = super::unit_text(std::path::Path::new("/opt/my apps/50%$x\"/lablinkd")).unwrap();
+        assert!(
+            t.contains("ExecStart=\"/opt/my apps/50%%$$x\\\"/lablinkd\" --no-color"),
+            "{t}"
+        );
+        for bad in [
+            "/opt/x\nExecStartPre=/bin/sh",
+            "relative/lablinkd",
+            "/opt/\u{1b}x",
+        ] {
+            assert!(
+                super::unit_text(std::path::Path::new(bad)).is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -362,7 +419,7 @@ mod tests {
         let shipped = include_str!("../../../packaging/lablinkd.service");
         assert_eq!(
             shipped,
-            super::unit_text(std::path::Path::new("/usr/bin/lablinkd")),
+            super::unit_text(std::path::Path::new("/usr/bin/lablinkd")).unwrap(),
             "packaging/lablinkd.service is stale: regenerate it with `lablink install-service --print --daemon-path /usr/bin/lablinkd`"
         );
     }

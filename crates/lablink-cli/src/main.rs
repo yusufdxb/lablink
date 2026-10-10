@@ -1080,7 +1080,7 @@ fn run(cli: Cli, client: &Client) -> R {
                     Some(p) => p,
                     None => service::find_daemon().map_err(svc)?,
                 };
-                print!("{}", service::unit_text(&daemon));
+                print!("{}", service::unit_text(&daemon).map_err(svc)?);
                 return Ok(exit::OK);
             }
             for line in service::install(!no_enable).map_err(svc)? {
