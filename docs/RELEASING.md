@@ -61,10 +61,22 @@ In CI, a `v*` tag also gets a Sigstore build-provenance attestation for the
 - Create the public repository from a fresh single-branch clone of the
   release branch, never by adding a public remote to a working repository
   with other history.
-- Enable private vulnerability reporting, secret scanning with push
-  protection, branch protection with required CI and review, before
-  announcing.
-- Date the CHANGELOG entry in the tagged commit.
+- Before announcing, enable private vulnerability reporting, secret
+  scanning with push protection and Dependabot alerts; set the default
+  workflow token to read-only and require approval for workflows from
+  outside contributors.
+- Protect `main` (no force pushes or deletion, changes through pull
+  requests) and require these checks, which run on every pull request:
+  `lint`, `test`, `dependencies`, `secrets`, `release`,
+  `cleanroom (ubuntu:20.04)`, `cleanroom (ubuntu:22.04)`,
+  `cleanroom (ubuntu:24.04)` and `aarch64-check`. Never require
+  `provenance`: it runs only for `v*` tags.
+- Restrict creating, moving and deleting `v*` tags to administrators: a tag
+  is what makes CI sign artifacts.
+- Date the CHANGELOG entry in the tagged commit; tag that commit, wait for
+  its CI run (including `provenance`), check that the `lablink-dist`
+  artifact's `SHA256SUMS` equals a local `scripts/release.sh` build, verify
+  the attestations (below), then attach those files to the GitHub release.
 
 ## Verifying a download
 

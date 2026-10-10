@@ -118,8 +118,11 @@ LabLink is a policy layer over OpenSSH and the operating system:
   the absolute directories of your `PATH` (never the current directory) with
   your environment, and reads its configuration and pins under your home
   directory (from `HOME`, else the password database; never /tmp). It
-  refuses a configuration or state directory that another user, or every
-  user, could have changed.
+  refuses a configuration or state directory that another user could have
+  changed: one owned by someone other than you or root, writable by everyone
+  or by a group other than your own private group, or reached through a
+  directory or symbolic link of that kind. On shared or network homes, the
+  directories above yours must belong to root or to you.
 - **The operating system** separates users. Root, and anyone who can act as
   your user, can read LabLink's state, edit its pins and talk to its socket.
 - **You** decide the first time whether a key is right: compare the

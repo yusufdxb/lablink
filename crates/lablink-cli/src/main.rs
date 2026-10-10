@@ -520,6 +520,11 @@ fn main() {
         std::process::exit(0);
     }
     let cli = Cli::parse();
+    for v in lablink_core::paths::ignored_relative_settings() {
+        eprintln!(
+            "lablink: ignoring ${v}: it is not an absolute path; the default location is used"
+        );
+    }
     let socket = cli
         .socket
         .clone()

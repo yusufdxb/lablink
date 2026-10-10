@@ -6,7 +6,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Terminal emulators tried after the preference and `$TERMINAL`, in order.
 const CANDIDATES: [&str; 7] = [
@@ -61,12 +61,8 @@ pub fn runnable(name: &str) -> bool {
             .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
             .unwrap_or(false)
     };
-    if name.contains('/') {
-        return is_exec(Path::new(name));
-    }
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|d| is_exec(&d.join(name))))
-        .unwrap_or(false)
+    // Bare names only from absolute $PATH directories, never the current one.
+    lablink_core::program::find(name).is_ok_and(|p| is_exec(&p))
 }
 
 /// Terminal emulators from the built-in list that are installed.
@@ -80,6 +76,7 @@ pub fn lablink_binary() -> PathBuf {
         .ok()
         .and_then(|e| e.parent().map(|d| d.join("lablink")))
         .filter(|p| p.is_file())
+        .or_else(|| lablink_core::program::find("lablink").ok())
         .unwrap_or_else(|| PathBuf::from("lablink"))
 }
 
@@ -100,7 +97,8 @@ pub fn open_lablink_in_terminal(
             .to_string()
     })?;
     let (program, args) = terminal_command(&found, &lablink_binary(), lablink_args);
-    let mut child = Command::new(&program)
+    let mut child = lablink_core::program::command(&program)
+        .map_err(|e| format!("failed to start {program}: {e}"))?
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

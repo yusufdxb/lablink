@@ -87,8 +87,10 @@ release (details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T26-T36).
   the home directory from the password database instead of /tmp (where
   another user could plant a configuration naming the ssh program, or own
   the directory holding the pins); relative `HOME`, `XDG_*` and `LABLINK_*`
-  paths are ignored; a configuration, state directory or `~/.ssh/known_hosts`
-  that another user or every user can change is refused; and `ssh` and the
+  paths are ignored with a warning; a configuration, state directory or
+  `~/.ssh/known_hosts` that another user could change (owned by them,
+  writable by everyone or by a shared group, or reached through their
+  directory or link) is refused; and `ssh` and the
   other programs LabLink starts are looked up only in absolute `PATH`
   directories, so an `ssh` in the current directory is never run.
 

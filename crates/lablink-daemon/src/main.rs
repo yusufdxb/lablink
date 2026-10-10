@@ -65,6 +65,9 @@ fn main() {
         .with_target(false)
         .init();
 
+    for v in lablink_core::paths::ignored_relative_settings() {
+        tracing::warn!("ignoring ${v}: it is not an absolute path; the default location is used");
+    }
     let config_path = args
         .config
         .clone()

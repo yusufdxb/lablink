@@ -41,6 +41,7 @@ fn a_state_dir_others_can_rearrange_is_refused() {
     let t = tempfile::tempdir().unwrap();
     let cfg = t.path().join("config.yaml");
     std::fs::write(&cfg, "").unwrap();
+    chmod(&cfg, 0o600);
     let shared = t.path().join("shared");
     std::fs::create_dir(&shared).unwrap();
     // Anyone could rename `lablink` away and put their own pins there.
@@ -87,7 +88,8 @@ fn a_configuration_others_can_change_is_refused() {
         err.contains("refusing a configuration other users can change"),
         "{err}"
     );
-    chmod(&cfg, 0o664);
+    // Owner-only and world-readable files are fine.
+    chmod(&cfg, 0o644);
     let out = daemon(
         t.path(),
         &["--config", cfg.to_str().unwrap(), "--check-config"],
