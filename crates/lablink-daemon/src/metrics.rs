@@ -132,6 +132,19 @@ mod tests {
         assert!(s.open_fds.unwrap() >= 3);
         assert!(s.cpu_user_ms.is_some());
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        assert!(super::heap_stats().unwrap().1 > 0);
+        if glibc_minor() >= 33 {
+            assert!(super::heap_stats().unwrap().1 > 0);
+        } else {
+            // mallinfo2 arrived in glibc 2.33 (Ubuntu 20.04 has 2.31).
+            assert!(super::heap_stats().is_none());
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn glibc_minor() -> u32 {
+        // SAFETY: returns a pointer to a static NUL-terminated string.
+        let v = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) };
+        let v = v.to_str().unwrap();
+        v.split('.').nth(1).unwrap().parse().unwrap()
     }
 }
