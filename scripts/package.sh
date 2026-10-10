@@ -23,6 +23,9 @@ if [ -z "${LABLINK_GIT_SHA:-}" ] && [ -n "$(git status --porcelain 2>/dev/null)"
     sha="$sha-dirty"
 fi
 maintainer=${LABLINK_MAINTAINER:-"LabLink maintainers <maintainers@lablink.invalid>"}
+# Reproducible archives: every timestamp is the commit time (scripts/release.sh
+# passes it), so rebuilding a commit gives byte-identical artifacts.
+export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct HEAD 2>/dev/null || echo 0)}
 max_glibc=${LABLINK_MAX_GLIBC:-2.31}
 
 # The third-party notices must describe exactly this dependency set.
@@ -70,7 +73,7 @@ cp -r docs "$t/share/doc/lablink/"
 install -m 644 LICENSE "$t/LICENSE"
 find "$t" -type d -exec chmod 755 {} +
 find "$t" -type f ! -perm -u+x -exec chmod 644 {} +
-tar --owner=0 --group=0 --numeric-owner --sort=name --mtime="@0" \
+tar --owner=0 --group=0 --numeric-owner --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
     -C dist -czf "$t.tar.gz" "$(basename "$t")"
 rm -rf "$t"
 
@@ -147,6 +150,9 @@ PRERM
 chmod 755 "$d/DEBIAN/postinst" "$d/DEBIAN/prerm"
 find "$d" -type d -exec chmod 755 {} +
 (cd "$d" && find usr -type f -exec md5sum {} + | sort -k2 > DEBIAN/md5sums)
+# dpkg-deb uses SOURCE_DATE_EPOCH for the ar members; older dpkg does not
+# clamp file times inside data.tar, so set them all here.
+find "$d" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 dpkg-deb --root-owner-group -Zxz --build "$d" "dist/lablink_${version}_${arch}.deb" >/dev/null
 rm -rf "$d"
 
@@ -158,6 +164,7 @@ rm -rf "$d"
     echo "cargo: $(cargo --version)"
     echo "build image: ${LABLINK_BASE_IMAGE:-host $(. /etc/os-release && echo "$PRETTY_NAME")}"
     echo "minimum glibc: $glibc"
+    echo "SOURCE_DATE_EPOCH: $SOURCE_DATE_EPOCH"
     echo "dynamic libraries:"
     for b in $bins; do
         echo "  $(basename "$b"): $(objdump -p "$b" | awk '/NEEDED/ {print $2}' | paste -sd ' ' -)"

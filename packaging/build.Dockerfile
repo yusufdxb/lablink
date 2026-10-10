@@ -8,8 +8,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config ca-certificates curl git dpkg-dev binutils xz-utils \
     && rm -rf /var/lib/apt/lists/*
 ARG RUST_TOOLCHAIN
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+# rustup-init pinned by version and SHA-256 (published at
+# https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init.sha256);
+# rustup then verifies the toolchain components it downloads.
+ARG RUSTUP_VERSION=1.28.2
+ARG RUSTUP_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+RUN curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+    && echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+    && rm /tmp/rustup-init \
     && /root/.cargo/bin/rustc --version
 ENV PATH=/root/.cargo/bin:$PATH
 WORKDIR /src

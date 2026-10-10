@@ -12,12 +12,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
   lint:
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -30,6 +35,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -48,6 +54,7 @@ jobs:
       - run: cargo test --workspace --locked
 
   dependencies:
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -55,7 +62,7 @@ jobs:
           persist-credentials: false
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
-          tool: cargo-deny,cargo-audit
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
       - run: cargo deny check
       - run: cargo audit --deny warnings
       # THIRD_PARTY_LICENSES.md must describe exactly this Cargo.lock.
@@ -65,6 +72,7 @@ jobs:
 
   secrets:
     # Secret scanning over the full history (allowlist: .gitleaks.toml).
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -82,6 +90,7 @@ jobs:
     # with a CycloneDX SBOM (scripts/sbom.sh) and SHA256SUMS. Tagged builds
     # also get a signed SLSA build-provenance attestation (Sigstore, keyless),
     # verifiable with `gh attestation verify <file> --repo <owner>/<repo>`.
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     needs: [lint, test, dependencies, secrets]
     permissions:
@@ -122,6 +131,7 @@ jobs:
     # export/import, support bundle, two sites (AWAY, auto-detection, manual
     # override, ambiguous names, scan restriction), security stop, package
     # removal, tarball install/uninstall. No lab hardware.
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     needs: [release]
     strategy:
@@ -146,6 +156,7 @@ jobs:
 
   aarch64-check:
     # Keep the CLI and daemon portable to Jetson-class aarch64 Linux (compile only).
+    timeout-minutes: 60
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

@@ -34,6 +34,7 @@ docker run --rm \
     -v "$work/src:/src" \
     -v lablink-cargo-registry:/root/.cargo/registry \
     -e LABLINK_GIT_SHA="$sha" \
+    -e SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)" \
     -e LABLINK_MAINTAINER="${LABLINK_MAINTAINER:-}" \
     -e LABLINK_HOMEPAGE="${LABLINK_HOMEPAGE:-}" \
     -e LABLINK_BASE_IMAGE="$(sed -n 's/^FROM //p' packaging/build.Dockerfile)" \
