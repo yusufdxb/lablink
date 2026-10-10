@@ -190,9 +190,12 @@ async fn lookup_user_known(
             format!("[{h}]:{port}")
         }
     };
+    // Only names the user wrote (configured hostnames, the ssh host or the
+    // device name). Learned hostnames were announced by the network and must
+    // not select which of the user's known_hosts entries apply.
     let mut names: Vec<String> = Vec::new();
     if let Some(d) = state.reg().device(name) {
-        for h in d.cfg.hostnames.iter().chain(d.rec.learned_hostnames.iter()) {
+        for h in &d.cfg.hostnames {
             names.push(fmt(h));
         }
         names.push(fmt(&d.ssh_host()));

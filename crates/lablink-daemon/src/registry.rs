@@ -73,10 +73,11 @@ pub struct AddressRecord {
     pub source: String,
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
-    /// Last time this address was obtained by resolving one of the device's
-    /// configured names (mDNS/DNS) or by adoption. Name evidence expires.
+    /// Last time the user adopted the device at this address (explicit
+    /// intent, unlike mDNS/DNS answers, which anyone on the network can
+    /// forge). The evidence expires.
     #[serde(default)]
-    pub last_named_ms: u64,
+    pub last_adopted_ms: u64,
 }
 
 /// Runtime overrides set via `lablink set` / the GUI.
@@ -195,6 +196,10 @@ pub struct Device {
     pub icmp_answered: bool,
     /// ICMP failed while TCP showed the host up (ICMP filtered).
     pub icmp_misses_while_up: u32,
+    /// Names (mDNS/DNS) that moved the device to its current address. The
+    /// next host-key check carries them, so a key that contradicts the pin
+    /// at an address claimed by name is a MISMATCH, not an address reuse.
+    pub attributed_names: Vec<String>,
     persisted_last_seen_ms: u64,
 }
 
@@ -242,6 +247,7 @@ impl Device {
             identity_recheck: false,
             icmp_answered: false,
             icmp_misses_while_up: 0,
+            attributed_names: Vec::new(),
             persisted_last_seen_ms: 0,
         }
     }
@@ -406,6 +412,7 @@ impl Device {
         self.auth_ip = None;
         self.latency_ms = None;
         self.icmp_misses_while_up = 0;
+        self.attributed_names.clear();
     }
 }
 
@@ -1401,10 +1408,11 @@ impl Registry {
             }
         };
         d.observed_keys = keys.clone();
+        let names = d.attributed_names.clone();
         let obs = Observation {
             ip: Some(ip),
             mac: self.neighbor_mac(ip),
-            names: vec![],
+            names,
             host_keys: keys.clone(),
         };
         let outcome = classify(&obs, &self.known_identities());
@@ -1519,27 +1527,23 @@ impl Registry {
         signal: Option<Signal>,
         now: u64,
     ) {
-        // Entries keyed by this device's names always count. Entries keyed by
-        // the bare IP count only when the address itself has evidence beyond
-        // history (configured static IP, resolved from a configured hostname,
-        // MAC/hostname match, adoption): a reused DHCP address must not import
-        // whatever host the user once trusted at that IP.
+        // Entries keyed by the device's configured names always count. Entries
+        // keyed by the bare IP count only when the user tied this address to
+        // the device: a configured static IP, or adopting the device at this
+        // address (recently). MAC and mDNS/DNS answers do not count: anyone on
+        // the network can forge them and point the device at a host whose key
+        // the user once accepted for an unrelated reason.
         let d = &self.devices[name];
-        // Name evidence must be current: an address resolved from a configured
-        // hostname long ago may have been handed to another machine since.
-        let recently_named = d
+        let recently_adopted = d
             .rec
             .addresses
             .iter()
             .find(|a| a.ip == ip)
             .is_some_and(|a| {
-                a.last_named_ms > 0 && now.saturating_sub(a.last_named_ms) <= NAME_EVIDENCE_TTL_MS
+                a.last_adopted_ms > 0
+                    && now.saturating_sub(a.last_adopted_ms) <= NAME_EVIDENCE_TTL_MS
             });
-        let ip_evidence = matches!(
-            signal,
-            Some(Signal::Mac | Signal::Hostname | Signal::StaticIp | Signal::Fingerprint)
-        ) || d.cfg.expected_ip_addrs().contains(&ip)
-            || recently_named;
+        let ip_evidence = d.cfg.expected_ip_addrs().contains(&ip) || recently_adopted;
         let trusted: Vec<&HostKey> = keys
             .iter()
             .filter(|k| {
@@ -1902,10 +1906,19 @@ impl Registry {
         }
         // Keep a healthy current address (multi-homed devices). Move when the
         // caller saw it fail, or when a strong sighting arrives while the
-        // current address has started failing.
+        // current address has started failing. A pinned device verified at
+        // its current address is never moved by an unverified name or MAC
+        // sighting (both are forgeable) on a single missed probe, and a
+        // key-verified sighting always replaces an address whose identity is
+        // not verified (e.g. a stranger answering ping at an old address).
         let strong = verified || matches!(signal, Signal::Mac | Signal::Hostname);
         let current_failing = d.net.consecutive_failures > 0;
-        if d.healthy() && !allow_switch && !(strong && current_failing) {
+        let current_verified =
+            d.identity == IdentityState::Verified && d.identity_ip == d.rec.current_ip;
+        let pinned_and_verified = current_verified && !d.pinned_fingerprints().is_empty();
+        let strong_move = strong && current_failing && (verified || !pinned_and_verified);
+        let displaces_unverified = verified && !current_verified;
+        if d.healthy() && !allow_switch && !strong_move && !displaces_unverified {
             if new_address {
                 let cur = d.rec.current_ip.map(|c| c.to_string()).unwrap_or_default();
                 self.event(Some(name), "address_seen", format!("also seen at {ip} via {source} (matched by {}); keeping {cur} while it is healthy", signal.as_str()));
@@ -1919,6 +1932,8 @@ impl Registry {
             d.identity = IdentityState::Verified;
             d.identity_ip = Some(ip);
             d.identity_signal = Some(Signal::Fingerprint);
+        } else if signal == Signal::Hostname {
+            d.attributed_names = obs.names.clone();
         }
         let msg = match old {
             Some(o) => format!(
@@ -3056,11 +3071,11 @@ fn touch_address(
     interface: Option<String>,
     now: u64,
 ) {
-    let named = matches!(source, "mdns" | "dns" | "adopt");
+    let adopted = source == "adopt";
     if let Some(a) = rec.addresses.iter_mut().find(|a| a.ip == ip) {
         a.last_seen_ms = now;
-        if named {
-            a.last_named_ms = now;
+        if adopted {
+            a.last_adopted_ms = now;
         }
         if mac.is_some() {
             a.mac = mac;
@@ -3079,7 +3094,7 @@ fn touch_address(
         source: source.to_string(),
         first_seen_ms: now,
         last_seen_ms: now,
-        last_named_ms: if named { now } else { 0 },
+        last_adopted_ms: if adopted { now } else { 0 },
     });
     if rec.addresses.len() > MAX_ADDRESSES {
         let cur = rec.current_ip;
@@ -3754,7 +3769,7 @@ mod security_tests {
                 source: source.into(),
                 first_seen_ms: 1,
                 last_seen_ms: 1,
-                last_named_ms: named_at,
+                last_adopted_ms: if source == "adopt" { named_at } else { 0 },
             });
             r
         };
@@ -3770,15 +3785,27 @@ mod security_tests {
             IdentityState::Unverified
         );
         assert!(r.device("default/dev").unwrap().rec.pinned.is_empty());
-        // Address obtained by resolving the device's configured hostname: accepted.
-        let mut r = setup("mdns", 5);
+        // Address from an mDNS/DNS answer (forgeable by anyone on the
+        // network): the IP-keyed entry is ignored, nothing is pinned.
+        for src in ["mdns", "dns"] {
+            let mut r = setup(src, 5);
+            r.apply_keys("default/dev", ip, Ok(vec![k.clone()]), &by_ip, 10);
+            assert_eq!(
+                r.device("default/dev").unwrap().identity,
+                IdentityState::Unverified,
+                "{src}"
+            );
+            assert!(r.device("default/dev").unwrap().rec.pinned.is_empty());
+        }
+        // The user adopted the device at this address: accepted.
+        let mut r = setup("adopt", 5);
         r.apply_keys("default/dev", ip, Ok(vec![k.clone()]), &by_ip, 10);
         assert_eq!(
             r.device("default/dev").unwrap().identity,
             IdentityState::Verified
         );
-        // ...but only while that name evidence is current (DHCP may have reassigned it).
-        let mut r = setup("mdns", 5);
+        // ...but only while that evidence is current (DHCP may have reassigned it).
+        let mut r = setup("adopt", 5);
         r.apply_keys(
             "default/dev",
             ip,
