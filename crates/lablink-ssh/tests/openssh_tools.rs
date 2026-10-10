@@ -2,6 +2,66 @@
 //! Skipped (with a message) when the tools are not installed.
 
 use std::process::Command;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+/// OpenSSH reads `~/.ssh/config` from the home directory in the password
+/// database, whatever `$HOME` says, so tests cannot each have their own. The
+/// tests that rewrite it hold this lock exclusively and every other test in
+/// this binary holds it shared: with any number of test threads, no test
+/// runs ssh while another's config file exists, and two never write it at
+/// once.
+static USER_SSH_CONFIG: RwLock<()> = RwLock::new(());
+
+fn shared_ssh_config() -> RwLockReadGuard<'static, ()> {
+    USER_SSH_CONFIG.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The current user's `~/.ssh/config`, which this test may write while the
+/// guard lives; it must not exist before, and is removed when the guard is
+/// dropped, even if the test fails.
+struct OwnSshConfig {
+    path: std::path::PathBuf,
+    _lock: RwLockWriteGuard<'static, ()>,
+}
+
+impl OwnSshConfig {
+    fn take() -> Self {
+        let lock = USER_SSH_CONFIG.write().unwrap_or_else(|e| e.into_inner());
+        let home = std::path::PathBuf::from(
+            String::from_utf8(
+                Command::new("sh")
+                    .args(["-c", "getent passwd $(id -u) | cut -d: -f6"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim(),
+        );
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let path = home.join(".ssh/config");
+        assert!(
+            !path.exists(),
+            "refusing to overwrite an existing {}",
+            path.display()
+        );
+        OwnSshConfig { path, _lock: lock }
+    }
+
+    fn write(&self, text: &str) {
+        std::fs::write(&self.path, text).unwrap();
+    }
+
+    fn remove(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl Drop for OwnSshConfig {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
 
 fn have(tool: &str) -> bool {
     Command::new("sh")
@@ -13,6 +73,7 @@ fn have(tool: &str) -> bool {
 
 #[test]
 fn fingerprint_agrees_with_ssh_keygen() {
+    let _config = shared_ssh_config();
     if !have("ssh-keygen") {
         eprintln!("SKIP: ssh-keygen not installed");
         return;
@@ -45,6 +106,7 @@ fn fingerprint_agrees_with_ssh_keygen() {
 
 #[test]
 fn known_hosts_lookup_via_ssh_keygen() {
+    let _config = shared_ssh_config();
     if !have("ssh-keygen") {
         eprintln!("SKIP: ssh-keygen not installed");
         return;
@@ -205,6 +267,7 @@ fn assert_no_auth(d: &std::path::Path, tag: &str) {
 /// connection is closed at NEWKEYS); a pin of another key is refused.
 #[test]
 fn key_proof_against_a_real_sshd() {
+    let _config = shared_ssh_config();
     if !have_openssh_server() {
         return;
     }
@@ -229,6 +292,7 @@ fn key_proof_against_a_real_sshd() {
 /// key against the pin, then the signature fails: never proven, refused.
 #[test]
 fn replayed_public_key_over_a_real_key_exchange_is_refused() {
+    let _config = shared_ssh_config();
     use std::io::{Read, Write};
     if !have_openssh_server() {
         return;
@@ -300,6 +364,7 @@ fn replayed_public_key_over_a_real_key_exchange_is_refused() {
 /// one that exits 0, without completing a key exchange proves nothing.
 #[test]
 fn printed_text_and_exit_status_never_prove_possession() {
+    let _config = shared_ssh_config();
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -344,6 +409,7 @@ fn printed_text_and_exit_status_never_prove_possession() {
 /// the device behind it.
 #[test]
 fn key_proof_through_a_real_gateway() {
+    let _config = shared_ssh_config();
     if !have_openssh_server() {
         return;
     }
@@ -413,6 +479,7 @@ fn key_proof_through_a_real_gateway() {
 /// possession proof must never call that proven. Skipped without ssh.
 #[test]
 fn forged_pre_kex_disconnect_is_never_a_key_proof() {
+    let _config = shared_ssh_config();
     use std::io::{Read, Write};
     if !have("ssh") {
         eprintln!("SKIP: ssh not installed");
@@ -473,6 +540,7 @@ fn forged_pre_kex_disconnect_is_never_a_key_proof() {
 /// to negotiate ... Their offer:" with newlines unescaped.
 #[test]
 fn forged_kexinit_offer_is_never_a_key_proof() {
+    let _config = shared_ssh_config();
     use std::io::{Read, Write};
     if !have("ssh") {
         eprintln!("SKIP: ssh not installed");
@@ -551,6 +619,7 @@ fn forged_kexinit_offer_is_never_a_key_proof() {
 /// real device proves its key instead of landing in a false security stop.
 #[test]
 fn a_partial_pin_with_another_algorithm_order_still_proves() {
+    let _config = shared_ssh_config();
     if !have_openssh_server() {
         return;
     }
@@ -618,24 +687,7 @@ fn a_hostile_client_config_cannot_vouch_for_a_key() {
     )
     .unwrap();
     std::fs::set_permissions(&khc, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let home = std::path::PathBuf::from(
-        String::from_utf8(
-            Command::new("sh")
-                .args(["-c", "getent passwd $(id -u) | cut -d: -f6"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim(),
-    );
-    std::fs::create_dir_all(home.join(".ssh")).unwrap();
-    let cfg = home.join(".ssh/config");
-    assert!(
-        !cfg.exists(),
-        "refusing to overwrite an existing {}",
-        cfg.display()
-    );
+    let cfg = OwnSshConfig::take();
     // One attack per config, so that one cannot mask another.
     let configs = [
         format!(
@@ -647,11 +699,11 @@ fn a_hostile_client_config_cannot_vouch_for_a_key() {
         "Host *\n  ProxyUseFdpass yes\n".to_string(),
     ];
     for c in configs {
-        std::fs::write(&cfg, &c).unwrap();
+        cfg.write(&c);
         let impostor =
             lablink_ssh::prove_host_key(&pinned(d, port, &pubkey(d, "other")), PROOF_TIMEOUT);
         let real = lablink_ssh::prove_host_key(&pinned(d, port, &pubkey(d, "hk")), PROOF_TIMEOUT);
-        std::fs::remove_file(&cfg).unwrap();
+        cfg.remove();
         assert!(
             !matches!(impostor, lablink_ssh::KeyProof::Proven),
             "{impostor:?} with {c}"
@@ -747,29 +799,10 @@ fn config_text_cannot_turn_a_failed_proof_into_a_security_stop() {
         let _ = s.read(&mut buf);
     });
     let dir = tempfile::tempdir().unwrap();
-    let home = std::path::PathBuf::from(
-        String::from_utf8(
-            Command::new("sh")
-                .args(["-c", "getent passwd $(id -u) | cut -d: -f6"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim(),
-    );
-    std::fs::create_dir_all(home.join(".ssh")).unwrap();
-    let cfg = home.join(".ssh/config");
-    assert!(
-        !cfg.exists(),
-        "refusing to overwrite an existing {}",
-        cfg.display()
-    );
-    std::fs::write(
-        &cfg,
+    let cfg = OwnSshConfig::take();
+    cfg.write(
         "Match exec \"echo 'ssh_dispatch_run_fatal: Connection to UNKNOWN port 65535: incorrect signature' >&2; true\"\n",
-    )
-    .unwrap();
+    );
     let proof = lablink_ssh::prove_host_key(
         &pinned(
             dir.path(),
@@ -778,7 +811,7 @@ fn config_text_cannot_turn_a_failed_proof_into_a_security_stop() {
         ),
         PROOF_TIMEOUT,
     );
-    std::fs::remove_file(&cfg).unwrap();
+    cfg.remove();
     let _ = server.join();
     assert!(
         matches!(proof, lablink_ssh::KeyProof::Inconclusive(_)),
