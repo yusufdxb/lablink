@@ -210,6 +210,7 @@ async fn dispatch(state: &Arc<State>, req: Request) -> Result<serde_json::Value,
         Request::Ping => Ok(serde_json::json!({
             "protocol_version": PROTOCOL_VERSION,
             "version": env!("CARGO_PKG_VERSION"),
+            "git_sha": lablink_core::GIT_SHA,
             "pid": std::process::id(),
             "uptime_s": state.uptime_s(),
         })),

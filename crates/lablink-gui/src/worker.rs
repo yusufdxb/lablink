@@ -93,7 +93,11 @@ pub enum Cmd {
     /// `install`, `start`, `stop`, `restart`, `enable` or `disable`.
     ServiceControl(&'static str),
     /// Validate and write config.yaml, then restart the daemon if it runs as a service.
-    SaveConfig(Box<lablink_core::Config>, std::path::PathBuf),
+    SaveConfig {
+        cfg: Box<lablink_core::Config>,
+        expected: Box<lablink_core::Config>,
+        path: std::path::PathBuf,
+    },
     /// Batch-mode test login, then ask the daemon to re-check the login.
     TestSsh(String),
     /// Scan host keys without pinning anything (the CLI's trust preview).
@@ -115,6 +119,7 @@ pub enum Event {
     Poll {
         status: Result<StatusReport, Fail>,
         version: Option<String>,
+        build_warning: Option<String>,
     },
     Detail(String, Result<Box<DeviceDetail>, Fail>),
     History(String, Result<Vec<HistoryEvent>, Fail>),
@@ -194,13 +199,17 @@ impl Worker {
 }
 
 fn poll_once(client: &Client) -> Event {
-    let version = match client.call(&Request::Ping) {
-        Ok(v) => Some(parse_version(&v)),
+    let (version, build_warning) = match client.call(&Request::Ping) {
+        Ok(v) => (
+            Some(parse_version(&v)),
+            daemon_build_warning(&v, lablink_core::GIT_SHA),
+        ),
         Err(e) => {
             return Event::Poll {
                 status: Err(e.into()),
                 version: None,
-            }
+                build_warning: None,
+            };
         }
     };
     // Every site: the UI filters by the site view it shows.
@@ -211,7 +220,11 @@ fn poll_once(client: &Client) -> Event {
             all: true,
         })
         .map_err(Fail::from);
-    Event::Poll { status, version }
+    Event::Poll {
+        status,
+        version,
+        build_warning,
+    }
 }
 
 fn execute(socket: &PathBuf, cmd: Cmd) -> Event {
@@ -302,8 +315,18 @@ fn execute(socket: &PathBuf, cmd: Cmd) -> Event {
             };
             Event::ServiceDone(action, r)
         }
-        Cmd::SaveConfig(cfg, path) => {
-            let r = lablink_setup::configfile::write(&path, &cfg).map(|backup| {
+        Cmd::SaveConfig {
+            cfg,
+            expected,
+            path,
+        } => {
+            let r = lablink_setup::configfile::update(&path, |current| {
+                if current != expected.as_ref() {
+                    return Err("Configuration changed since Settings was opened. Reload Settings and apply your changes again.".into());
+                }
+                *current = *cfg;
+                Ok(())
+            }).map(|backup| {
                 let mut m = format!("saved {}", path.display());
                 if let Some(b) = backup {
                     m.push_str(&format!(" (previous file: {})", b.display()));
@@ -314,16 +337,15 @@ fn execute(socket: &PathBuf, cmd: Cmd) -> Event {
         }
         Cmd::TestSsh(device) => {
             let r = run_remote(&client, &device, "true");
-            if matches!(&r, Ok(o) if o.exit_code == Some(0)) {
-                // Turn the daemon's login state GREEN now, not in 5 minutes.
-                let _ = client.call(&Request::Set {
-                    device: device.clone(),
-                    changes: DeviceChanges {
-                        recheck: true,
-                        ..Default::default()
-                    },
-                });
-            }
+            // Refresh identity and login after failures too: a changed key must
+            // not leave the card showing a stale VERIFIED result.
+            let _ = client.call(&Request::Set {
+                device: device.clone(),
+                changes: DeviceChanges {
+                    recheck: true,
+                    ..Default::default()
+                },
+            });
             Event::TestSsh(device, r)
         }
         Cmd::TrustPreview(device) => {
@@ -414,10 +436,24 @@ fn run_doctor(client: &Client, devices: Vec<String>) -> Result<Box<lablink_docto
 }
 
 pub fn parse_version(v: &Value) -> String {
-    v.get("version")
+    let version = v.get("version").and_then(Value::as_str).unwrap_or("?");
+    match v
+        .get("git_sha")
         .and_then(Value::as_str)
-        .unwrap_or("?")
-        .to_string()
+        .filter(|s| !s.is_empty())
+    {
+        Some(sha) => format!("{version} ({})", sha.chars().take(12).collect::<String>()),
+        None => version.to_string(),
+    }
+}
+
+fn daemon_build_warning(v: &Value, client_sha: Option<&str>) -> Option<String> {
+    let mismatch = v["version"].as_str() != Some(lablink_core::VERSION)
+        || client_sha.is_some_and(|sha| v["git_sha"].as_str() != Some(sha));
+    mismatch.then(|| {
+        "The running daemon is a different or unknown build. Restart lablinkd after upgrading."
+            .into()
+    })
 }
 
 /// `History` returns `{"events": [...]}`.
@@ -458,7 +494,9 @@ mod tests {
     fn missing_socket_is_unavailable() {
         let c = Client::new("/nonexistent/lablink.sock");
         match poll_once(&c) {
-            Event::Poll { status, version } => {
+            Event::Poll {
+                status, version, ..
+            } => {
                 let f = status.unwrap_err();
                 assert!(f.unavailable, "{}", f.message);
                 assert!(version.is_none());
@@ -486,5 +524,76 @@ mod tests {
         t.join().unwrap();
         assert_eq!(err.message, "host key changed");
         assert!(!err.unavailable);
+    }
+
+    #[test]
+    fn failed_test_ssh_requests_an_immediate_recheck() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let t = std::thread::spawn(move || {
+            for cmd in ["resolve", "set"] {
+                let (s, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&s).read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(req["method"], cmd, "{line}");
+                let response = if cmd == "resolve" {
+                    json!({"ok":false,"error":{"code":"identity_mismatch","message":"host key changed"}})
+                } else {
+                    assert_eq!(req["params"]["changes"]["recheck"], true, "{line}");
+                    json!({"ok":true,"result":{}})
+                };
+                writeln!(&s, "{response}").unwrap();
+            }
+        });
+        let Event::TestSsh(_, result) = execute(&sock, Cmd::TestSsh("lab/device".into())) else {
+            panic!("wrong event");
+        };
+        assert_eq!(result.unwrap_err().message, "host key changed");
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn stale_settings_cannot_overwrite_a_newer_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let orig = lablink_core::Config::default();
+        let mut newer = orig.clone();
+        newer.preferences.terminal = Some("xterm".into());
+        lablink_setup::configfile::write(&path, &newer).unwrap();
+        let mut edit = orig.clone();
+        edit.preferences.terminal = Some("konsole".into());
+        let event = execute(
+            &dir.path().join("missing.sock"),
+            Cmd::SaveConfig {
+                cfg: Box::new(edit),
+                expected: Box::new(orig),
+                path: path.clone(),
+            },
+        );
+        let Event::ConfigSaved(result) = event else {
+            panic!("wrong event")
+        };
+        assert!(result.unwrap_err().contains("Reload Settings"));
+        assert_eq!(lablink_core::Config::load(&path).unwrap(), newer);
+    }
+
+    #[test]
+    fn daemon_build_display_warns_about_stale_or_unknown_release_builds() {
+        let v = json!({"version":lablink_core::VERSION,"git_sha":"abcdef1234567890"});
+        assert_eq!(
+            parse_version(&v),
+            format!("{} (abcdef123456)", lablink_core::VERSION)
+        );
+        assert!(daemon_build_warning(&v, Some("abcdef1234567890")).is_none());
+        assert!(daemon_build_warning(&v, Some("old-client-sha")).is_some());
+        assert!(daemon_build_warning(
+            &json!({"version":lablink_core::VERSION}),
+            Some("release-sha")
+        )
+        .is_some());
+        assert!(daemon_build_warning(&json!({"version":lablink_core::VERSION}), None).is_none());
+        assert!(daemon_build_warning(&json!({"version":"old-version"}), None).is_some());
     }
 }

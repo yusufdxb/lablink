@@ -286,6 +286,45 @@ fn key_proof_against_a_real_sshd() {
     assert_no_auth(d, "dev");
 }
 
+/// ssh-copy-id must apply the pin to its own ssh children before offering a
+/// password or public key. The install must stop even if ordinary ssh config
+/// or the agent would otherwise make the impostor usable.
+#[test]
+fn copy_id_refuses_a_changed_host_key_before_authentication() {
+    let _config = shared_ssh_config();
+    if !have_openssh_server() || !have("ssh-copy-id") {
+        eprintln!("SKIP: ssh-copy-id and OpenSSH server required");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for name in ["real", "impostor", "client"] {
+        keygen(d, name);
+    }
+    let (_server, port) = sshd(d, "impostor", "impostor", "PasswordAuthentication yes\n");
+    let mut t = pinned(d, port, &pubkey(d, "real"));
+    t.options.insert("BatchMode".into(), "yes".into());
+    let args = lablink_ssh::copy_id_args(&t, &d.join("client.pub")).unwrap();
+    // Some ssh-copy-id versions use $HOME/.ssh for their temporary files.
+    // Keep these in this test's directory, including on pristine systems.
+    std::fs::create_dir(d.join(".ssh")).unwrap();
+    let out = Command::new("ssh-copy-id")
+        .args(args)
+        .env("HOME", d)
+        .env_remove("SSH_AUTH_SOCK")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("Host key verification failed"), "{text}");
+    assert_no_auth(d, "impostor");
+}
+
 /// A machine in the middle that presents the pinned public key but does not
 /// hold its private key: it relays to a real sshd with another key and puts
 /// the pinned key's blob in the server's key-exchange reply. ssh accepts the
@@ -379,7 +418,7 @@ fn printed_text_and_exit_status_never_prove_possession() {
             "deny",
             "echo 'ops@127.0.0.1: Permission denied (publickey,password).' >&2; exit 255",
         ),
-        ("zero", "exit 0"),
+        ("zero", "echo 'Authenticated to 127.0.0.1' >&2; exit 0"),
         (
             "banner",
             "printf 'SSH-2.0-OpenSSH_10.2\\r\\n'; sleep 1; exit 0",

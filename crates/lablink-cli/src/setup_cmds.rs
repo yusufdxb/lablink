@@ -301,6 +301,19 @@ pub fn cmd_version(client: &Client, json_out: bool) -> R {
         .call(&Request::Ping)
         .ok();
     let exe = std::env::current_exe().ok();
+    let build_status = daemon.as_ref().map(|v| {
+        if v["version"].as_str() != Some(lablink_core::VERSION)
+            || v["protocol_version"].as_u64() != Some(PROTOCOL_VERSION as u64)
+        {
+            "different"
+        } else {
+            match (lablink_core::GIT_SHA, v["git_sha"].as_str()) {
+                (Some(a), Some(b)) if a == b => "same",
+                (Some(_), Some(_)) => "different",
+                _ => "unknown",
+            }
+        }
+    });
     let install = match exe.as_deref().and_then(Path::parent) {
         Some(d) if d == Path::new("/usr/bin") => "Debian package (/usr/bin)".to_string(),
         Some(d) => d.display().to_string(),
@@ -314,6 +327,7 @@ pub fn cmd_version(client: &Client, json_out: bool) -> R {
             "protocol_version": PROTOCOL_VERSION,
             "install": install,
             "daemon": daemon,
+            "daemon_build": build_status,
         }));
     } else {
         println!(
@@ -325,8 +339,9 @@ pub fn cmd_version(client: &Client, json_out: bool) -> R {
         );
         match &daemon {
             Some(v) => println!(
-                "lablinkd {} running (pid {}, up {} s, protocol {})",
+                "lablinkd {} running (commit {}, pid {}, up {} s, protocol {})",
                 v["version"].as_str().unwrap_or("?"),
+                v["git_sha"].as_str().unwrap_or("unknown"),
                 v["pid"],
                 v["uptime_s"],
                 v["protocol_version"]
@@ -334,6 +349,11 @@ pub fn cmd_version(client: &Client, json_out: bool) -> R {
             None => println!("lablinkd not running"),
         }
         println!("installed in {install}");
+        match build_status {
+            Some("different") => eprintln!("lablink: WARNING: client and daemon builds differ. Restart lablinkd using the installed build before connecting."),
+            Some("unknown") => eprintln!("lablink: WARNING: client/daemon build identity could not be compared. Restart lablinkd after upgrading and check `lablink version` again."),
+            _ => {}
+        }
     }
     Ok(exit::OK)
 }
@@ -609,8 +629,16 @@ pub fn cmd_import(
             return Ok(exit::REFUSED);
         }
     }
-    let backup = configfile::write(&path, &plan.config)
-        .map_err(|e| Fail::new(exit::FAILURE, "import", e))?;
+    let backup = configfile::update(&path, |latest| {
+        if latest != &current {
+            return Err(
+                "configuration changed while confirming the import; review it again".into(),
+            );
+        }
+        *latest = plan.config.clone();
+        Ok(())
+    })
+    .map_err(|e| Fail::new(exit::FAILURE, "import", e))?;
     println!("wrote {}", path.display());
     if let Some(b) = backup {
         println!("previous config saved as {}", b.display());
@@ -656,7 +684,7 @@ pub fn cmd_site_add(
     config: Option<PathBuf>,
 ) -> R {
     let path = config.unwrap_or_else(lablink_core::paths::default_config_path);
-    let mut cfg = load_config(&path)?;
+    let cfg = load_config(&path)?;
     if !lablink_core::config::valid_display_name(name) {
         return Err(usage("the site name must be 1-64 printable characters"));
     }
@@ -688,9 +716,14 @@ pub fn cmd_site_add(
     let mut site = lablink_core::config::SiteConfig::new(&id, name.trim());
     site.auto_detect = !no_auto_detect;
     site.networks = chosen;
-    cfg.sites.push(site);
-    let backup =
-        configfile::write(&path, &cfg).map_err(|e| Fail::new(exit::USAGE, "invalid_config", e))?;
+    let backup = configfile::update(&path, |latest| {
+        if latest.site(&id).is_some() {
+            return Err(format!("a site with id '{id}' already exists"));
+        }
+        latest.sites.push(site);
+        Ok(())
+    })
+    .map_err(|e| Fail::new(exit::USAGE, "invalid_config", e))?;
     println!(
         "added site '{}' ({id}) with {} network(s) to {}",
         name.trim(),
@@ -707,16 +740,21 @@ pub fn cmd_site_add(
 /// `lablink site rename`.
 pub fn cmd_site_rename(site: &str, name: &str, config: Option<PathBuf>) -> R {
     let path = config.unwrap_or_else(lablink_core::paths::default_config_path);
-    let mut cfg = load_config(&path)?;
-    let Some(s) = cfg.site_mut(site) else {
-        return Err(Fail::new(
-            exit::DEVICE_NOT_FOUND,
-            "device_not_found",
-            format!("unknown site '{site}' (see `lablink sites`)"),
-        ));
-    };
-    let old = std::mem::replace(&mut s.name, name.trim().to_string());
-    configfile::write(&path, &cfg).map_err(|e| Fail::new(exit::USAGE, "invalid_config", e))?;
+    let mut old = String::new();
+    configfile::update(&path, |cfg| {
+        let s = cfg
+            .site_mut(site)
+            .ok_or_else(|| format!("unknown site '{site}' (see `lablink sites`)"))?;
+        old = std::mem::replace(&mut s.name, name.trim().to_string());
+        Ok(())
+    })
+    .map_err(|e| {
+        if e.starts_with("unknown site '") {
+            Fail::new(exit::DEVICE_NOT_FOUND, "device_not_found", e)
+        } else {
+            Fail::new(exit::USAGE, "invalid_config", e)
+        }
+    })?;
     println!("renamed site '{old}' to '{}' (id unchanged)", name.trim());
     println!("{}", service::restart_if_active());
     Ok(exit::OK)

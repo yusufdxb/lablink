@@ -176,9 +176,9 @@ lablink resolve <device> --json   # host_key_alias and known_hosts_file
 - Key exchange, signature checks and all authentication: OpenSSH.
 - Command-line options take precedence over `~/.ssh/config`; LabLink relies
   on this for its host-key options.
-- An existing ControlMaster connection you opened is reused by OpenSSH
-  without a new key exchange (see `ssh.reuse_control_master` in
-  [SECURITY.md](../SECURITY.md#known-limitations)).
+- Pinned sessions reuse only LabLink's private, device-and-pin-scoped
+  ControlMaster socket. Reuse performs no new key exchange; disable it with
+  `ssh.reuse_control_master: false` when a fresh exchange is required.
 - Anyone who can act as your user (or root) can edit LabLink's pins.
 - The proof shows that whoever answers at the address can reach the private
   key; a machine that only relays bytes to the real device passes it. SSH

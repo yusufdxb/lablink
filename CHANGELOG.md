@@ -6,6 +6,35 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Refuse shared or foreign state paths and executables; directory-service
+  account lookups disable the private-group exception.
+- Restrict pinned SSH master reuse to LabLink-owned device, key and route
+  scopes, and harden gateway sessions and key trust confirmation.
+- Preserve cached trust after transient storage errors and persist identity
+  mismatches until a successful proof or explicit trust change.
+- Prevent cross-site automatic pin imports and stale gateway-proof reuse.
+- Write pinned keys through exclusive no-follow temporary files.
+- Remove arbitrary remote output from support bundles, redact additional
+  address and secret forms, and omit local archive owner names.
+
+### Fixed
+
+- Partial key scans leave a device unverified and retry without a false
+  identity-mismatch alarm.
+- Configuration edits are serialized and stale GUI/import snapshots refused.
+- Support bundles handle Unicode login text and configurations with quoted
+  bracket-heavy commands can be saved back.
+- Foreground command interrupts clean up SSH subprocesses and retain signal
+  exit status; changed-host-key errors give security advice and recheck.
+- The GUI wraps device details and requires trust before terminal access.
+- Per-user installers quote desktop launch paths, honor absolute XDG paths,
+  and uninstall only the selected prefix.
+- Version diagnostics include the daemon build and warn about stale builds.
+- Removed devices are forgotten; `lablink forget` clears runtime trust.
+- Adopted devices at different sites use distinct default SSH Host names.
+
 ## [0.3.0] - 2026-10-10
 
 First public release.

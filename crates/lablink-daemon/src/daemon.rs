@@ -83,27 +83,46 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = opts.config;
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&opts.state_dir)
             .map_err(|e| format!("cannot create state dir {}: {e}", opts.state_dir.display()))?;
-        let _ = std::fs::set_permissions(&opts.state_dir, std::fs::Permissions::from_mode(0o700));
         // The state dir holds the pins: it must be this user's own, private
         // directory, in a path no other user can rearrange.
         use std::os::unix::fs::MetadataExt;
-        let m = std::fs::metadata(&opts.state_dir)
+        let m = std::fs::symlink_metadata(&opts.state_dir)
             .map_err(|e| format!("cannot check state dir {}: {e}", opts.state_dir.display()))?;
         // SAFETY: getuid has no preconditions and cannot fail.
         let me = unsafe { libc::getuid() };
-        if m.uid() != me || m.mode() & 0o077 != 0 {
+        if !m.is_dir() || m.uid() != me || m.mode() & 0o777 != 0o700 {
             return Err(format!(
                 "state dir {} must belong to you with mode 0700 (it belongs to uid {}, mode {:o})",
                 opts.state_dir.display(),
                 m.uid(),
                 m.mode() & 0o7777
             ));
+        }
+        // A private parent does not vouch for files planted before it
+        // became private. Never take pins from a foreign file or a link.
+        for name in ["cache.db", "cache.db-wal", "cache.db-shm", "lablinkd.lock"] {
+            let path = opts.state_dir.join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if !m.is_file() || m.uid() != me => {
+                    return Err(format!(
+                        "refusing state file {}: must be a regular file owned by you",
+                        path.display()
+                    ));
+                }
+                Ok(_) => {
+                    if let Some(why) = lablink_core::paths::writable_by_others(&path) {
+                        return Err(format!("refusing state file {}: {why}", path.display()));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("cannot check state file {}: {e}", path.display())),
+            }
         }
         if let Some(why) = lablink_core::paths::writable_by_others(&opts.state_dir) {
             return Err(format!(

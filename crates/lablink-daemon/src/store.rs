@@ -57,7 +57,7 @@ pub struct Store {
 pub enum OpenNote {
     Fresh,
     Existing,
-    /// The old file was unreadable and was moved to the given path.
+    /// Positive corruption evidence caused the old file to be quarantined.
     RecoveredFromCorruption(PathBuf, String),
 }
 
@@ -90,70 +90,296 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn check(conn: &Connection) -> Result<(), String> {
-    let r: String = conn
-        .query_row("PRAGMA quick_check", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    if r != "ok" {
-        return Err(format!("quick_check: {r}"));
+enum OpenFailure {
+    Corrupt(String),
+    Other(String),
+}
+
+impl From<rusqlite::Error> for OpenFailure {
+    fn from(e: rusqlite::Error) -> Self {
+        match &e {
+            rusqlite::Error::SqliteFailure(code, _)
+                if matches!(
+                    code.extended_code & 0xff,
+                    rusqlite::ffi::SQLITE_CORRUPT | rusqlite::ffi::SQLITE_NOTADB
+                ) =>
+            {
+                Self::Corrupt(e.to_string())
+            }
+            _ => Self::Other(e.to_string()),
+        }
     }
-    init_schema(conn).map_err(|e| e.to_string())?;
-    let v: String = conn
+}
+
+/// Check an existing version before any schema or journal-mode writes.
+fn check_version(conn: &Connection) -> Result<(), OpenFailure> {
+    let has_meta: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_meta {
+        return Ok(());
+    }
+    let version: Option<String> = conn
         .query_row(
             "SELECT value FROM meta WHERE key='schema_version'",
             [],
             |r| r.get(0),
         )
+        .optional()?;
+    if let Some(v) = version {
+        if !matches!(v.parse::<i64>(), Ok(n) if n <= SCHEMA_VERSION) {
+            return Err(OpenFailure::Other(format!(
+                "unsupported cache schema version {v}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check(conn: &Connection) -> Result<(), OpenFailure> {
+    let r: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if r != "ok" {
+        return Err(OpenFailure::Corrupt(format!("quick_check: {r}")));
+    }
+    check_version(conn)
+}
+
+fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+struct JournalSnapshot {
+    original: PathBuf,
+    suffix: &'static str,
+    file: tempfile::NamedTempFile,
+    len: u64,
+}
+
+/// SQLite may delete journals even when opening a corrupt database fails.
+/// Copy them first to private files, bounded by the initial length and using
+/// streaming IO, never allocating a journal-sized buffer.
+fn snapshot_journals(path: &Path, dir: &Path) -> Result<Vec<JournalSnapshot>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    if let Some(why) = lablink_core::paths::writable_by_others(dir) {
+        return Err(format!("refusing cache directory: {why}"));
+    }
+    let mut snapshots = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        let original = suffixed(path, suffix);
+        let checked = match std::fs::symlink_metadata(&original) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("cannot check cache journal: {e}")),
+        };
+        // SAFETY: getuid is infallible.
+        if !checked.is_file() || checked.uid() != unsafe { libc::getuid() } {
+            return Err("refusing cache journal: must be a regular file owned by you".into());
+        }
+        if let Some(why) = lablink_core::paths::writable_by_others(&original) {
+            return Err(format!("refusing cache journal: {why}"));
+        }
+        let source = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&original)
+            .map_err(|e| format!("cannot snapshot cache journal: {e}"))?;
+        let opened = source.metadata().map_err(|e| e.to_string())?;
+        if !opened.is_file() || (opened.dev(), opened.ino()) != (checked.dev(), checked.ino()) {
+            return Err("cache journal changed while being checked".into());
+        }
+        let mut file = tempfile::Builder::new()
+            .prefix(".lablink-journal-")
+            .tempfile_in(dir)
+            .map_err(|e| format!("cannot stage cache journal: {e}"))?;
+        let len = opened.len();
+        let copied = std::io::copy(&mut source.take(len), file.as_file_mut())
+            .map_err(|e| format!("cannot snapshot cache journal: {e}"))?;
+        if copied != len {
+            return Err("cache journal changed while being copied".into());
+        }
+        file.as_file().sync_all().map_err(|e| e.to_string())?;
+        snapshots.push(JournalSnapshot {
+            original,
+            suffix,
+            file,
+            len,
+        });
+    }
+    Ok(snapshots)
+}
+
+fn copy_snapshot(snapshot: &JournalSnapshot, destination: &Path) -> Result<(), String> {
+    use std::io::{Read, Seek};
+    let dir = destination.parent().unwrap_or(Path::new("."));
+    let mut file = tempfile::Builder::new()
+        .prefix(".lablink-journal-")
+        .tempfile_in(dir)
         .map_err(|e| e.to_string())?;
-    match v.parse::<i64>() {
-        Ok(n) if n <= SCHEMA_VERSION => Ok(()),
-        _ => Err(format!("unsupported cache schema version {v}")),
+    let mut source = snapshot
+        .file
+        .as_file()
+        .try_clone()
+        .map_err(|e| e.to_string())?;
+    source.rewind().map_err(|e| e.to_string())?;
+    let copied = std::io::copy(&mut source.take(snapshot.len), file.as_file_mut())
+        .map_err(|e| e.to_string())?;
+    if copied != snapshot.len {
+        return Err("incomplete cache journal snapshot".into());
+    }
+    file.as_file().sync_all().map_err(|e| e.to_string())?;
+    file.persist_noclobber(destination)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Stage every journal before moving the DB. A persistent guard prevents a
+/// later startup from treating an interrupted/failed recovery as a fresh DB.
+fn recover(
+    path: &Path,
+    dir: &Path,
+    snapshots: Vec<JournalSnapshot>,
+) -> Result<(Connection, PathBuf), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let name = path.file_name().ok_or("cache path has no file name")?;
+    let mut prefix = name.to_os_string();
+    prefix.push(".corrupt-");
+    let quarantine = tempfile::Builder::new()
+        .prefix(&prefix)
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(dir)
+        .map_err(|e| format!("cannot stage corrupt cache: {e}"))?;
+    let aside = quarantine.path().join(name);
+    let guard = suffixed(path, ".recovery-pending");
+    let guard_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&guard)
+        .map_err(|e| format!("cannot guard corrupt cache recovery: {e}"))?;
+    guard_file.sync_all().map_err(|e| e.to_string())?;
+    let mut moved = false;
+    let mut fresh_started = false;
+    let attempt = (|| {
+        for snapshot in &snapshots {
+            copy_snapshot(snapshot, &suffixed(&aside, snapshot.suffix))?;
+        }
+        std::fs::rename(path, &aside)
+            .map_err(|e| format!("cannot move corrupt cache aside: {e}"))?;
+        moved = true;
+        for suffix in ["-wal", "-shm"] {
+            match std::fs::remove_file(suffixed(path, suffix)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("cannot remove quarantined journal: {e}")),
+            }
+        }
+        fresh_started = true;
+        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        init_schema(&conn).map_err(|e| e.to_string())?;
+        Ok(conn)
+    })();
+    match attempt {
+        Ok(conn) => {
+            let _kept = quarantine.keep();
+            std::fs::remove_file(&guard).map_err(|e| {
+                format!("cache recovered, but recovery guard could not be cleared: {e}")
+            })?;
+            Ok((conn, aside))
+        }
+        Err(reason) => {
+            let rollback = (|| {
+                if fresh_started {
+                    for suffix in ["", "-wal", "-shm"] {
+                        match std::fs::remove_file(suffixed(path, suffix)) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => return Err(e.to_string()),
+                        }
+                    }
+                }
+                if moved {
+                    // Never overwrite a file that appeared during rollback.
+                    std::fs::hard_link(&aside, path).map_err(|e| e.to_string())?;
+                    std::fs::remove_file(&aside).map_err(|e| e.to_string())?;
+                }
+                for snapshot in &snapshots {
+                    match std::fs::symlink_metadata(&snapshot.original) {
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            copy_snapshot(snapshot, &snapshot.original)?
+                        }
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                std::fs::remove_file(&guard).map_err(|e| e.to_string())?;
+                Ok::<(), String>(())
+            })();
+            match rollback {
+                Ok(()) => Err(format!("{reason}; recovery was rolled back")),
+                Err(error) => {
+                    let kept = quarantine.keep();
+                    // Snapshots have already been copied into this directory.
+                    Err(format!("{reason}; rollback failed: {error}; recovery is blocked by {}; evidence kept in {}", guard.display(), kept.display()))
+                }
+            }
+        }
     }
 }
 
 impl Store {
     /// Open (or create) the cache, recovering from corruption.
     pub fn open(path: &Path, retention: u32) -> Result<(Self, OpenNote), String> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        }
-        let existed = path.exists();
-        let attempt = Connection::open(path)
-            .map_err(|e| e.to_string())
-            .and_then(|c| check(&c).map(|_| c));
-        match attempt {
-            Ok(conn) => Ok((
-                Self {
-                    conn,
-                    retention,
-                    path: path.to_path_buf(),
-                },
-                if existed {
-                    OpenNote::Existing
-                } else {
-                    OpenNote::Fresh
-                },
-            )),
-            Err(reason) => {
-                let ts = lablink_core::time::now_ms();
-                let aside = path.with_extension(format!("db.corrupt-{ts}"));
-                std::fs::rename(path, &aside)
-                    .map_err(|e| format!("cannot move corrupt cache aside: {e}"))?;
-                for suffix in ["-wal", "-shm"] {
-                    let side = PathBuf::from(format!("{}{suffix}", path.display()));
-                    let _ = std::fs::remove_file(side);
-                }
-                let conn = Connection::open(path).map_err(|e| e.to_string())?;
-                init_schema(&conn).map_err(|e| e.to_string())?;
-                Ok((
-                    Self {
-                        conn,
-                        retention,
-                        path: path.to_path_buf(),
-                    },
-                    OpenNote::RecoveredFromCorruption(aside, reason),
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let guard = suffixed(path, ".recovery-pending");
+        match std::fs::symlink_metadata(&guard) {
+            Ok(_) => {
+                return Err(format!(
+                    "cache recovery is incomplete; inspect {} before restarting",
+                    guard.display()
                 ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot check cache recovery guard: {e}")),
+        }
+        let snapshots = snapshot_journals(path, dir)?;
+        let existed = path.exists();
+        let attempt = (|| {
+            if existed {
+                // Read-only validation cannot initialize old tables or checkpoint
+                // a future-format database while refusing its version.
+                let reader = Connection::open_with_flags(
+                    path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                reader.busy_timeout(std::time::Duration::from_secs(2))?;
+                check(&reader)?;
+            }
+            let conn = Connection::open(path)?;
+            conn.busy_timeout(std::time::Duration::from_secs(2))?;
+            check_version(&conn)?;
+            init_schema(&conn)?;
+            Ok::<Connection, OpenFailure>(conn)
+        })();
+        match attempt {
+            Ok(conn) => Ok((Self { conn, retention, path: path.to_path_buf() },
+                if existed { OpenNote::Existing } else { OpenNote::Fresh })),
+            Err(OpenFailure::Other(reason)) => Err(format!(
+                "cannot open cache {}: {reason}; existing cache and trust pins were not quarantined", path.display()
+            )),
+            Err(OpenFailure::Corrupt(reason)) => {
+                let (conn, aside) = recover(path, dir, snapshots)?;
+                Ok((Self { conn, retention, path: path.to_path_buf() }, OpenNote::RecoveredFromCorruption(aside, reason)))
             }
         }
     }
@@ -341,6 +567,12 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    fn journal_path(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        name.into()
+    }
+
     use super::*;
 
     fn ev(i: u64) -> HistoryEvent {
@@ -417,6 +649,153 @@ mod tests {
             n => panic!("{n:?}"),
         }
         assert!(s.load(10).unwrap().devices.is_empty());
+    }
+
+    #[test]
+    fn a_locked_cache_is_not_corruption_and_keeps_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("cache.db");
+        let (mut s, _) = Store::open(&p, 100).unwrap();
+        s.save(&Batch {
+            devices: vec![("test/device".into(), "pinned identity".into())],
+            ..Default::default()
+        })
+        .unwrap();
+        s.conn
+            .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let before = std::fs::read(&p).unwrap();
+        assert!(
+            Store::open(&p, 100).is_err(),
+            "a lock must never reset the cache"
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        s.conn.execute_batch("ROLLBACK").unwrap();
+        drop(s);
+        let (s, note) = Store::open(&p, 100).unwrap();
+        assert_eq!(note, OpenNote::Existing);
+        assert_eq!(s.load(10).unwrap().devices[0].1, "pinned identity");
+    }
+
+    #[test]
+    fn a_future_minimal_schema_is_refused_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','999'); CREATE TABLE future_pins(key TEXT);").unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        assert!(Store::open(&path, 100).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let conn = Connection::open(&path).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn corrupt_sidecars_are_saved_before_sqlite_can_delete_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        let original = b"a synthetic corrupt database, not an SQLite file";
+        std::fs::write(&path, original).unwrap();
+        let wal = b"synthetic WAL bytes to retain";
+        let shm = b"synthetic SHM bytes to retain";
+        std::fs::write(journal_path(&path, "-wal"), wal).unwrap();
+        std::fs::write(journal_path(&path, "-shm"), shm).unwrap();
+        let (store, note) = Store::open(&path, 100).unwrap();
+        let OpenNote::RecoveredFromCorruption(aside, _) = note else {
+            panic!("not recovered");
+        };
+        assert_eq!(std::fs::read(&aside).unwrap(), original);
+        assert_eq!(std::fs::read(journal_path(&aside, "-wal")).unwrap(), wal);
+        assert_eq!(std::fs::read(journal_path(&aside, "-shm")).unwrap(), shm);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(aside.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(journal_path(&aside, "-wal"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(store.load(10).unwrap().devices.is_empty());
+        assert!(!journal_path(&path, ".recovery-pending").exists());
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|f| f
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".lablink-journal-")));
+    }
+
+    #[test]
+    fn an_interrupted_recovery_never_becomes_a_fresh_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.db");
+        std::fs::write(
+            journal_path(&path, ".recovery-pending"),
+            "recovery interrupted",
+        )
+        .unwrap();
+        let error = Store::open(&path, 100).err().unwrap();
+        assert!(error.contains("recovery is incomplete"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_newer_schema_is_not_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("cache.db");
+        let (s, _) = Store::open(&p, 100).unwrap();
+        s.conn
+            .execute("UPDATE meta SET value='999' WHERE key='schema_version'", [])
+            .unwrap();
+        drop(s);
+        let before = std::fs::read(&p).unwrap();
+        assert!(Store::open(&p, 100).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|p| p
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("corrupt")));
+    }
+
+    #[test]
+    fn only_positive_sqlite_corruption_allows_recovery() {
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_FULL,
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_IOERR,
+            rusqlite::ffi::SQLITE_READONLY,
+            rusqlite::ffi::SQLITE_PERM,
+        ] {
+            let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+            assert!(
+                matches!(OpenFailure::from(e), OpenFailure::Other(_)),
+                "code {code}"
+            );
+        }
+        for code in [rusqlite::ffi::SQLITE_CORRUPT, rusqlite::ffi::SQLITE_NOTADB] {
+            let e = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+            assert!(matches!(OpenFailure::from(e), OpenFailure::Corrupt(_)));
+        }
     }
 
     #[test]

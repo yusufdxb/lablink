@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Write a CycloneDX SBOM of everything compiled into the binaries (the crates
-# in Cargo.lock) to dist/lablink-<version>.cdx.json and add it to
+# Write a CycloneDX dependency inventory of all crates in Cargo.lock
+# (including optional, development and platform-only dependencies) to dist/lablink-<version>.cdx.json and add it to
 # dist/SHA256SUMS. Uses syft in a container pinned by digest; no host install.
 #
 # Usage: scripts/sbom.sh   (after scripts/release.sh or scripts/package.sh)

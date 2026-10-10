@@ -7,7 +7,8 @@
 //! names, Wi-Fi SSIDs and home directories are replaced wherever they appear.
 //! The same value always gets the same placeholder (`ip-1`, `site-2`, ...),
 //! so the report stays readable. Device notes and service-check commands are
-//! removed before redaction. Nothing is uploaded anywhere.
+//! removed before redaction, along with device output and journal messages.
+//! Nothing is uploaded anywhere.
 //!
 //! Never collected: private keys, ssh-agent contents, shell history,
 //! known_hosts files, credentials, or any file other than LabLink's own
@@ -20,7 +21,7 @@ use lablink_core::model::{DeviceDetail, DiscoveredHost, StatusReport};
 use lablink_core::protocol::Request;
 use lablink_core::site::SitesReport;
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -91,8 +92,8 @@ impl Redactor {
             s = s.replace(&h, "~");
         }
         s = self.secrets(&s);
-        s = self.home_dirs(&s);
         s = self.patterns(&s);
+        s = self.home_dirs(&s);
         let mut words = self.words.clone();
         words.sort_by_key(|(w, _, _)| std::cmp::Reverse(w.len()));
         for (w, kind, ci) in words {
@@ -161,6 +162,11 @@ impl Redactor {
         let mut out = String::with_capacity(s.len());
         let mut skipping = false;
         for line in s.split_inclusive('\n') {
+            if line.contains("PuTTY-User-Key-File-") {
+                // PuTTY files contain public and private bodies without PEM delimiters.
+                out.push_str("<private key removed>\n");
+                break;
+            }
             if line.contains("-----BEGIN") && line.contains("PRIVATE KEY") {
                 skipping = true;
                 out.push_str("<private key removed>\n");
@@ -183,12 +189,7 @@ impl Redactor {
         let mut out = String::with_capacity(s.len());
         let mut i = 0;
         while i < chars.len() {
-            let prev_ok = i == 0
-                || !(chars[i - 1].is_ascii_alphanumeric()
-                    || chars[i - 1] == '.'
-                    || chars[i - 1] == ':'
-                    || chars[i - 1] == '_'
-                    || chars[i - 1] == '-');
+            let prev_ok = i == 0 || !(chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '.');
             if prev_ok {
                 if let Some((len, kind)) = match_at(&chars[i..]) {
                     let original: String = chars[i..i + len].iter().collect();
@@ -197,15 +198,20 @@ impl Redactor {
                         out.push_str(&original);
                     } else if kind == "fp" {
                         let t = self.token(&original, "fp");
-                        out.push_str(&format!("SHA256:<{t}>"));
+                        let prefix = if original.starts_with("MD5:") {
+                            "MD5"
+                        } else {
+                            "SHA256"
+                        };
+                        out.push_str(&format!("{prefix}:<{t}>"));
                     } else {
                         // `name@<address>` (OpenSSH errors): the login name
                         // may be one LabLink never saw (~/.ssh/config).
                         if out.ends_with('@') {
                             let at = out.len() - 1;
                             let start = out[..at]
-                                .rfind(|c: char| !(c.is_ascii_alphanumeric() || "._-".contains(c)))
-                                .map_or(0, |p| p + 1);
+                                .rfind(|c: char| !(c.is_alphanumeric() || "._-".contains(c)))
+                                .map_or(0, |p| p + out[p..].chars().next().unwrap().len_utf8());
                             if start < at && !out[start..at].starts_with("user-") {
                                 let user = out[start..at].to_string();
                                 let u = self.token(&user, "user");
@@ -238,6 +244,7 @@ fn redact_secret_line(line: &str) -> String {
         "api_key",
         "apikey",
         "api-key",
+        "x-api-key",
         "access_key",
         "private_key",
         "authorization",
@@ -255,14 +262,39 @@ fn redact_secret_line(line: &str) -> String {
             if !rest[sep..].starts_with([':', '=']) {
                 continue;
             }
-            let vstart = at + sep + 1;
-            let v = &line[vstart..];
-            let lead = v.len() - v.trim_start().len();
-            let vlen = v[lead..]
-                .find(|c: char| c.is_whitespace() || c == ',' || c == ';')
-                .unwrap_or(v.len() - lead);
-            if vlen > 0 && !v[lead..].to_ascii_lowercase().starts_with("bearer") {
-                cut.push((vstart + lead, vstart + lead + vlen));
+            let start = at + sep + 1;
+            let (a, b) = secret_value_range(line, start);
+            if a < b {
+                // Authorization values are schemes plus credentials. Removing
+                // the entire remainder also covers Basic and repeated Bearer.
+                cut.push((
+                    a,
+                    if *k == "authorization" {
+                        line.trim_end().len()
+                    } else {
+                        b
+                    },
+                ));
+            }
+        }
+    }
+    // Password command-line flags may occur in diagnostics or commands.
+    for flag in ["--password", "--passwd", "-p"] {
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(flag) {
+            let start = from + rel;
+            let end = start + flag.len();
+            from = end;
+            if start > 0 && !line[..start].chars().next_back().unwrap().is_whitespace() {
+                continue;
+            }
+            if flag != "-p" && !line[end..].starts_with(['=', ' ', '\t']) {
+                continue;
+            }
+            let value = end + usize::from(line[end..].starts_with('='));
+            let (a, b) = secret_value_range(line, value);
+            if a < b {
+                cut.push((a, b));
             }
         }
     }
@@ -279,6 +311,29 @@ fn redact_secret_line(line: &str) -> String {
     }
     out.push_str(&line[pos..]);
     redact_secret_line_tail(&out)
+}
+
+/// Byte boundaries of a quoted or whitespace-delimited secret value.
+fn secret_value_range(line: &str, start: usize) -> (usize, usize) {
+    let tail = &line[start..];
+    let a = start + tail.len() - tail.trim_start().len();
+    let v = &line[a..];
+    let end = if let Some(quote) = v.chars().next().filter(|c| matches!(c, '\'' | '"')) {
+        let mut escaped = false;
+        let mut end = v.len();
+        for (i, c) in v.char_indices().skip(1) {
+            if c == quote && !escaped {
+                end = i + c.len_utf8();
+                break;
+            }
+            escaped = c == '\\' && !escaped;
+        }
+        end
+    } else {
+        v.find(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            .unwrap_or(v.len())
+    };
+    (a, a + end)
 }
 
 /// Bearer tokens and common token prefixes anywhere in a line.
@@ -310,11 +365,16 @@ fn redact_secret_line_tail(line: &str) -> String {
             out.push_str(tok);
         }
     }
-    if let Some(i) = out.to_ascii_lowercase().find("bearer ") {
-        let v = &out[i + 7..];
-        let end = v.find(char::is_whitespace).unwrap_or(v.len());
-        if end > 0 {
-            out = format!("{}<removed>{}", &out[..i + 7], &v[end..]);
+    // Bearer/Basic credentials can also occur without an Authorization key.
+    for scheme in ["bearer ", "basic "] {
+        let mut from = 0;
+        while let Some(rel) = out[from..].to_ascii_lowercase().find(scheme) {
+            let start = from + rel + scheme.len();
+            let (a, b) = secret_value_range(&out, start);
+            if a < b {
+                out.replace_range(a..b, "<removed>");
+            }
+            from = a + if a < b { "<removed>".len() } else { 0 };
         }
     }
     out
@@ -332,6 +392,28 @@ fn match_at(c: &[char]) -> Option<(usize, &'static str)> {
         {
             return Some((sha.len() + 43, "fp"));
         }
+    }
+    // OpenSSH legacy MD5 fingerprints and Cisco dotted MAC addresses.
+    if c.starts_with(&['M', 'D', '5', ':'])
+        && c.len() >= 51
+        && (0..16).all(|k| c[4 + k * 3].is_ascii_hexdigit() && c[5 + k * 3].is_ascii_hexdigit())
+        && (0..15).all(|k| c[6 + k * 3] == ':')
+    {
+        return Some((51, "fp"));
+    }
+    if c.len() >= 14
+        && c[4] == '.'
+        && c[9] == '.'
+        && (0..14).all(|k| k == 4 || k == 9 || c[k].is_ascii_hexdigit())
+        && c.get(14).is_none_or(|x| !x.is_ascii_hexdigit())
+    {
+        return Some((14, "mac"));
+    }
+    if c.len() >= 12
+        && c[..12].iter().all(char::is_ascii_hexdigit)
+        && c.get(12).is_none_or(|x| !x.is_ascii_hexdigit())
+    {
+        return Some((12, "mac"));
     }
     // aa:bb:cc:dd:ee:ff (also with '-')
     if c.len() >= 17 {
@@ -400,7 +482,7 @@ fn match_at(c: &[char]) -> Option<(usize, &'static str)> {
     if c.get(i).is_some_and(|x| x.is_ascii_digit()) {
         return None;
     }
-    let _ = c[..i].iter().collect::<String>().parse::<Ipv4Addr>().ok()?;
+    // Numeric octets were checked above, including leading-zero forms.
     Some((i, "ip"))
 }
 
@@ -628,6 +710,33 @@ fn config_for_bundle(cfg: &Config) -> String {
     c.to_yaml()
 }
 
+/// Device output is arbitrary text, so shape matching cannot make it safe.
+/// Keep state classes and timing, but discard all output-bearing fields.
+fn remove_device_output(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (key, value) in m {
+                if matches!(
+                    key.as_str(),
+                    "detail" | "last_error" | "reasons" | "message"
+                ) {
+                    *value = match value {
+                        serde_json::Value::Array(_) => {
+                            serde_json::json!(["<device output removed>"])
+                        }
+                        serde_json::Value::Null => serde_json::Value::Null,
+                        _ => serde_json::json!("<device output removed>"),
+                    };
+                } else {
+                    remove_device_output(value);
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(remove_device_output),
+        _ => {}
+    }
+}
+
 /// Build the (redacted) files of a bundle from what was collected.
 pub fn assemble(c: &Collected) -> Vec<(String, String)> {
     let mut r = Redactor::new(c.home.clone());
@@ -679,10 +788,11 @@ pub fn assemble(c: &Collected) -> Vec<(String, String)> {
         files.push(("config.redacted.yaml".into(), config_for_bundle(cfg)));
     }
     if let Some(s) = &c.status {
-        files.push((
-            "status.json".into(),
-            serde_json::to_string_pretty(s).unwrap_or_default(),
-        ));
+        files.push(("status.json".into(), {
+            let mut value = serde_json::to_value(s).unwrap_or_default();
+            remove_device_output(&mut value);
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        }));
     }
     if let Some(s) = &c.sites {
         files.push((
@@ -692,6 +802,7 @@ pub fn assemble(c: &Collected) -> Vec<(String, String)> {
     }
     if !c.details.is_empty() {
         let mut v = serde_json::to_value(&c.details).unwrap_or_default();
+        remove_device_output(&mut v);
         if let Some(a) = v.as_array_mut() {
             for d in a {
                 d["notes"] = serde_json::Value::Null;
@@ -710,10 +821,21 @@ pub fn assemble(c: &Collected) -> Vec<(String, String)> {
         ));
     }
     if let Some(d) = &c.doctor {
-        files.push(("doctor.json".into(), d.clone()));
+        let safe = serde_json::from_str::<serde_json::Value>(d)
+            .map(|mut v| {
+                remove_device_output(&mut v);
+                serde_json::to_string_pretty(&v).unwrap_or_default()
+            })
+            .unwrap_or_else(|_| "<doctor output removed>".into());
+        files.push(("doctor.json".into(), safe));
     }
     files.push(("service.txt".into(), c.service.clone()));
-    files.push(("daemon.log".into(), c.journal.clone()));
+    // Journal messages interleave local diagnostics with arbitrary device
+    // output and have no trustworthy field boundaries. Do not share them.
+    files.push((
+        "daemon.log".into(),
+        "<journal omitted: may contain device output>\n".into(),
+    ));
     let mut out: Vec<(String, String)> = files
         .into_iter()
         .map(|(n, t)| {
@@ -728,7 +850,8 @@ IPv4/IPv6 and MAC addresses, host-key fingerprints, usernames, hostnames,\n\
 .local names, labels, device names, site names, network names, Wi-Fi network\n\
 names and home directories were replaced with placeholders such as ip-1,\n\
 mac-2, user-1, device-3, site-1. The same value always gets the same\n\
-placeholder. Device notes and service-check commands were removed. LabLink\n\
+placeholder. Device notes, service-check commands, device output, doctor\n\
+details and daemon journal messages were removed. LabLink\n\
 stores no passwords or private keys; it never collects ssh-agent contents,\n\
 shell history, known_hosts files or any other file of yours.\n\n\
 Review the files before sharing them.\n"
@@ -861,6 +984,7 @@ pub fn create(opts: &BundleOptions) -> Result<Bundle, String> {
     let staged = tmp.path().join("bundle.tar.gz");
     let st = lablink_core::program::command("tar")
         .map_err(|e| format!("cannot run tar: {e}"))?
+        .args(["--owner=0", "--group=0", "--numeric-owner"])
         .arg("-czf")
         .arg(&staged)
         .arg("-C")
@@ -892,6 +1016,98 @@ pub fn create(opts: &BundleOptions) -> Result<Bundle, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_login_names_never_panic_or_leak() {
+        for input in ["Lab jörg@10.0.0.5", "ö@10.0.0.5", "€user@fe80::2"] {
+            let out = Redactor::new(None).apply(input);
+            assert!(out.contains("user-1@ip-1"), "{out}");
+            assert!(!out.contains("jörg") && !out.contains("ö@"), "{out}");
+        }
+    }
+
+    #[test]
+    fn redacts_common_contexts_and_secret_formats() {
+        let cases = [
+            (
+                "ip:192.168.50.7 host-192.168.50.7 dev_192.168.50.7",
+                "192.168.50.7",
+            ),
+            ("addr:fe80::abcd", "fe80::abcd"),
+            ("inet addr:192.168.050.007", "192.168.050.007"),
+            ("mac 024c.4c01.0203 and 024c4c010203", "024c"),
+            (
+                "MD5:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff",
+                "00:11",
+            ),
+            ("password = \"correct horse battery\"", "horse battery"),
+            (
+                "sshpass -p hunter2 and --password 'correct horse'",
+                "hunter2",
+            ),
+            ("sshpass -pS3cret --password=AnotherSecret", "S3cret"),
+            ("Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+            ("Bearer FirstSecret Bearer SecondSecret", "SecondSecret"),
+            (
+                "PuTTY-User-Key-File-3: ssh-ed25519\nPrivate-Lines: 1\nSecretKeyBody\n",
+                "SecretKeyBody",
+            ),
+            (
+                "/home/SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+                "47DEQpj8",
+            ),
+        ];
+        for (input, secret) in cases {
+            let out = Redactor::new(None).apply(input);
+            assert!(!out.contains(secret), "{input:?} leaked in {out:?}");
+        }
+        let out = Redactor::new(None).apply("password='correct horse' --password 'another secret'");
+        assert!(!out.contains("horse") && !out.contains("another"), "{out}");
+    }
+
+    #[test]
+    fn arbitrary_device_output_is_omitted_from_all_bundle_files() {
+        let mut c = adversarial();
+        // Use actual model serialization so this exercises both status copies.
+        let status = serde_json::json!({
+            "schema_version": 1,
+            "daemon": {"version":"test", "pid":1, "uptime_s":1},
+            "devices": [{"name":"test-device", "site":"default", "site_name":"default",
+                "label":null, "ip":null, "color":"gray", "discovery":"never_seen", "network":"unknown",
+                "ssh_port":"unknown", "ssh_auth":"unknown", "identity":"unverified",
+                "latency_ms":null, "last_seen_ms":null, "username":null,
+                "interface":null, "network_name":null, "monitoring":true,
+                "reasons":["RemoteSecretInReasons"],
+                "services":[{"name":"check", "state":"failed", "detail":"X-Api-Key S3cretValue123"}]}]
+        });
+        c.status = Some(serde_json::from_value(status).unwrap());
+        c.details = vec![serde_json::from_value(serde_json::json!({
+            "schema_version":1, "status":c.status.as_ref().unwrap().devices[0],
+            "configured":true, "aliases":[], "usernames":[], "active_username":null,
+            "ssh_host":"test-device", "ssh_port":22, "hostnames":[],
+            "learned_hostnames":[], "mdns_names":[], "macs":[], "pinned_keys":[],
+            "observed_keys":[], "expected_ips":[], "addresses":[], "identity_signal":null,
+            "consecutive_failures":1, "last_error":"RemoteErrorSecret", "notes":null,
+            "recent_events":[{"ts_ms":1,"device":"test-device","kind":"service",
+                "message":"RemoteEventSecret"}]
+        }))
+        .unwrap()];
+        c.doctor =
+            Some("{\"checks\":[{\"status\":\"failed\",\"detail\":\"RemoteDoctorSecret\"}]}".into());
+        c.journal = "RemoteJournalSecret".into();
+        let all = assemble(&c).into_iter().map(|(_, t)| t).collect::<String>();
+        for secret in [
+            "S3cretValue123",
+            "RemoteSecretInReasons",
+            "RemoteDoctorSecret",
+            "RemoteJournalSecret",
+            "RemoteErrorSecret",
+            "RemoteEventSecret",
+        ] {
+            assert!(!all.contains(secret), "{secret} leaked: {all}");
+        }
+        assert!(all.contains("failed"), "state class was lost: {all}");
+    }
 
     #[test]
     fn redacts_addresses_fingerprints_and_registered_words() {
@@ -1093,6 +1309,16 @@ ssh: erin@10.77.0.42: Permission denied (publickey)\n".into();
         let b2 = create(&opts).unwrap();
         assert_ne!(b.path, b2.path);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        let headers = std::process::Command::new("tar")
+            .args(["-tvzf"])
+            .arg(&b.path)
+            .output()
+            .unwrap();
+        assert!(headers.status.success());
+        let headers = String::from_utf8(headers.stdout).unwrap();
+        for row in headers.lines() {
+            assert_eq!(row.split_whitespace().nth(1), Some("0/0"), "{row}");
+        }
         let x = dir.path().join("x");
         std::fs::create_dir(&x).unwrap();
         assert!(std::process::Command::new("tar")

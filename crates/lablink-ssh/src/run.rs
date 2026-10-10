@@ -1,8 +1,10 @@
 //! Running OpenSSH tools with timeouts, output capture and exit-code fidelity.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// Per-stream capture limit; output beyond this is discarded and flagged.
@@ -15,6 +17,8 @@ pub enum OutputMode {
     Capture,
     /// Inherit the parent's streams (live output for humans).
     Inherit,
+    /// Live stdin/stdout/stderr, retaining stderr for failure advice.
+    InheritAndCaptureStderr,
 }
 
 /// Result of a finished (or killed) child process.
@@ -35,6 +39,13 @@ pub struct ExecOutput {
 pub(crate) fn reader<R: Read + Send + 'static>(
     r: Option<R>,
 ) -> Option<std::thread::JoinHandle<(Vec<u8>, bool)>> {
+    reader_with_tee(r, false)
+}
+
+fn reader_with_tee<R: Read + Send + 'static>(
+    r: Option<R>,
+    tee_stderr: bool,
+) -> Option<std::thread::JoinHandle<(Vec<u8>, bool)>> {
     let mut r = r?;
     Some(std::thread::spawn(move || {
         let mut out = Vec::new();
@@ -44,6 +55,9 @@ pub(crate) fn reader<R: Read + Send + 'static>(
             match r.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    if tee_stderr {
+                        let _ = std::io::stderr().lock().write_all(&buf[..n]);
+                    }
                     let room = MAX_CAPTURE_BYTES.saturating_sub(out.len());
                     if n > room {
                         truncated = true;
@@ -64,6 +78,62 @@ fn kill(pid: u32, group: bool, sig: i32) {
     }
 }
 
+static SIGNAL_RUN: Mutex<()> = Mutex::new(());
+static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn interrupted(sig: libc::c_int) {
+    // Only an atomic operation in the signal handler. Cleanup happens in
+    // the polling thread, which still owns the child's unreaped PID.
+    let _ = INTERRUPTED.compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+struct SignalHandlers {
+    previous: [(i32, libc::sigaction); 2],
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl SignalHandlers {
+    fn install() -> std::io::Result<Self> {
+        let lock = SIGNAL_RUN.lock().unwrap_or_else(|e| e.into_inner());
+        INTERRUPTED.store(0, Ordering::SeqCst);
+        // SAFETY: zero is a valid initial sigaction; initialize its mask
+        // and give sigaction valid pointers to saved/replacement actions.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = interrupted as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            let mut previous = [
+                (libc::SIGINT, std::mem::zeroed()),
+                (libc::SIGTERM, std::mem::zeroed()),
+            ];
+            for i in 0..previous.len() {
+                if libc::sigaction(previous[i].0, &action, &mut previous[i].1) != 0 {
+                    let error = std::io::Error::last_os_error();
+                    for (sig, saved) in previous.iter().take(i) {
+                        libc::sigaction(*sig, saved, std::ptr::null_mut());
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(Self {
+                previous,
+                _lock: lock,
+            })
+        }
+    }
+}
+
+impl Drop for SignalHandlers {
+    fn drop(&mut self) {
+        for (sig, action) in &self.previous {
+            // SAFETY: these are the exact actions saved at installation.
+            unsafe {
+                libc::sigaction(*sig, action, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
 /// Run `binary args...` with a timeout. With `own_group`, the child runs in a
 /// new process group so a timeout kills ssh and anything it spawned (do not
 /// use for commands that must read a password from the controlling terminal).
@@ -74,6 +144,31 @@ pub fn run_captured(
     output: OutputMode,
     own_group: bool,
 ) -> std::io::Result<ExecOutput> {
+    run_inner(binary, args, timeout, output, own_group, false)
+}
+
+/// Run a foreground CLI command and forward SIGINT/SIGTERM to its child.
+/// Temporary handlers are restored before returning. Background daemon
+/// checks use `run_captured`, since signal dispositions are process-wide.
+pub fn run_captured_interruptible(
+    binary: &str,
+    args: &[String],
+    timeout: Duration,
+    output: OutputMode,
+    own_group: bool,
+) -> std::io::Result<ExecOutput> {
+    run_inner(binary, args, timeout, output, own_group, true)
+}
+
+fn run_inner(
+    binary: &str,
+    args: &[String],
+    timeout: Duration,
+    output: OutputMode,
+    own_group: bool,
+    interruptible: bool,
+) -> std::io::Result<ExecOutput> {
+    let _signals = interruptible.then(SignalHandlers::install).transpose()?;
     let mut cmd = lablink_core::program::command(binary)?;
     cmd.args(args);
     match output {
@@ -87,6 +182,11 @@ pub fn run_captured(
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
         }
+        OutputMode::InheritAndCaptureStderr => {
+            cmd.stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::piped());
+        }
     }
     if own_group {
         cmd.process_group(0);
@@ -95,29 +195,40 @@ pub fn run_captured(
     let mut child = cmd.spawn()?;
     let pid = child.id();
     let out_h = reader(child.stdout.take());
-    let err_h = reader(child.stderr.take());
+    let err_h = reader_with_tee(
+        child.stderr.take(),
+        output == OutputMode::InheritAndCaptureStderr,
+    );
 
     let deadline = start + timeout;
     let mut timed_out = false;
+    let mut signal = None;
     let status = loop {
-        if let Some(s) = child.try_wait()? {
-            break s;
-        }
         let now = Instant::now();
-        if now >= deadline {
-            timed_out = true;
-            kill(pid, own_group, libc::SIGTERM);
-            let grace = Instant::now() + Duration::from_millis(500);
-            loop {
-                if child.try_wait()?.is_some() {
-                    break;
+        let received = if interruptible {
+            INTERRUPTED.load(Ordering::SeqCst)
+        } else {
+            0
+        };
+        if received == 0 {
+            if let Some(s) = child.try_wait()? {
+                // A foreground child may exit on the same terminal signal
+                // before our next poll. Preserve the caller's signal status.
+                if interruptible {
+                    let received = INTERRUPTED.load(Ordering::SeqCst);
+                    signal = (received != 0).then_some(received);
                 }
-                if Instant::now() >= grace {
-                    kill(pid, own_group, libc::SIGKILL);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
+                break s;
             }
+        }
+        if received != 0 || now >= deadline {
+            timed_out = received == 0;
+            signal = (received != 0).then_some(received);
+            kill(pid, own_group, signal.unwrap_or(libc::SIGTERM));
+            // Keep the leader unreaped through cleanup, so its PID cannot
+            // be reused while a surviving descendant still holds a pipe.
+            std::thread::sleep(Duration::from_millis(500));
+            kill(pid, own_group, libc::SIGKILL);
             break child.wait()?;
         }
         // Short sleep while the child runs; the poll stops when it exits.
@@ -142,9 +253,19 @@ pub fn run_captured(
     };
     let (stdout, stdout_truncated) = join(out_h);
     let (stderr, stderr_truncated) = join(err_h);
+    if interruptible && signal.is_none() {
+        // A signal can also arrive while draining the bounded captures,
+        // after the child has exited. It still determines the CLI's status.
+        let received = INTERRUPTED.load(Ordering::SeqCst);
+        signal = (received != 0).then_some(received);
+    }
     Ok(ExecOutput {
-        exit_code: status.code(),
-        signal: status.signal(),
+        exit_code: if signal.is_some() {
+            None
+        } else {
+            status.code()
+        },
+        signal: signal.or_else(|| status.signal()),
         stdout,
         stderr,
         stdout_truncated,

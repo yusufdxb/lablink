@@ -19,7 +19,7 @@ pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
-    /// Liveness check; returns `{protocol_version, version, pid}`.
+    /// Liveness check; returns `{protocol_version, version, git_sha, pid}`.
     Ping,
     /// Compact status of one device, of one site, of every site (`all`), or
     /// by default of the sites the user is at (ACTIVE or not yet confirmed).
@@ -122,13 +122,21 @@ impl Request {
         match serde_json::from_str::<Request>(line) {
             Ok(r) => Ok(r),
             Err(e) => {
-                let mut v: serde_json::Value = serde_json::from_str(line).map_err(|_| e)?;
-                match v.as_object_mut() {
-                    Some(o) if !o.contains_key("params") => {
-                        o.insert("params".into(), serde_json::json!({}));
-                        serde_json::from_value(v)
-                    }
-                    _ => serde_json::from_str::<Request>(line),
+                // A typed envelope rejects duplicate method/params keys.
+                // Parsing into Value first would silently choose the last.
+                #[derive(Deserialize)]
+                struct Envelope {
+                    method: String,
+                    #[serde(default)]
+                    params: Option<serde_json::Value>,
+                }
+                let envelope: Envelope = serde_json::from_str(line).map_err(|_| e)?;
+                if envelope.params.is_none() {
+                    serde_json::from_value(
+                        serde_json::json!({"method": envelope.method, "params": {}}),
+                    )
+                } else {
+                    serde_json::from_str::<Request>(line)
                 }
             }
         }
@@ -271,6 +279,18 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_method_never_selects_another_request() {
+        for line in [
+            r#"{"method":"ping","method":"devices"}"#,
+            r#"{"method":"devices","method":"ping"}"#,
+            r#"{"method":"devices","params":{},"params":{}}"#,
+        ] {
+            assert!(Request::parse(line).is_err(), "{line}");
+        }
+        assert!(Request::parse(r#"{"method":"devices"}"#).is_ok());
+    }
 
     #[test]
     fn wire_format_is_stable() {

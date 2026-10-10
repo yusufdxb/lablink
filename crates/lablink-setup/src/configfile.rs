@@ -45,6 +45,70 @@ pub fn render(cfg: &Config) -> String {
 /// Validate `cfg`, back up the current file (if any) and replace it
 /// atomically. Returns the backup path.
 pub fn write(path: &Path, cfg: &Config) -> Result<Option<PathBuf>, String> {
+    let _lock = lock(path)?;
+    write_locked(path, cfg)
+}
+
+/// Serialize a load-modify-write operation across all LabLink processes.
+/// The closure runs against the latest file, while the lock is held.
+pub fn update<F>(path: &Path, edit: F) -> Result<Option<PathBuf>, String>
+where
+    F: FnOnce(&mut Config) -> Result<(), String>,
+{
+    let _lock = lock(path)?;
+    let mut cfg = load_or_default(path)?;
+    edit(&mut cfg)?;
+    write_locked(path, &cfg)
+}
+
+fn lock(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| format!("cannot create config directory: {e}"))?;
+    if let Some(why) = lablink_core::paths::writable_by_others(dir) {
+        return Err(format!("refusing config directory: {why}"));
+    }
+    let lock_path = dir.join(format!(
+        ".{}.lock",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open config lock: {e}"))?;
+    let m = f.metadata().map_err(|e| e.to_string())?;
+    // SAFETY: getuid has no preconditions.
+    if !m.is_file() || m.uid() != unsafe { libc::getuid() } || m.mode() & 0o077 != 0 {
+        return Err("refusing config lock: must be your private regular file".into());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        // SAFETY: f owns a valid descriptor for the whole lock lifetime.
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(f);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::WouldBlock || std::time::Instant::now() >= deadline {
+            return Err(format!("cannot acquire config lock: {e}"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn write_locked(path: &Path, cfg: &Config) -> Result<Option<PathBuf>, String> {
     cfg.validate().map_err(|e| e.to_string())?;
     let text = render(cfg);
     // The written text must parse back to the same configuration.
@@ -69,11 +133,14 @@ pub fn write(path: &Path, cfg: &Config) -> Result<Option<PathBuf>, String> {
     }
     let backup = if path.exists() {
         let name = format!(
-            "{}.bak-{}",
+            "{}.bak-{}-{}-{}-{}",
             path.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("config.yaml"),
-            utc_stamp(lablink_core::time::now_ms())
+            utc_stamp(lablink_core::time::now_ms()),
+            lablink_core::time::now_ms(),
+            std::process::id(),
+            NEXT_BACKUP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         // A fresh private file (never follow or reuse whatever is at that
         // name, never inherit a looser mode from the original).
@@ -135,6 +202,8 @@ pub fn write(path: &Path, cfg: &Config) -> Result<Option<PathBuf>, String> {
     })?;
     Ok(backup)
 }
+
+static NEXT_BACKUP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Load the config for editing: a missing file is an empty config.
 pub fn load_or_default(path: &Path) -> Result<Config, String> {

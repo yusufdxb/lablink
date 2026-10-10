@@ -18,7 +18,8 @@ pub fn user_unit_path() -> Result<PathBuf, String> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .filter(|p| p.is_absolute())
+        .or_else(|| Some(lablink_core::paths::home().join(".config")))
         .ok_or("cannot determine the config directory (HOME unset)")?;
     Ok(base.join("systemd").join("user").join(UNIT_NAME))
 }
@@ -36,25 +37,15 @@ pub fn find_daemon() -> Result<PathBuf, String> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join("lablinkd");
-            if p.is_file() {
+            if lablink_core::program::trusted_executable(&p).is_ok() {
                 return Ok(p.canonicalize().unwrap_or(p));
             }
         }
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        // Only absolute entries: a relative one is the current directory,
-        // and its `lablinkd` would be written into the unit.
-        for dir in std::env::split_paths(&path).filter(|d| d.is_absolute()) {
-            let p = dir.join("lablinkd");
-            if p.is_file() {
-                // A relative PATH entry must not become a relative ExecStart.
-                return p
-                    .canonicalize()
-                    .map_err(|e| format!("cannot resolve {}: {e}", p.display()));
-            }
-        }
-    }
-    Err("cannot find the lablinkd binary next to lablink or on PATH".into())
+    let p = lablink_core::program::find("lablinkd")
+        .map_err(|e| format!("cannot find a trusted lablinkd next to lablink or on PATH: {e}"))?;
+    p.canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", p.display()))
 }
 
 /// The daemon path as one systemd `ExecStart` word: absolute, no control

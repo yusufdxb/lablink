@@ -134,7 +134,7 @@ One check round:
    is verified, then on port-open/address-change transitions and every
    `auth_check_interval_s` (300 s). Configured usernames are tried in order;
    the one that works is remembered. `ControlMaster=no` is passed so the check
-   reuses an existing user master connection but never creates one.
+   reuses only a LabLink-owned, pin-scoped master and never creates one.
 7. **Service checks** that are due (see [Extension points](#extension-points)).
 
 ## Discovery
@@ -250,7 +250,7 @@ robot directly only while its cable is on the robot's switch. With
 - If an expected address is on a directly attached network, the device is
   probed directly as usual.
 - Otherwise LabLink runs one fixed snippet on the gateway over the gateway's
-  SSH connection (BatchMode, reusing an existing ControlMaster, never creating
+  SSH connection (BatchMode, reusing only a LabLink-owned pinned ControlMaster, never creating
   one): `ping -c 1 -W 1 <ip>`, plus a `/dev/tcp/<ip>/<port>` check for SSH
   devices. Host keys of SSH devices behind the gateway are scanned with
   `ssh-keyscan` on the gateway (also for `lablink trust`). Only typed IP
@@ -295,16 +295,20 @@ ssh -o HostName=<current ip> -o Port=<port>
   come first, so neither `ssh.options` nor extra arguments can weaken them.
   `ssh.options` is additionally an allowlist checked at config-validation
   time (no host-key, addressing, code-loading, forwarding or environment
-  options), and sessions LabLink starts itself pass `ForwardAgent=no`,
-  `ForwardX11=no`, `ClearAllForwardings=yes` and `PermitLocalCommand=no`.
+  options). Background checks, doctor and gateway checks pass
+  `ForwardAgent=no`, `ForwardX11=no`, `ClearAllForwardings=yes` and
+  `PermitLocalCommand=no`. User-requested `ssh` and `exec` sessions retain
+  the user's forwarding configuration.
 - `exec` preserves the remote exit status, kills the whole process group on
   `--timeout` (exit 124), and in `--json` mode captures stdout/stderr
   (16 MiB cap per stream).
-- Caveat: when a user ControlMaster connection is already open for the target
-  address, OpenSSH multiplexes over it and does not re-check the host key
-  (the master checked it when it was established). Background checks reuse
-  such masters by default (required for password-only servers);
-  `ssh.reuse_control_master: false` passes `ControlPath=none` to them.
+- Pinned sessions use a private ControlPath derived from the device alias,
+  pinned fingerprints, route and OpenSSH connection identity. User-configured
+  masters cannot bypass pin verification. Disabling reuse sets ControlPath
+  to `none` on every pinned path, including copy-id, doctor and gateway hops.
+- Foreground exec forwards SIGINT and SIGTERM to its child and bounds cleanup;
+  a dedicated process group covers batch SSH and its descendants. Interactive
+  authentication stays in the foreground group so password prompts work.
 
 ## IPC
 
@@ -339,8 +343,12 @@ ssh -o HostName=<current ip> -o Port=<port>
 Writes are batched: state transitions and identity changes are flushed within
 about 1 s, everything else after `persist_interval_s` (30 s); a device that is
 merely still online updates `last_seen` on disk at most every 5 minutes. A
-final flush runs at shutdown. A corrupt or unreadable database is moved aside
-(`cache.db.corrupt-<ms>`) and replaced, and the event is recorded.
+final flush runs at shutdown. A positively corrupt database is moved aside
+(`cache.db.corrupt-<ms>`) with its journals and replaced. Lock, permission,
+disk-full, I/O and unsupported-schema errors stop startup without quarantine.
+Runtime settings and adoption use debounced persistence; abrupt crashes can
+lose the last acknowledged edit within about one second. Trust and forget
+flush before replying.
 
 Caches written before sites existed key devices by bare name. On start, each
 such record is matched to the one configured device of that name (or, for an
@@ -430,3 +438,10 @@ stays a general network/SSH device manager.
   hysteresis of its own, so a flapping link can flip a site between ACTIVE
   and AWAY (each flip is a history event).
 - Only bash completion is shipped.
+
+Configuration edits use a private, no-follow file lock across load-modify-write.
+CLI site edits load the latest configuration under the lock; imports and GUI
+settings reject stale snapshots. Backups have time, process and sequence
+suffixes and are retained for the user to manage. In multi-site installs,
+adopted devices default to site-qualified SSH hosts (`site.device`) so each
+site can select its own OpenSSH Host settings.

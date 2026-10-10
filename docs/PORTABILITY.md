@@ -36,7 +36,7 @@ part.
 | Service management | `lablink-setup::service` | systemd user units (`systemctl --user`) | launchd agents (`~/Library/LaunchAgents`) |
 | Local network list for setup | `lablink-setup::ifaces` | `getifaddrs` + `/sys/class/net` | `getifaddrs` + OS interface metadata |
 | Terminal launching | `lablink-gui::term` | `x-terminal-emulator`, GNOME Terminal, Konsole, ... | `open -a Terminal` / AppleScript |
-| File locations | `lablink-core::paths` | XDG directories, `$XDG_RUNTIME_DIR`, `/tmp/lablink-<uid>` fallback | `~/Library/Application Support`, `~/Library/Caches`, a per-user socket directory |
+| File locations | `lablink-core::paths` | XDG directories, `$XDG_RUNTIME_DIR`, private state-directory socket fallback | `~/Library/Application Support`, `~/Library/Caches`, a per-user socket directory |
 | Packaging | `scripts/package.sh`, `packaging/` | `.deb`, tarball, desktop entry | app bundle / Homebrew formula |
 
 The daemon's `Prober` trait (`crates/lablink-daemon/src/probe.rs`) is the

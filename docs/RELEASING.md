@@ -90,8 +90,10 @@ gh attestation verify lablink_<version>_amd64.deb --repo yusufdxb/lablink \
 The attestation proves the file was built by this repository's CI workflow
 from the tagged commit (`--source-ref` rejects attestations made for any other
 ref). `lablink version` prints the version and commit; they
-match the tag and `BUILDINFO`. The SBOM lists every crate compiled into the
-binaries.
+match the tag and `BUILDINFO`. The SBOM inventories Cargo.lock, including optional, development and
+platform dependencies that may not ship in the binaries. It is not an exact
+binary composition map, and does not inventory SQLite bundled through its
+Rust wrapper.
 
 ## Before every release
 

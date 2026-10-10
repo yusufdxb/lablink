@@ -435,6 +435,34 @@ fn ssh_port_opens_and_closes() {
 }
 
 #[test]
+fn explicit_recheck_checks_the_host_key_before_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let net = lab_with_jetson("10.9.0.31");
+    let d = TestDaemon::start(
+        fast_config(&jetson_cfg("")),
+        net.clone(),
+        dir.path().into(),
+        true,
+    )
+    .unwrap();
+    wait_for(&d, "jetson-a", 15, "green", |s| s.color == Color::Green);
+    net.host("10.9.0.31", |h| h.keys = vec![fake_key("impostor")]);
+    d.client()
+        .call(&Request::Set {
+            device: "jetson-a".into(),
+            changes: lablink_core::protocol::DeviceChanges {
+                recheck: true,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    wait_for(&d, "jetson-a", 5, "immediate identity recheck", |s| {
+        s.identity == IdentityState::Mismatch
+    });
+    d.stop().unwrap();
+}
+
+#[test]
 fn history_records_transitions_not_heartbeats() {
     let dir = tempfile::tempdir().unwrap();
     let net = lab_with_jetson("10.9.0.31");

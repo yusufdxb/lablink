@@ -1082,7 +1082,7 @@ fn run(cli: Cli, client: &Client) -> R {
                 Ok(c) => {
                     println!(
                         "{}: OK ({} sites, {} networks, {} devices)",
-                        p.display(),
+                        output::printable(&p.display().to_string()),
                         c.sites.len(),
                         c.network_count(),
                         c.device_count()
@@ -1381,9 +1381,9 @@ fn cmd_exec(
     let mode = if json {
         OutputMode::Capture
     } else {
-        OutputMode::Inherit
+        OutputMode::InheritAndCaptureStderr
     };
-    let out = lablink_ssh::run_captured(
+    let out = lablink_ssh::run_captured_interruptible(
         &t.binary,
         &args,
         Duration::from_secs(timeout),
@@ -1409,27 +1409,48 @@ fn cmd_exec(
         .then(|| lablink_ssh::classify_ssh_failure(&stderr));
     let ssh_error = failure.as_ref().map(|f| f.describe());
     let advice = failure.as_ref().map(|f| f.advice(&r.name));
+    let security_failure = matches!(
+        failure,
+        Some(lablink_ssh::SshFailure::HostKeyChanged | lablink_ssh::SshFailure::HostKeyUnknown)
+    );
+    if security_failure {
+        let _ = client.call(&Request::Set {
+            device: if r.id.is_empty() {
+                r.name.clone()
+            } else {
+                r.id.clone()
+            },
+            changes: lablink_core::protocol::DeviceChanges {
+                recheck: true,
+                ..Default::default()
+            },
+        });
+    }
     if code == exit::SSH_ERROR && !out.timed_out && !json {
         // stderr went to the terminal; the daemon's view explains the state.
-        let hint = client
-            .call_typed::<StatusReport>(&Request::Status {
-                device: Some(if r.id.is_empty() {
-                    r.name.clone()
-                } else {
-                    r.id.clone()
-                }),
-                site: None,
-                all: false,
-            })
-            .ok()
-            .and_then(|s| s.devices.first().and_then(lablink_core::explain::explain))
-            .map(|e| format!("{}: {}", e.headline, e.next_step))
-            .unwrap_or_else(|| {
-                format!(
-                    "run `lablink status {}` for what LabLink knows about it",
-                    r.name
-                )
-            });
+        let hint = if security_failure {
+            advice.clone().unwrap_or_default()
+        } else {
+            client
+                .call_typed::<StatusReport>(&Request::Status {
+                    device: Some(if r.id.is_empty() {
+                        r.name.clone()
+                    } else {
+                        r.id.clone()
+                    }),
+                    site: None,
+                    all: false,
+                })
+                .ok()
+                .and_then(|s| s.devices.first().and_then(lablink_core::explain::explain))
+                .map(|e| format!("{}: {}", e.headline, e.next_step))
+                .unwrap_or_else(|| {
+                    format!(
+                        "run `lablink status {}` for what LabLink knows about it",
+                        r.name
+                    )
+                })
+        };
         eprintln!("lablink: ssh exited 255. {hint}");
     }
     if json {

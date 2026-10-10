@@ -103,6 +103,65 @@ fn a_configuration_others_can_change_is_refused() {
     );
 }
 
+#[test]
+fn a_shared_state_dir_is_refused_without_chmod_or_trusting_its_contents() {
+    let t = tempfile::tempdir().unwrap();
+    let cfg = t.path().join("config.yaml");
+    std::fs::write(&cfg, "").unwrap();
+    chmod(&cfg, 0o600);
+    let state = t.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    chmod(&state, 0o777);
+    let planted = state.join("cache.db");
+    std::fs::write(&planted, "untrusted pins").unwrap();
+    let out = daemon(
+        t.path(),
+        &[
+            "--config",
+            cfg.to_str().unwrap(),
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+        5,
+    )
+    .expect("shared state must be refused");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("mode 0700"));
+    assert_eq!(
+        std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+        0o777
+    );
+    assert_eq!(std::fs::read_to_string(planted).unwrap(), "untrusted pins");
+}
+
+#[test]
+fn a_link_to_a_cache_in_a_private_state_dir_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let cfg = t.path().join("config.yaml");
+    std::fs::write(&cfg, "").unwrap();
+    chmod(&cfg, 0o600);
+    let state = t.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    chmod(&state, 0o700);
+    let victim = t.path().join("victim");
+    std::fs::write(&victim, "do not overwrite").unwrap();
+    std::os::unix::fs::symlink(&victim, state.join("cache.db")).unwrap();
+    let out = daemon(
+        t.path(),
+        &[
+            "--config",
+            cfg.to_str().unwrap(),
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+        5,
+    )
+    .expect("linked cache must be refused");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("regular file owned by you"));
+    assert_eq!(std::fs::read_to_string(victim).unwrap(), "do not overwrite");
+}
+
 /// A configuration that cannot be resolved to a file, here `/dev/stdin` on a
 /// pipe, is refused rather than read unchecked.
 #[test]

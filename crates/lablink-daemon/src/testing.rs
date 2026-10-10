@@ -419,6 +419,17 @@ impl TestDaemon {
         state_dir: PathBuf,
         startup_discovery: bool,
     ) -> Result<Self, String> {
+        // Test fixtures own their temporary directories. tempfile may use
+        // 0755/0775 under the caller's umask; production never repairs an
+        // existing shared state directory, so make the fixture private here.
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&state_dir)
+            .map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
         if let Ok(f) = std::env::var("LABLINK_TEST_LOG") {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::new(f))

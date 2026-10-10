@@ -90,6 +90,7 @@ pub struct App {
     /// The latest `lablink sites` report (evidence and local signals).
     sites_report: Option<Result<SitesReport, Fail>>,
     daemon_version: Option<String>,
+    daemon_build_warning: Option<String>,
     daemon_uptime_s: Option<u64>,
     poll_error: Option<Fail>,
     /// Service state, fetched when the daemon becomes unreachable (not polled).
@@ -156,6 +157,7 @@ impl App {
             site_mode: SiteMode::Auto,
             sites_report: None,
             daemon_version: None,
+            daemon_build_warning: None,
             daemon_uptime_s: None,
             poll_error: None,
             service: None,
@@ -267,7 +269,11 @@ impl App {
 
     fn handle(&mut self, ev: Event) {
         match ev {
-            Event::Poll { status, version } => match status {
+            Event::Poll {
+                status,
+                version,
+                build_warning,
+            } => match status {
                 Ok(report) => {
                     self.devices = report.devices;
                     self.sites = report.sites;
@@ -278,6 +284,7 @@ impl App {
                         }
                     }
                     self.daemon_version = version;
+                    self.daemon_build_warning = build_warning;
                     self.daemon_uptime_s = Some(report.daemon.uptime_s);
                     self.poll_error = None;
                     if let Some(d) = self.selected.clone() {
@@ -289,6 +296,7 @@ impl App {
                     self.devices.clear();
                     self.sites.clear();
                     self.daemon_version = None;
+                    self.daemon_build_warning = None;
                     self.daemon_uptime_s = None;
                     if self.poll_error.is_none() && f.unavailable {
                         // Once per outage: how can the daemon be started?
@@ -354,7 +362,9 @@ impl App {
                     self.adopt = None;
                     self.banner = Some((
                         true,
-                        format!("Adopted {ip} as '{name}'. Next: compare and trust its host key (nothing is trusted automatically)."),
+                        format!(
+                            "Adopted {ip} as '{name}'. Next: compare and trust its host key (nothing is trusted automatically)."
+                        ),
                     ));
                     self.worker.refresh();
                     self.worker.send(Cmd::Discovered);
@@ -527,6 +537,9 @@ impl App {
                 },
             );
         });
+        if let Some(warning) = &self.daemon_build_warning {
+            ui.colored_label(view::YELLOW, warning);
+        }
         if let Some(f) = self.poll_error.clone() {
             if f.unavailable {
                 self.daemon_down(ui);
@@ -957,10 +970,10 @@ impl App {
     }
 
     fn details_body(&mut self, ui: &mut egui::Ui, d: &DeviceStatus) {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         // Requests use the canonical site/name: names may repeat across sites.
         let name = d.id.clone();
         let ssh = d.ssh_port != PortState::Disabled;
-        let stop = d.identity == IdentityState::Mismatch;
 
         // Where the device is in Discover -> Adopt -> Trust -> Connect.
         ui.horizontal_wrapped(|ui| {
@@ -987,7 +1000,11 @@ impl App {
         let ip = d.ip.clone();
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(ssh && !stop, egui::Button::new("Open SSH terminal"))
+                .add_enabled(
+                    ssh && d.identity == IdentityState::Verified,
+                    egui::Button::new("Open SSH terminal"),
+                )
+                .on_disabled_hover_text("Verify and trust the host key before opening SSH")
                 .clicked()
             {
                 self.open_terminal(&["ssh", &name]);
@@ -995,7 +1012,7 @@ impl App {
             let testing = self.test_ssh.as_ref().is_some_and(|t| t.busy);
             if ui
                 .add_enabled(
-                    ssh && !stop && ip.is_some() && !testing,
+                    ssh && d.identity == IdentityState::Verified && ip.is_some() && !testing,
                     egui::Button::new("Test SSH"),
                 )
                 .on_hover_text("Log in once in batch mode (keys only) and report the result")
@@ -1100,7 +1117,6 @@ impl App {
         }
         let mut fix: Option<Fix> = None;
         frame.show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
             ui.label(RichText::new(&e.headline).strong().size(16.0).color(color));
             ui.label(&e.summary);
             if !e.failed.is_empty() {
@@ -1123,17 +1139,17 @@ impl App {
                         fix = Some(*a);
                     }
                 }
-                ui.collapsing("Details", |ui| {
-                    for r in &d.reasons {
-                        ui.monospace(r);
-                    }
-                    if let Some(err) = self.detail.as_ref().and_then(|x| x.last_error.clone()) {
-                        ui.monospace(format!("last error: {err}"));
-                    }
-                    for a in &e.actions {
-                        ui.monospace(a.command(d));
-                    }
-                });
+            });
+            ui.collapsing("Details", |ui| {
+                for r in &d.reasons {
+                    ui.monospace(r);
+                }
+                if let Some(err) = self.detail.as_ref().and_then(|x| x.last_error.clone()) {
+                    ui.monospace(format!("last error: {err}"));
+                }
+                for a in &e.actions {
+                    ui.monospace(a.command(d));
+                }
             });
         });
         match fix {
@@ -1756,9 +1772,15 @@ impl App {
     fn settings_actions(&mut self, actions: Vec<settings::Action>) {
         for a in actions {
             match a {
-                settings::Action::Save(cfg) => self
-                    .worker
-                    .send(Cmd::SaveConfig(cfg, self.config_path.clone())),
+                settings::Action::Save(cfg) => {
+                    if let Some(settings) = &self.settings {
+                        self.worker.send(Cmd::SaveConfig {
+                            cfg,
+                            expected: Box::new(settings.orig.clone()),
+                            path: self.config_path.clone(),
+                        });
+                    }
+                }
                 settings::Action::Service(a) => {
                     if let Some(s) = self.settings.as_mut() {
                         s.service_busy = true;
@@ -1806,9 +1828,11 @@ impl eframe::App for App {
         }
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
         if self.selected.is_some() && self.tab == Tab::Devices {
+            let max_width = (ui.available_width() * 0.65).max(240.0);
             egui::Panel::right("details")
                 .resizable(true)
-                .default_size(460.0)
+                .default_size(460.0_f32.min(max_width))
+                .max_size(max_width)
                 .show(ui, |ui| self.details(ui));
         }
         egui::CentralPanel::default_margins().show(ui, |ui| match self.tab {
@@ -2017,6 +2041,7 @@ fn info_grid(ui: &mut egui::Ui, d: &DeviceDetail) {
     };
     egui::Grid::new("info")
         .num_columns(2)
+        .max_col_width((ui.available_width() - 112.0).max(80.0))
         .spacing([12.0, 4.0])
         .show(ui, |ui| {
             ui.label("Name");

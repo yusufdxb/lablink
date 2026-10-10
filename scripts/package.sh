@@ -140,12 +140,19 @@ POSTINST
 cat > "$d/DEBIAN/prerm" <<'PRERM'
 #!/bin/sh
 set -e
-# lablinkd runs per user; stop running instances when the package is removed.
+# Stop only instances of this package, preserving per-user tarball installs.
 # Each user's configuration and state in their home directory are kept
 # (also on purge): delete ~/.config/lablink and ~/.local/state/lablink to
 # remove them.
-if [ "$1" = remove ] && command -v pkill >/dev/null 2>&1; then
-    pkill -x lablinkd 2>/dev/null || true
+if [ "$1" = remove ]; then
+    for executable in /proc/[0-9]*/exe; do
+        case "$(readlink "$executable" 2>/dev/null || true)" in
+            /usr/bin/lablinkd|'/usr/bin/lablinkd (deleted)')
+                pid=${executable#/proc/}; pid=${pid%/exe}
+                kill -TERM "$pid" 2>/dev/null || true
+                ;;
+        esac
+    done
 fi
 exit 0
 PRERM

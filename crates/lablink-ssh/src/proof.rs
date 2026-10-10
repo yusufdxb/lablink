@@ -517,4 +517,64 @@ mod tests {
             KeyProof::Inconclusive(_)
         ));
     }
+
+    /// Exercise the complete subprocess/relay path, including its stderr
+    /// classification. A host-key refusal before the client sent both KEX
+    /// packets is not evidence that any host key was judged.
+    #[test]
+    fn stderr_verdict_requires_a_host_key_exchange_and_never_proves_possession() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let kh = dir.path().join("known_hosts");
+        std::fs::write(&kh, "lablink.t.dev ssh-ed25519 AAAA\n").unwrap();
+        for sent in 0..=2 {
+            for stderr in ["incorrect signature", "Authenticated to 127.0.0.1"] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let server = std::thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let _ = std::io::copy(&mut stream, &mut std::io::sink());
+                });
+                let mut bytes = b"SSH-2.0-test\r\n".to_vec();
+                for msg in [20, 30].into_iter().take(sent) {
+                    bytes.extend(packet(msg, &[]));
+                }
+                let octal = bytes
+                    .iter()
+                    .map(|b| format!("\\{b:03o}"))
+                    .collect::<String>();
+                let binary = dir.path().join("fake-ssh");
+                std::fs::write(
+                    &binary,
+                    format!("#!/bin/sh\nprintf '%b' '{octal}'\nprintf '%s\\n' '{stderr}' >&2\nexit 255\n"),
+                ).unwrap();
+                std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let t = Target {
+                    binary: binary.display().to_string(),
+                    ip: "127.0.0.1".into(),
+                    port,
+                    ssh_host: "dev".into(),
+                    username: None,
+                    host_key_alias: Some("lablink.t.dev".into()),
+                    known_hosts_file: Some(kh.clone()),
+                    connect_timeout_s: 1,
+                    options: Default::default(),
+                    proxy_command: None,
+                };
+                let proof = prove_host_key(&t, Duration::from_secs(5));
+                server.join().unwrap();
+                if stderr == "incorrect signature" && sent == 2 {
+                    assert!(matches!(proof, KeyProof::Refused(_)), "{sent}: {proof:?}");
+                } else {
+                    assert!(
+                        matches!(proof, KeyProof::Inconclusive(_)),
+                        "{sent}, {stderr}: {proof:?}"
+                    );
+                }
+            }
+        }
+    }
 }

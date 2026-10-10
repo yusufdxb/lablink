@@ -238,8 +238,71 @@ fn version_reports_cli_and_daemon() {
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["version"], lablink_core::VERSION);
     assert_eq!(v["daemon"]["version"], lablink_core::VERSION);
+    assert!(v["daemon"].as_object().unwrap().contains_key("git_sha"));
+    assert_eq!(v["daemon"]["git_sha"].as_str(), lablink_core::GIT_SHA);
+    assert!(matches!(
+        v["daemon_build"].as_str(),
+        Some("same" | "unknown")
+    ));
     assert_eq!(v["protocol_version"], 1);
     d.stop().unwrap();
+}
+
+#[test]
+fn version_warns_when_an_older_daemon_is_running() {
+    use std::io::{BufRead, BufReader};
+    let h = Home::new();
+    let socket = h.path().join("version.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+        assert!(request.contains("ping"));
+        stream.write_all(b"{\"ok\":true,\"result\":{\"version\":\"0.2.0\",\"protocol_version\":1,\"pid\":123,\"uptime_s\":0}}\n").unwrap();
+    });
+    let out = h.run(&socket, &["version"]);
+    server.join().unwrap();
+    assert_eq!(code(&out), exit::OK);
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("client and daemon builds differ"), "{text}");
+    assert!(text.contains("Restart lablinkd"));
+}
+
+#[test]
+fn concurrent_site_adds_preserve_every_acknowledged_change() {
+    let h = Home::new();
+    std::thread::scope(|scope| {
+        for worker in 0..6 {
+            let h = &h;
+            scope.spawn(move || {
+                for i in 0..20 {
+                    let name = format!("site-{worker}-{i}");
+                    let out = h.run(Path::new(NO_DAEMON), &["site", "add", &name, "--id", &name]);
+                    assert_eq!(code(&out), exit::OK, "{}", text(&out));
+                }
+            });
+        }
+    });
+    let cfg = lablink_core::Config::load(&h.config()).unwrap();
+    assert_eq!(cfg.sites.len(), 120);
+    for worker in 0..6 {
+        for i in 0..20 {
+            assert!(cfg.site(&format!("site-{worker}-{i}")).is_some());
+        }
+    }
+}
+
+#[test]
+fn renaming_an_unknown_site_preserves_the_exit_contract() {
+    let h = Home::new();
+    let socket = Path::new(NO_DAEMON);
+    let added = h.run(socket, &["site", "add", "Known", "--id", "known"]);
+    assert_eq!(code(&added), exit::OK, "{}", text(&added));
+    let before = std::fs::read(h.config()).unwrap();
+    let renamed = h.run(socket, &["site", "rename", "missing", "New name"]);
+    assert_eq!(code(&renamed), exit::DEVICE_NOT_FOUND, "{}", text(&renamed));
+    assert_eq!(std::fs::read(h.config()).unwrap(), before);
 }
 
 #[test]

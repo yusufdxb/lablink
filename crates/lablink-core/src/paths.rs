@@ -513,14 +513,16 @@ pub fn default_state_dir() -> PathBuf {
 }
 
 /// `$LABLINK_SOCKET`, else `$XDG_RUNTIME_DIR/lablink/lablinkd.sock`,
-/// else `/tmp/lablink-<uid>/lablinkd.sock`. Relative values are ignored.
+/// else `<state_dir>/run/lablinkd.sock`. The fallback stays in the user's
+/// private state tree so another user cannot squat on a predictable /tmp
+/// directory. Relative environment values are ignored.
 pub fn default_socket_path() -> PathBuf {
     if let Some(p) = env_dir("LABLINK_SOCKET") {
         return p;
     }
     match env_dir("XDG_RUNTIME_DIR") {
         Some(d) => d.join("lablink").join("lablinkd.sock"),
-        None => PathBuf::from(format!("/tmp/lablink-{}", uid())).join("lablinkd.sock"),
+        None => default_state_dir().join("run").join("lablinkd.sock"),
     }
 }
 
@@ -638,6 +640,178 @@ mod tests {
         if uid() != 0 {
             assert!(blocked.unwrap_or_default().contains("cannot check"));
         }
+    }
+
+    #[test]
+    fn the_socket_fallback_stays_in_the_private_state_tree() {
+        if std::env::var_os("LABLINK_TEST_PRIVATE_SOCKET_FALLBACK").is_some() {
+            assert_eq!(
+                default_socket_path(),
+                default_state_dir().join("run/lablinkd.sock")
+            );
+            assert!(!default_socket_path().starts_with("/tmp"));
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "paths::tests::the_socket_fallback_stays_in_the_private_state_tree",
+                "--nocapture",
+            ])
+            .env("LABLINK_TEST_PRIVATE_SOCKET_FALLBACK", "1")
+            .env("LABLINK_STATE_DIR", "/fixture/private-state")
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("LABLINK_SOCKET")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn a_foreign_owned_link_is_refused_even_when_its_target_is_trusted() {
+        if uid() != 0 {
+            eprintln!("SKIP: foreign link ownership requires root in a disposable container");
+            return;
+        }
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        chmod(dir.path(), 0o700);
+        let target = dir.path().join("trusted.yaml");
+        std::fs::write(&target, "trusted").unwrap();
+        chmod(&target, 0o600);
+        let link = dir.path().join("foreign-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(trusted_metadata(&link).is_ok());
+        let path = std::ffi::CString::new(link.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path; lchown changes only this test link.
+        assert_eq!(unsafe { libc::lchown(path.as_ptr(), 65534, 65534) }, 0);
+        assert_eq!(std::fs::symlink_metadata(&link).unwrap().uid(), 65534);
+        assert!(trusted_metadata(&target).is_ok());
+        let outer = dir.path().join("our-link");
+        std::os::unix::fs::symlink(&link, &outer).unwrap();
+        for path in [&link, &outer] {
+            let why = writable_by_others(path).unwrap_or_default();
+            assert!(why.contains("link that belongs to another user"), "{why}");
+        }
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "trusted");
+    }
+
+    #[test]
+    fn a_real_shared_group_cannot_write_a_trusted_file_or_ancestor() {
+        if uid() != 0 {
+            eprintln!("SKIP: shared group fixture requires root in a disposable container");
+            return;
+        }
+        let group = 65534;
+        assert!(!is_private_group(group));
+        let dir = tempfile::tempdir().unwrap();
+        chmod(dir.path(), 0o700);
+        let file = dir.path().join("config.yaml");
+        std::fs::write(&file, "trusted").unwrap();
+        std::os::unix::fs::chown(&file, None, Some(group)).unwrap();
+        chmod(&file, 0o660);
+        let why = writable_by_others(&file).unwrap_or_default();
+        assert!(why.contains("writable by group 65534"), "{why}");
+        chmod(&file, 0o640);
+        assert!(trusted_metadata(&file).is_ok());
+        std::os::unix::fs::chown(dir.path(), None, Some(group)).unwrap();
+        chmod(dir.path(), 0o770);
+        let why = writable_by_others(&file).unwrap_or_default();
+        assert!(why.contains("writable by group 65534"), "{why}");
+        chmod(dir.path(), 0o750);
+        assert!(trusted_metadata(&file).is_ok());
+    }
+
+    #[test]
+    fn acl_read_errors_fail_closed() {
+        if uid() != 0 {
+            eprintln!("SKIP: ACL error fixture requires root in a disposable container");
+            return;
+        }
+        if std::env::var_os("LABLINK_TEST_ACL_QUERY_DENIED").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "paths::tests::acl_read_errors_fail_closed",
+                    "--nocapture",
+                ])
+                .env("LABLINK_TEST_ACL_QUERY_DENIED", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        // Only this child test process is sandboxed. Make the kernel deny
+        // lgetxattr so the real trusted_metadata path sees an ACL query error.
+        let Some(group) = private_group() else {
+            eprintln!("SKIP: ACL error fixture needs a private account group");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        chmod(dir.path(), 0o700);
+        let file = dir.path().join("config.yaml");
+        std::fs::write(&file, "trusted").unwrap();
+        std::os::unix::fs::chown(&file, None, Some(group)).unwrap();
+        chmod(&file, 0o660);
+        assert!(trusted_metadata(&file).is_ok());
+        let filter = [
+            libc::sock_filter {
+                code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 1,
+                k: libc::SYS_lgetxattr as u32,
+            },
+            libc::sock_filter {
+                code: libc::BPF_RET as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            },
+            libc::sock_filter {
+                code: libc::BPF_RET as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ALLOW,
+            },
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_ptr() as *mut _,
+        };
+        // SAFETY: the BPF program is valid for the calls, affects only this
+        // child, and denies one syscall without altering Rust memory safety.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
+                0
+            );
+        }
+        let why = writable_by_others(&file).unwrap_or_default();
+        assert!(
+            why.contains("cannot check") && why.contains("Operation not permitted"),
+            "{why}"
+        );
+        println!("ACL query returned kernel EPERM and trusted_metadata refused: {why}");
     }
 
     /// Links met while following other links are judged too, and so is

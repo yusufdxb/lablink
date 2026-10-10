@@ -136,13 +136,10 @@ pub fn run(opts: &InitOptions) -> Vec<Step> {
             }
         }
     } else {
-        let mut cfg = if existed {
-            configfile::load_or_default(&opts.config_path).unwrap_or_default()
-        } else {
-            Config::default()
-        };
-        merge_site(&mut cfg, &opts.site.0, &opts.site.1, &opts.networks);
-        match configfile::write(&opts.config_path, &cfg) {
+        match configfile::update(&opts.config_path, |cfg| {
+            merge_site(cfg, &opts.site.0, &opts.site.1, &opts.networks);
+            Ok(())
+        }) {
             Ok(backup) => {
                 config_written = true;
                 let scanned: Vec<&str> = opts

@@ -37,6 +37,11 @@ pub fn terminal_command(
         "kitty" => vec![],
         _ => vec!["-e".into()],
     };
+    // Keep failures visible even in emulators that close when the child exits.
+    // Arguments stay separate from the script, including device names and paths.
+    args.extend(["/bin/sh".into(), "-c".into(),
+        "\"$@\"; status=$?; if [ \"$status\" -ne 0 ]; then printf '\\nLabLink exited with status %s. Press Enter to close.\\n' \"$status\"; read -r reply; fi; exit \"$status\"".into(),
+        "lablink-terminal".into()]);
     args.push(lablink.to_string_lossy().into_owned());
     args.extend(lablink_args.iter().map(|a| a.to_string()));
     (found.to_string(), args)
@@ -104,15 +109,8 @@ fn first_trusted(
 /// `p` if it is an absolute path to an executable regular file that no other
 /// user could have written or replaced.
 fn trusted_executable(p: &Path) -> Result<PathBuf, String> {
-    if !p.is_absolute() {
-        return Err(format!("{} is not an absolute path", p.display()));
-    }
-    let m = lablink_core::paths::trusted_metadata(p)
-        .map_err(|why| format!("not running {}: {why}", p.display()))?;
-    if !m.is_file() || m.permissions().mode() & 0o111 == 0 {
-        return Err(format!("{} is not an executable file", p.display()));
-    }
-    Ok(p.to_path_buf())
+    lablink_core::program::trusted_executable(p)
+        .map_err(|why| format!("not running {}: {why}", p.display()))
 }
 
 /// Spawn a detached terminal running `lablink <args...>`, for commands that
@@ -160,24 +158,21 @@ mod tests {
     fn gnome_terminal_uses_double_dash() {
         let (p, a) = cmd("gnome-terminal");
         assert_eq!(p, "gnome-terminal");
-        assert_eq!(a, ["--", "/opt/ll/lablink", "ssh", "jetson-a"]);
+        assert_eq!(&a[..3], ["--", "/bin/sh", "-c"]);
+        assert_eq!(&a[5..], ["/opt/ll/lablink", "ssh", "jetson-a"]);
     }
 
     #[test]
     fn konsole_alacritty_xterm_use_dash_e() {
         for t in ["konsole", "alacritty", "xterm", "x-terminal-emulator"] {
-            assert_eq!(
-                cmd(t).1,
-                ["-e", "/opt/ll/lablink", "ssh", "jetson-a"],
-                "{t}"
-            );
+            assert_eq!(&cmd(t).1[..3], ["-e", "/bin/sh", "-c"], "{t}");
         }
     }
 
     #[test]
     fn xfce_dash_x_and_kitty_bare() {
         assert_eq!(cmd("xfce4-terminal").1[0], "-x");
-        assert_eq!(cmd("kitty").1, ["/opt/ll/lablink", "ssh", "jetson-a"]);
+        assert_eq!(&cmd("kitty").1[..2], ["/bin/sh", "-c"]);
     }
 
     #[test]
@@ -190,7 +185,43 @@ mod tests {
     #[test]
     fn other_lablink_commands() {
         let (_, a) = terminal_command("xterm", Path::new("/l"), &["copy-id", "robot"]);
-        assert_eq!(a, ["-e", "/l", "copy-id", "robot"]);
+        assert_eq!(&a[5..], ["/l", "copy-id", "robot"]);
+    }
+
+    #[test]
+    fn terminal_failures_wait_for_enter_and_arguments_are_never_shell_code() {
+        use std::io::{BufRead, BufReader, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("lab link");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 7\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let literal = "$(echo should-never-execute) ; \"quoted\"";
+        let (_, args) = terminal_command("kitty", &fake, &[literal]);
+        let mut child = std::process::Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        assert_eq!(line.trim_end(), literal);
+        line.clear();
+        output.read_line(&mut line).unwrap(); // blank separator
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        assert!(line.contains("status 7. Press Enter"), "{line}");
+        assert!(child.try_wait().unwrap().is_none());
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(7));
+        let (_, args) = terminal_command("kitty", Path::new("/bin/true"), &[]);
+        assert!(std::process::Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
     }
 
     /// The terminal is only ever handed an absolute, executable `lablink`

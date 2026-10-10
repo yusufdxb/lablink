@@ -740,7 +740,7 @@ fn mismatch_text(who: &str) -> String {
 
 /// The one-line human text for a check.
 pub fn human_text(c: &CheckResult) -> String {
-    match c.status {
+    printable(&match c.status {
         CheckStatus::Ok => match c.kind.as_str() {
             "ssh" if c.detail.contains("NOT") => format!("OK, {}", c.detail),
             "ssh" => "OK".into(),
@@ -753,7 +753,19 @@ pub fn human_text(c: &CheckResult) -> String {
             _ => c.detail.clone(),
         },
         st => format!("{} {}", st.word(), c.detail).trim_end().to_string(),
-    }
+    })
+}
+
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 fn paint(on: bool, code: &str, text: &str) -> String {
@@ -780,6 +792,7 @@ pub fn render_human(r: &Report, color: bool) -> String {
     } else {
         r.scope.as_str()
     };
+    let scope = printable(scope);
     let head = match r.verdict {
         Verdict::Ready => (format!("{scope} READY"), Color::Green),
         Verdict::Degraded => (format!("{scope} DEGRADED"), Color::Yellow),
@@ -789,9 +802,9 @@ pub fn render_human(r: &Report, color: bool) -> String {
     let label = |d: &DeviceReport| {
         let dup = r.devices.iter().filter(|o| o.name == d.name).count() > 1;
         if dup && !d.id.is_empty() {
-            d.id.clone()
+            printable(&d.id)
         } else {
-            d.name.clone()
+            printable(&d.name)
         }
     };
     let name_w = r
@@ -805,7 +818,7 @@ pub fn render_human(r: &Report, color: bool) -> String {
     let label_w = r
         .devices
         .iter()
-        .flat_map(|d| d.checks.iter().map(|c| c.label.len()))
+        .flat_map(|d| d.checks.iter().map(|c| printable(&c.label).len()))
         .max()
         .unwrap_or(0)
         .max(9)
@@ -826,10 +839,11 @@ pub fn render_human(r: &Report, color: bool) -> String {
                 CheckStatus::Fail => "31",
                 CheckStatus::Skip => "90",
             };
-            let pad = " ".repeat(label_w.saturating_sub(c.label.len()));
+            let shown_label = printable(&c.label);
+            let pad = " ".repeat(label_w.saturating_sub(shown_label.len()));
             s.push_str(&format!(
                 "  {}{pad}{}\n",
-                c.label,
+                shown_label,
                 paint(color, code, &human_text(c))
             ));
         }
@@ -841,6 +855,21 @@ pub fn render_human(r: &Report, color: bool) -> String {
 mod tests {
     use super::*;
     use script::Section;
+
+    #[test]
+    fn remote_details_cannot_control_the_terminal() {
+        let mut r = fixture();
+        r.scope = "site\x1b]0;owned\x07".into();
+        r.devices[0].name = "host\rspoof".into();
+        r.devices[0].checks[0].label = "check\nforged".into();
+        r.devices[0].checks[0].status = CheckStatus::Fail;
+        r.devices[0].checks[0].detail = "\x1b[2Jfake success\r\x07".into();
+        let text = render_human(&r, false);
+        assert!(!text.contains('\x1b') && !text.contains('\r') && !text.contains('\x07'));
+        assert!(text.contains("check\\nforged"));
+        assert!(text.contains("\\u{1b}[2J"));
+        assert!(!human_text(&r.devices[0].checks[0]).contains('\x1b'));
+    }
 
     fn item(kind: &str, spec: Option<CheckSpec>) -> Item {
         Item {

@@ -348,11 +348,14 @@ impl Device {
         }
     }
 
-    pub fn ssh_host(&self) -> String {
-        self.cfg
-            .ssh_host
-            .clone()
-            .unwrap_or_else(|| self.cfg.name.clone())
+    pub fn ssh_host(&self, multi_site: bool) -> String {
+        self.cfg.ssh_host.clone().unwrap_or_else(|| {
+            if multi_site && !self.configured {
+                format!("{}.{}", self.site, self.cfg.name)
+            } else {
+                self.cfg.name.clone()
+            }
+        })
     }
 
     pub fn pinned_fingerprints(&self) -> BTreeSet<String> {
@@ -2299,6 +2302,16 @@ impl Registry {
         }
     }
 
+    /// IPs are reused between sites. A scan result from the previous place
+    /// must not suppress probes for the next ten minutes at the new place.
+    fn invalidate_scan_memos(&mut self) {
+        for (ip, r) in &mut self.discovered {
+            r.last_tcp_ms = 0;
+            r.last_keyscan_ms = 0;
+            self.dirty_discovered.insert(*ip);
+        }
+    }
+
     /// Whether `ip` (an unmatched host) is due a TCP/22 check during a scan.
     pub fn scan_tcp_due(&self, ip: IpAddr, now: u64, recheck_ms: u64) -> bool {
         if self.devices.values().any(|d| d.rec.current_ip == Some(ip)) {
@@ -2306,13 +2319,14 @@ impl Registry {
         }
         self.discovered
             .get(&ip)
-            .is_none_or(|r| now.saturating_sub(r.last_tcp_ms) >= recheck_ms)
+            .is_none_or(|r| r.last_tcp_ms == 0 || now.saturating_sub(r.last_tcp_ms) >= recheck_ms)
     }
 
     /// Whether an unmatched host with SSH open should have its keys scanned.
     pub fn scan_keys_due(&self, ip: IpAddr, now: u64, recheck_ms: u64) -> bool {
         self.discovered.get(&ip).is_some_and(|r| {
-            r.ssh_port == PortState::Open && now.saturating_sub(r.last_keyscan_ms) >= recheck_ms
+            r.ssh_port == PortState::Open
+                && (r.last_keyscan_ms == 0 || now.saturating_sub(r.last_keyscan_ms) >= recheck_ms)
         })
     }
 
@@ -2526,7 +2540,7 @@ impl Registry {
             aliases: d.cfg.aliases.clone(),
             usernames: d.cfg.usernames.clone(),
             active_username: d.rec.active_username.clone(),
-            ssh_host: d.ssh_host(),
+            ssh_host: d.ssh_host(self.cfg.sites.len() > 1),
             ssh_port: d.cfg.ssh_port,
             hostnames: d.cfg.hostnames.clone(),
             learned_hostnames: d.rec.learned_hostnames.iter().cloned().collect(),
@@ -2780,7 +2794,7 @@ impl Registry {
             site_away: self.site_state(&d.site) == SiteState::Away,
             ip: ip.to_string(),
             port: d.cfg.ssh_port,
-            ssh_host: d.ssh_host(),
+            ssh_host: d.ssh_host(self.cfg.sites.len() > 1),
             username,
             identity: d.identity,
             color: self
@@ -3098,7 +3112,9 @@ impl Registry {
         }
         d.apply_runtime_ssh();
         if c.recheck && d.cfg.ssh {
-            // Not a setting: the monitor re-runs the login check on its next round.
+            // A failed session may be the first sign of a changed host key.
+            // Recheck identity before attempting another login.
+            d.identity_recheck = true;
             d.auth_recheck = true;
             if d.auth != AuthState::Ok {
                 d.auth = AuthState::Unknown;
@@ -3794,6 +3810,20 @@ impl Registry {
             .map(|s| sites::assess(s, &self.knowledge(&s.id), &signals, &keys))
             .collect();
         let decisions = sites::decide(&self.cfg.sites, &assessments, &self.mode);
+        let old_scan_sites: BTreeSet<&str> = self
+            .decisions
+            .values()
+            .filter(|d| d.scan_permission().is_ok())
+            .map(|d| d.site.as_str())
+            .collect();
+        let new_scan_sites: BTreeSet<&str> = decisions
+            .iter()
+            .filter(|d| d.scan_permission().is_ok())
+            .map(|d| d.site.as_str())
+            .collect();
+        if old_scan_sites != new_scan_sites {
+            self.invalidate_scan_memos();
+        }
         let mut wake = Vec::new();
         for d in &decisions {
             let old = self.decisions.get(&d.site).map(|o| (o.state, o.confidence));
@@ -3864,6 +3894,7 @@ impl Registry {
         }
         self.gateways_seen = Some(seen);
         self.gateways_since_ms = now;
+        self.invalidate_scan_memos();
         for d in self.devices.values_mut() {
             if d.identity == IdentityState::Verified {
                 d.key_proof_due = d.rec.current_ip;
@@ -4071,6 +4102,88 @@ mod security_tests {
     fn reg(yaml: &str) -> Registry {
         let cfg = Config::parse(yaml, "t").unwrap();
         Registry::new(cfg, PathBuf::from("/tmp/lablink-test-known_hosts"))
+    }
+
+    #[test]
+    fn adopted_ssh_hosts_are_distinct_at_different_sites() {
+        let cfg = Config::parse("devices:\n  - name: robot\n", "test")
+            .unwrap()
+            .sites[0]
+            .devices[0]
+            .clone();
+        let a = Device::new(cfg.clone(), "lab", false);
+        let b = Device::new(cfg.clone(), "club", false);
+        assert_eq!(a.ssh_host(true), "lab.robot");
+        assert_eq!(b.ssh_host(true), "club.robot");
+        assert_ne!(a.ssh_host(true), b.ssh_host(true));
+        assert_eq!(a.ssh_host(false), "robot");
+        let configured = Device::new(cfg, "lab", true);
+        assert_eq!(configured.ssh_host(true), "robot");
+    }
+
+    #[test]
+    fn scan_memos_expire_when_the_selected_site_changes() {
+        let mut r = reg("sites:\n  - id: lab\n    name: Lab\n    networks:\n      - name: lan\n        cidr: 10.9.0.0/24\n        active_scan: true\n  - id: club\n    name: Club\n    networks:\n      - name: lan\n        cidr: 10.9.0.0/24\n        active_scan: true\n");
+        let ip: IpAddr = "10.9.0.22".parse().unwrap();
+        r.set_mode(Some("lab"), 1).unwrap();
+        r.observe(
+            &Observation {
+                ip: Some(ip),
+                mac: None,
+                names: vec![],
+                host_keys: vec![],
+            },
+            "scan",
+            None,
+            2,
+        );
+        r.record_scan(ip, PortState::Open, 10);
+        r.record_keyscan_attempt(ip, 10);
+        r.refresh_sites(30);
+        assert!(!r.scan_tcp_due(ip, 30, 600_000));
+        assert!(!r.scan_keys_due(ip, 30, 600_000));
+        r.set_mode(Some("club"), 30).unwrap();
+        assert!(r.scan_tcp_due(ip, 30, 600_000));
+        assert!(r.scan_keys_due(ip, 30, 600_000));
+        // The new site's next successful scan starts a fresh memo.
+        r.record_scan(ip, PortState::Open, 31);
+        r.record_keyscan_attempt(ip, 31);
+        r.refresh_sites(32);
+        assert!(!r.scan_tcp_due(ip, 32, 600_000));
+        assert!(!r.scan_keys_due(ip, 32, 600_000));
+    }
+
+    #[test]
+    fn scan_memos_expire_when_gateway_identity_changes_even_with_the_same_site() {
+        let mut r = reg("devices: []\n");
+        let ip: IpAddr = "10.9.0.22".parse().unwrap();
+        let mut signals = sites::LocalSignals::default();
+        signals.gateways.push(sites::Gateway {
+            interface: "eth0".into(),
+            ip: "10.9.0.1".parse().unwrap(),
+            mac: Some("02:00:00:00:00:01".into()),
+        });
+        r.note_gateways(&signals, 1);
+        r.observe(
+            &Observation {
+                ip: Some(ip),
+                mac: None,
+                names: vec![],
+                host_keys: vec![],
+            },
+            "scan",
+            None,
+            2,
+        );
+        r.record_scan(ip, PortState::Open, 10);
+        r.record_keyscan_attempt(ip, 10);
+        r.note_gateways(&signals, 30);
+        assert!(!r.scan_tcp_due(ip, 30, 600_000));
+        assert!(!r.scan_keys_due(ip, 30, 600_000));
+        signals.gateways[0].mac = Some("02:00:00:00:00:02".into());
+        r.note_gateways(&signals, 30);
+        assert!(r.scan_tcp_due(ip, 30, 600_000));
+        assert!(r.scan_keys_due(ip, 30, 600_000));
     }
 
     #[test]

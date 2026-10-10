@@ -218,7 +218,7 @@ async fn lookup_user_known(
         for h in &d.cfg.hostnames {
             names.push(fmt(h));
         }
-        names.push(fmt(&d.ssh_host()));
+        names.push(fmt(&d.ssh_host(state.cfg.sites.len() > 1)));
     }
     names.sort();
     names.dedup();

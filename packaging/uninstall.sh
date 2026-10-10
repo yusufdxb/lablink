@@ -1,23 +1,67 @@
 #!/bin/sh
 # Remove a tarball install of LabLink.
 # Usage: ./uninstall.sh [--purge] [PREFIX]   (default PREFIX: ~/.local)
-# Your configuration (~/.config/lablink) and state (~/.local/state/lablink:
-# pinned host keys, history) are kept unless you pass --purge.
+# Configuration and pinned state are kept unless --purge is passed.
 set -eu
 purge=no
 if [ "${1:-}" = "--purge" ]; then purge=yes; shift; fi
 prefix=${1:-"$HOME/.local"}
-data=${XDG_DATA_HOME:-"$HOME/.local/share"}
-if [ -x "$prefix/bin/lablink" ]; then
-    "$prefix/bin/lablink" uninstall-service 2>/dev/null || true
+if [ -d "$prefix" ]; then prefix=$(cd "$prefix" && pwd -P); else
+    case $prefix in /*) ;; *) prefix=$PWD/$prefix ;; esac
 fi
-pkill -x -u "$(id -u)" lablinkd 2>/dev/null || true
-rm -f "$prefix/bin/lablink" "$prefix/bin/lablinkd" "$prefix/bin/lablink-gui" \
-      "$prefix/share/applications/lablink-gui.desktop" \
-      "$prefix/share/icons/hicolor/scalable/apps/lablink.svg" \
-      "$data/bash-completion/completions/lablink"
+case ${XDG_DATA_HOME:-} in /*) data=$XDG_DATA_HOME ;; *) data=$HOME/.local/share ;; esac
+case ${XDG_CONFIG_HOME:-} in /*) config=$XDG_CONFIG_HOME ;; *) config=$HOME/.config ;; esac
+case ${XDG_STATE_HOME:-} in /*) state=$XDG_STATE_HOME ;; *) state=$HOME/.local/state ;; esac
+if [ -f "$prefix/share/lablink/data-dir" ]; then
+    IFS= read -r recorded_data < "$prefix/share/lablink/data-dir" || true
+    case ${recorded_data:-} in /*) data=$recorded_data ;; esac
+fi
+# Only remove a service whose ExecStart belongs to this installation. The CLI
+# generates the same systemd quoting used when it installed the user unit.
+unit=$config/systemd/user/lablinkd.service
+if [ -x "$prefix/bin/lablink" ] && [ -f "$unit" ]; then
+    expected=$("$prefix/bin/lablink" install-service --print --daemon-path "$prefix/bin/lablinkd" 2>/dev/null | sed -n '/^ExecStart=/p') || expected=
+    actual=$(sed -n '/^ExecStart=/p' "$unit")
+    if [ -n "$expected" ] && [ "$actual" = "$expected" ]; then
+        "$prefix/bin/lablink" uninstall-service 2>/dev/null || true
+    fi
+fi
+# A daemon started by hand also belongs to a specific prefix, not merely a name.
+uid=$(id -u)
+for proc in /proc/[0-9]*; do
+    [ "$(stat -c %u "$proc" 2>/dev/null || true)" = "$uid" ] || continue
+    exe=$(readlink "$proc/exe" 2>/dev/null || true)
+    case $exe in "$prefix/bin/lablinkd"|"$prefix/bin/lablinkd (deleted)") kill "${proc##*/}" 2>/dev/null || true ;; esac
+done
+# The last installed prefix owns the shared menu entry. Preserve another prefix.
+exec_word=$(printf '%s\n' "$prefix/bin/lablink-gui" | awk '
+{
+    out=""
+    for (i=1; i<=length($0); i++) {
+        c=substr($0,i,1)
+        if (c=="%") out=out "%%"
+        else if (c=="\\" || c=="\"" || c=="$" || c=="`") out=out "\\" c
+        else out=out c
+    }
+    encoded=""
+    for (i=1; i<=length(out); i++) {
+        c=substr(out,i,1)
+        if (c=="\\") encoded=encoded "\\"
+        encoded=encoded c
+    }
+    print "\"" encoded "\""
+}')
+entry=$data/applications/lablink-gui.desktop
+if [ -f "$entry" ]; then
+    actual=$(sed -n '/^Exec=/p' "$entry")
+    if [ "$actual" = "Exec=/usr/bin/env $exec_word" ] || [ "$actual" = "Exec=$exec_word" ] || [ "$actual" = "Exec=$prefix/bin/lablink-gui" ]; then
+        rm -f "$entry" "$data/icons/hicolor/scalable/apps/lablink.svg" "$data/bash-completion/completions/lablink"
+    fi
+fi
+rm -f "$prefix/bin/lablink" "$prefix/bin/lablinkd" "$prefix/bin/lablink-gui"       "$prefix/share/applications/lablink-gui.desktop"       "$prefix/share/icons/hicolor/scalable/apps/lablink.svg" "$prefix/share/lablink/data-dir"
 if [ "$purge" = yes ]; then
-    rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/lablink" "${XDG_STATE_HOME:-$HOME/.local/state}/lablink"
+    case ${LABLINK_CONFIG:-} in /*) rm -f "$LABLINK_CONFIG" ;; *) rm -rf "$config/lablink" ;; esac
+    case ${LABLINK_STATE_DIR:-} in /*) rm -rf "$LABLINK_STATE_DIR" ;; *) rm -rf "$state/lablink" ;; esac
     echo "Removed LabLink from $prefix and deleted its configuration and state."
 else
     echo "Removed LabLink from $prefix (configuration and state kept; --purge deletes them)."

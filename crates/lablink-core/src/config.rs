@@ -835,7 +835,54 @@ impl Config {
         if root.as_mapping().is_some_and(|m| m.is_empty()) {
             return String::new();
         }
-        serde_yaml_ng::to_string(&root).unwrap_or_default()
+        let yaml = serde_yaml_ng::to_string(&root).unwrap_or_default();
+        if check_yaml_nesting(&yaml).is_ok() {
+            return yaml;
+        }
+        // The emitter may write strings as plain or block scalars, which our
+        // deliberately conservative input guard counts as YAML structure.
+        // Retry in block style with every string JSON-quoted (valid YAML).
+        // Keep the input guard unchanged, including the total opener cap.
+        fn quoted_blocks(v: &Value, indent: usize, out: &mut String) {
+            let pad = " ".repeat(indent);
+            match v {
+                Value::Mapping(m) if !m.is_empty() => {
+                    for (key, val) in m {
+                        out.push_str(&pad);
+                        out.push_str(&serde_json::to_string(key).unwrap());
+                        out.push(':');
+                        field(val, indent, out);
+                    }
+                }
+                Value::Sequence(a) if !a.is_empty() => {
+                    for val in a {
+                        out.push_str(&pad);
+                        out.push('-');
+                        field(val, indent, out);
+                    }
+                }
+                _ => {
+                    out.push_str(&pad);
+                    out.push_str(&serde_json::to_string(v).unwrap());
+                    out.push('\n');
+                }
+            }
+        }
+        fn field(v: &Value, indent: usize, out: &mut String) {
+            if matches!(v, Value::Mapping(m) if !m.is_empty())
+                || matches!(v, Value::Sequence(a) if !a.is_empty())
+            {
+                out.push('\n');
+                quoted_blocks(v, indent + 2, out);
+            } else {
+                out.push(' ');
+                out.push_str(&serde_json::to_string(v).unwrap());
+                out.push('\n');
+            }
+        }
+        let mut quoted = String::new();
+        quoted_blocks(&root, 0, &mut quoted);
+        quoted
     }
 
     /// Find a site by id (case-insensitive).
@@ -1606,6 +1653,26 @@ mod writer_tests {
                 .as_deref(),
             Some("02:00:5e:00:42:01")
         );
+    }
+
+    #[test]
+    fn text_that_looks_like_yaml_structure_round_trips() {
+        for command in [format!("echo x{}", "{".repeat(65)), "* text\n".repeat(65)] {
+            let text = format!("devices:\n  - name: test-device\n    notes: {}\n    services:\n      - name: test-service\n        command: {}\n",
+                serde_json::to_string(&command).unwrap(), serde_json::to_string(&command).unwrap());
+            let cfg = Config::parse(&text, "in").unwrap();
+            let out = cfg.to_yaml();
+            assert_eq!(Config::parse(&out, "out").unwrap(), cfg, "{out}");
+            assert!(check_yaml_nesting(&out).is_ok(), "{out}");
+        }
+        // Quoting for output must not weaken hostile input limits.
+        assert!(Config::parse(&format!("a: {}{}", "[".repeat(65), "]".repeat(65)), "in").is_err());
+        assert!(Config::parse(
+            &format!("devices: [\n{}", "[".repeat(MAX_YAML_FLOW_OPENERS + 1)),
+            "in"
+        )
+        .is_err());
+        assert!(Config::parse("devices: [unterminated", "in").is_err());
     }
 
     #[test]

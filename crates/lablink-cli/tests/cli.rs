@@ -306,6 +306,20 @@ fn exec_preserves_exit_code_output_and_pins_host_key() {
 }
 
 #[test]
+fn a_session_host_key_failure_gives_security_advice_and_rechecks_identity() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    let out = lablink(Some(&e), &["exec", "jetson-a", "echo 'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!' >&2; echo 'Host key verification failed.' >&2; exit 255"]);
+    assert_eq!(code(&out), exit::SSH_ERROR);
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("lablink: ssh exited 255. SECURITY STOP: do not connect."),
+        "{text}"
+    );
+    assert!(!text.contains("systemctl enable --now ssh"), "{text}");
+}
+
+#[test]
 fn exec_timeout_is_124_and_kills_the_command() {
     let e = setup("");
     wait_color(&e, "jetson-a", "green");

@@ -137,23 +137,14 @@ LabLink is a policy layer over OpenSSH and the operating system:
 
 ## Known limitations
 
-- **Group-writable files (umask 002).** A group may write LabLink's files
-  only if it is your *private group*: your primary group in the password
-  database (not the group a process runs as after `newgrp` or `sg`, or
-  under a service's `Group=`), named like your user, with no members other
-  than you, and not the primary group of any other account in
-  `/etc/passwd`. Accounts in a directory service (LDAP, Active Directory,
-  NIS) are not enumerated, so another directory account whose primary group
-  is your group is not seen; if your directory has such accounts, keep
-  LabLink's files and directories unwritable by group (`chmod g-w`). Where
-  the primary group is shared (such as AD's "Domain Users") or named
-  differently from the user, a umask of 002 makes LabLink refuse its
-  configuration and state directory (and the app refuses a `lablink`
-  program installed that way): use a umask of 022, or `chmod g-w` the
-  files and directories it names. SSSD's `auto_private_groups` provides
-  private groups that LabLink accepts. The answer is looked up at most once
-  a minute, so a group change is noticed within a minute without a restart;
-  a failed lookup counts as no private group.
+- **Group-writable files (umask 002).** A group is private only when it is
+  your account's primary group, named like the account, with no other members,
+  no other local account using it as a primary group and no duplicate GID
+  granting access to another group. The private-group exception is disabled
+  whenever passwd or group lookup can use LDAP, SSSD, NIS, winbind or another
+  directory service. On those systems, use umask 022 or remove group write
+  permission from the paths named in the error. Lookup failures fail closed.
+  The result is cached for at most one minute.
 - **ACLs.** With a POSIX ACL, the group bits of a file's mode are only the
   ACL's mask, so a group-writable file or directory is also refused when its
   access ACL lets a user other than you (or root), or a group other than
@@ -161,11 +152,11 @@ LabLink is a policy layer over OpenSSH and the operating system:
   the mode and POSIX ACLs (for example on network filesystems) are not
   inspected; keep LabLink's files on a local filesystem, or make sure no
   one else is granted write there.
-- `ssh.reuse_control_master: true` (the default) lets background checks ride
-  an OpenSSH ControlMaster connection you opened yourself; such a connection
-  was verified by OpenSSH when it was opened, not by LabLink. Set it to
-  `false` to force LabLink-verified connections only. Interactive
-  `lablink ssh`/`exec` follow your own ControlMaster settings.
+- `ssh.reuse_control_master: true` permits reuse only of a LabLink-owned
+  socket in a private directory, scoped to the device alias, pinned keys and
+  route. It never reuses an unrelated master from your SSH configuration.
+  Set it to `false` to disable reuse. A reused connection has no fresh key
+  exchange; it retains the identity proven when LabLink opened it.
 - Service checks (`services:` in the config) run the shell commands you
   configure on your devices.
 - Site detection uses signals anyone on the local network could imitate
@@ -173,11 +164,20 @@ LabLink is a policy layer over OpenSSH and the operating system:
   probe or scan that site's approved ranges, or report the wrong site; it can
   never make LabLink trust a host.
 - A key you mark `@revoked` in `~/.ssh/known_hosts` after LabLink pinned it
-  is not removed from LabLink's pins automatically; remove or replace it with
+  is not removed from LabLink's pins automatically; remove it with `lablink forget <device>`, or replace it with
   `lablink trust <device> --replace`.
 - Devices configured with `ssh: false` (for example a robot reached through
   its computer) are identified only by spoofable signals (address, MAC);
   their status is a reachability indication, not an identity.
+
+- mDNS traffic can consume substantial CPU during a sustained UDP flood.
+  Disable mDNS (`--no-mdns` or `daemon.mdns: false`) on exposed networks.
+- Runtime settings and newly adopted devices are persisted in batches within
+  about one second. An abrupt crash can lose the last acknowledged edit.
+  Explicit trust and forget requests flush before returning.
+- A corrupt cache is quarantined with its journals. Pins kept only in that
+  cache need to be checked and trusted again; transient storage errors stop
+  startup while preserving the existing cache.
 
 See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the threat model and
 [docs/SSH_IDENTITY.md](docs/SSH_IDENTITY.md) for how device identity works.
