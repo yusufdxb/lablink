@@ -49,6 +49,9 @@ pub trait Prober: Send + Sync + 'static {
     fn user_known_keys(&self, hosts: Vec<String>) -> BoxFut<'_, Vec<HostKey>>;
     /// Non-interactive login check.
     fn auth(&self, target: Target, timeout: Duration) -> BoxFut<'_, AuthOutcome>;
+    /// Does the host hold the pinned key? No credentials are offered
+    /// (`Mode::KeyProof`).
+    fn key_proof(&self, target: Target, timeout: Duration) -> BoxFut<'_, lablink_ssh::KeyProof>;
     /// Resolve a hostname (`.local` via mDNS when enabled).
     fn resolve(&self, host: String, timeout: Duration) -> BoxFut<'_, Vec<IpAddr>>;
     /// Run a command on a verified device (service checks), BatchMode.
@@ -156,6 +159,30 @@ impl Prober for RealProber {
             })
             .await
             .unwrap_or_default()
+        })
+    }
+
+    fn key_proof(&self, target: Target, timeout: Duration) -> BoxFut<'_, lablink_ssh::KeyProof> {
+        use lablink_ssh::KeyProof;
+        Box::pin(async move {
+            let Ok(_slot) = self.ssh_slots.acquire().await else {
+                return KeyProof::Inconclusive("shutting down".into());
+            };
+            let args = lablink_ssh::build_args(&target, &Mode::KeyProof, &[]);
+            let bin = target.binary.clone();
+            match tokio::task::spawn_blocking(move || {
+                lablink_ssh::run_captured(&bin, &args, timeout, OutputMode::Capture, true)
+            })
+            .await
+            {
+                Ok(Ok(o)) => lablink_ssh::classify_key_proof(
+                    o.exit_code,
+                    &String::from_utf8_lossy(&o.stderr),
+                    o.timed_out,
+                ),
+                Ok(Err(e)) => KeyProof::Inconclusive(format!("cannot run ssh: {e}")),
+                Err(e) => KeyProof::Inconclusive(e.to_string()),
+            }
         })
     }
 

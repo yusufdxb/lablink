@@ -25,6 +25,7 @@ counters!(
     tcp_probes,
     icmp_probes,
     keyscans,
+    key_proofs,
     known_hosts_lookups,
     auth_checks,
     resolves,

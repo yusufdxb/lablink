@@ -41,6 +41,9 @@ pub struct FakeHost {
     pub mac: Option<String>,
     /// Per-round reachability overrides, consumed one per TCP probe.
     pub script: VecDeque<bool>,
+    /// False for a host that replays public keys it does not hold: it
+    /// answers ssh-keyscan with them but fails the possession proof.
+    pub holds_keys: bool,
 }
 
 impl FakeHost {
@@ -54,6 +57,7 @@ impl FakeHost {
             mac: Some(mac.to_string()),
             commands: HashMap::new(),
             script: VecDeque::new(),
+            holds_keys: true,
         }
     }
 }
@@ -248,6 +252,22 @@ impl Prober for FakeNet {
     fn user_known_keys(&self, _hosts: Vec<String>) -> BoxFut<'_, Vec<HostKey>> {
         let k = self.with(|w| w.user_known.clone());
         Box::pin(async move { k })
+    }
+
+    fn key_proof(&self, target: Target, _timeout: Duration) -> BoxFut<'_, lablink_ssh::KeyProof> {
+        use lablink_ssh::KeyProof;
+        let ip: IpAddr = target.ip.parse().unwrap();
+        self.log("key_proof", ip);
+        let h = self.round(ip, false);
+        Box::pin(async move {
+            match h {
+                Some(h) if h.up && h.port == PortMode::Open && h.holds_keys => KeyProof::Proven,
+                Some(h) if h.up && h.port == PortMode::Open => {
+                    KeyProof::Refused("the host could not sign with the pinned key".into())
+                }
+                _ => KeyProof::Inconclusive("connection timed out".into()),
+            }
+        })
     }
 
     fn auth(&self, target: Target, _timeout: Duration) -> BoxFut<'_, AuthOutcome> {

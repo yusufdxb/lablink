@@ -174,6 +174,20 @@ async fn liveness(state: &State, plan: &CheckPlan, ip: IpAddr) -> ProbeReport {
     rep
 }
 
+/// If the last key check matched a pin at a new address, ask the host to
+/// prove it holds the key (no credentials are offered).
+async fn prove_key(state: &State, name: &str) {
+    let Some((ip, target)) = state.reg().key_proof_target(name) else {
+        return;
+    };
+    crate::ipc::ensure_known_hosts(state).await;
+    inc(&state.metrics.key_proofs);
+    let timeout = Duration::from_secs(state.cfg.ssh.connect_timeout_s + 10);
+    let proof = state.prober.key_proof(target, timeout).await;
+    tracing::debug!(device = name, %ip, ?proof, "host key possession proof");
+    state.reg().apply_key_proof(name, ip, &proof, now_ms());
+}
+
 /// Keys the user's known_hosts trusts for this device, split into entries
 /// keyed by the device's names and entries keyed by its bare IP.
 async fn lookup_user_known(
@@ -318,6 +332,7 @@ pub async fn check_device(state: &State, name: &str) {
             .reg()
             .apply_keys(name, ip, scanned, &user_known, now_ms());
         state.wake_many(wake.into_iter().filter(|n| n != name));
+        prove_key(state, name).await;
         state.reg().follow_up(name, now_ms()).auth
     } else {
         f.auth
@@ -477,6 +492,7 @@ async fn check_via(state: &State, name: &str, plan: &CheckPlan, gw: &str) {
         state
             .reg()
             .apply_keys(name, kip, scanned, &user_known, now_ms());
+        prove_key(state, name).await;
         state.reg().follow_up(name, now_ms()).auth
     } else {
         f.auth

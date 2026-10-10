@@ -27,4 +27,7 @@ pub use command::{
 };
 pub use fingerprint::fingerprint_of_blob;
 pub use keys::{parse_keyscan_output, parse_known_hosts_lines, write_known_hosts, KnownHostsEntry};
-pub use run::{classify_ssh_failure, run_captured, ExecOutput, OutputMode, SshFailure};
+pub use run::{
+    classify_key_proof, classify_ssh_failure, run_captured, ExecOutput, KeyProof, OutputMode,
+    SshFailure,
+};

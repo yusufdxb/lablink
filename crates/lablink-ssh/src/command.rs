@@ -55,6 +55,13 @@ pub enum Mode {
     Exec { command: String, batch: bool },
     /// Daemon login check: batch, never creates a ControlMaster, prints `hostname`.
     AuthProbe,
+    /// Proof that the host holds the pinned host key, with no credentials:
+    /// a fresh connection (never a ControlMaster, which would skip the key
+    /// exchange) with every authentication method off. OpenSSH checks the
+    /// server's signature with the pinned key before authentication, so
+    /// reaching "Permission denied" proves possession; a host replaying a
+    /// public key it does not hold cannot get there.
+    KeyProof,
 }
 
 /// Options for ssh sessions LabLink starts on its own (login checks, service
@@ -111,6 +118,29 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
             a.push("-T".into());
             a.push("-n".into());
         }
+        Mode::KeyProof => {
+            opt(&mut a, "BatchMode", "yes");
+            opt(&mut a, "ConnectTimeout", t.connect_timeout_s.to_string());
+            opt(&mut a, "ControlMaster", "no");
+            opt(&mut a, "ControlPath", "none");
+            for k in [
+                "PubkeyAuthentication",
+                "PasswordAuthentication",
+                "KbdInteractiveAuthentication",
+                "GSSAPIAuthentication",
+                "HostbasedAuthentication",
+            ] {
+                opt(&mut a, k, "no");
+            }
+            opt(&mut a, "IdentityAgent", "none");
+            opt(&mut a, "LogLevel", "ERROR");
+            for o in AUTOMATED_SESSION_OPTIONS {
+                a.push("-o".into());
+                a.push(o.into());
+            }
+            a.push("-T".into());
+            a.push("-n".into());
+        }
         Mode::AuthProbe => {
             opt(&mut a, "BatchMode", "yes");
             opt(&mut a, "ConnectTimeout", t.connect_timeout_s.to_string());
@@ -139,6 +169,7 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
         Mode::Interactive => {}
         Mode::Exec { command, .. } => a.push(command.clone()),
         Mode::AuthProbe => a.push("hostname".into()),
+        Mode::KeyProof => a.push("true".into()),
     }
     a
 }
@@ -265,6 +296,27 @@ mod tests {
         assert_eq!(a.last().unwrap(), "uname -a; echo 'x y'");
         assert_eq!(a[a.len() - 2], "jetson-a");
         assert_eq!(a[a.len() - 3], "--");
+    }
+
+    #[test]
+    fn key_proof_sends_no_credentials_and_never_multiplexes() {
+        let a = build_args(&target(true), &Mode::KeyProof, &[]);
+        for o in [
+            "StrictHostKeyChecking=yes",
+            "HostKeyAlias=lablink.jetson-a",
+            "BatchMode=yes",
+            "ControlPath=none",
+            "PubkeyAuthentication=no",
+            "PasswordAuthentication=no",
+            "KbdInteractiveAuthentication=no",
+            "GSSAPIAuthentication=no",
+            "HostbasedAuthentication=no",
+            "IdentityAgent=none",
+            "ForwardAgent=no",
+        ] {
+            assert_eq!(a[pos(&a, o) - 1], "-o", "{o}");
+        }
+        assert_eq!(a.last().unwrap(), "true");
     }
 
     #[test]

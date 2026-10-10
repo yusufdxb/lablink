@@ -9,6 +9,7 @@ use lablink_core::model::{IdentityState, PortState};
 use lablink_daemon::registry::{ProbeReport, Registry, UserKnown};
 use lablink_daemon::testing::fake_key;
 use lablink_discovery::{Interface, NeighState, Neighbor, Snapshot};
+use lablink_ssh::KeyProof;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -106,11 +107,19 @@ fn pinned(dir: &tempfile::TempDir, k: &HostKey, now: u64) -> Registry {
     )
     .expect("trust");
     r.apply_keys("lab/jetson", ip(REAL), Ok(vec![k.clone()]), &none, now + 1);
+    r.apply_key_proof("lab/jetson", ip(REAL), &KeyProof::Proven, now + 1);
     assert_eq!(
         r.device("lab/jetson").unwrap().identity,
         IdentityState::Verified
     );
     r
+}
+
+/// The monitor's identity check at `at`: key scan, then possession proof.
+fn check_identity(r: &mut Registry, at: &str, keys: Vec<HostKey>, proof: KeyProof, now: u64) {
+    r.apply_probe("lab/jetson", &up(at, PortState::Open), now);
+    r.apply_keys("lab/jetson", ip(at), Ok(keys), &UserKnown::default(), now);
+    r.apply_key_proof("lab/jetson", ip(at), &proof, now);
 }
 
 fn has_event(r: &Registry, kind: &str) -> bool {
@@ -174,9 +183,11 @@ fn contradicting_key_at_a_name_claimed_address_is_a_mismatch() {
         ip: Some(ip(REAL)),
         mac: Some(REAL_MAC.into()),
         names: vec![],
-        host_keys: vec![k],
+        host_keys: vec![k.clone()],
     };
     r.observe(&real, "keyscan", None, now + 10);
+    assert_eq!(r.device("lab/jetson").unwrap().rec.current_ip, Some(ip(REAL)));
+    check_identity(&mut r, REAL, vec![k], KeyProof::Proven, now + 11);
     let res = r.resolve("jetson").unwrap();
     assert_eq!(
         (res.ip.as_str(), res.identity),
@@ -216,14 +227,65 @@ fn key_verified_sighting_displaces_a_squatter() {
         ip: Some(ip(REAL)),
         mac: Some(REAL_MAC.into()),
         names: vec![],
-        host_keys: vec![k],
+        host_keys: vec![k.clone()],
     };
     r.observe(&real, "keyscan", None, now);
+    assert_eq!(r.device("lab/jetson").unwrap().rec.current_ip, Some(ip(REAL)));
+    check_identity(&mut r, REAL, vec![k], KeyProof::Proven, now + 1);
     let res = r.resolve("jetson").unwrap();
     assert_eq!(
         (res.ip.as_str(), res.identity),
         (REAL, IdentityState::Verified)
     );
+}
+
+/// A machine replaying a device's public host key (keyscan only asks for
+/// public keys) never makes the device Verified, never teaches LabLink its
+/// MAC, and is a security stop once it fails the possession proof.
+#[test]
+fn replayed_public_key_is_never_verified() {
+    let k = fake_key("jetson-real");
+    let evil_mac = "bb:bb:bb:bb:bb:66";
+    let replay = Observation {
+        ip: Some(ip(EVIL)),
+        mac: Some(evil_mac.into()),
+        names: vec![],
+        host_keys: vec![k.clone()],
+    };
+    for (proof, want) in [
+        (
+            KeyProof::Refused("the host could not sign with the pinned key".into()),
+            IdentityState::Mismatch,
+        ),
+        (
+            KeyProof::Inconclusive("connection closed".into()),
+            IdentityState::Unverified,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut now = 1_000_000;
+        let mut r = pinned(&dir, &k, now);
+        for _ in 0..4 {
+            now += 5_000;
+            r.apply_probe("lab/jetson", &down(REAL), now);
+        }
+        // A scan sees the pinned key at EVIL: the device moves there to be
+        // checked, but the sighting alone verifies nothing and learns no MAC.
+        r.observe(&replay, "keyscan", None, now + 1);
+        let d = r.device("lab/jetson").unwrap();
+        assert_eq!(d.rec.current_ip, Some(ip(EVIL)));
+        assert_ne!(d.identity, IdentityState::Verified);
+        check_identity(&mut r, EVIL, vec![k.clone()], proof, now + 2);
+        let d = r.device("lab/jetson").unwrap();
+        assert_eq!(d.identity, want);
+        assert!(!d.rec.learned_macs.contains(evil_mac));
+        if want == IdentityState::Mismatch {
+            assert!(r.resolve("jetson").is_err());
+        } else {
+            // No retry storm: the next key check waits for the periodic one.
+            assert!(r.follow_up("lab/jetson", now + 3).keyscan.is_none());
+        }
+    }
 }
 
 /// An unpinned device pointed at a neighbour by a forged mDNS answer must not

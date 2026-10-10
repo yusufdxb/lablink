@@ -19,6 +19,7 @@ use lablink_core::profile::Profile;
 use lablink_core::protocol::{ApiError, Candidate, DeviceChanges, ErrorCode};
 use lablink_core::site::{self as sites, Decision, KeySighting, SiteMode, SiteState};
 use lablink_discovery::{Neighbor, Snapshot};
+use lablink_ssh::KeyProof;
 use lablink_ssh::{KnownHostsEntry, Target};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -200,6 +201,10 @@ pub struct Device {
     /// next host-key check carries them, so a key that contradicts the pin
     /// at an address claimed by name is a MISMATCH, not an address reuse.
     pub attributed_names: Vec<String>,
+    /// The host at this address presented a pinned key; it becomes Verified
+    /// only after proving it holds the key (`Mode::KeyProof`): anyone can
+    /// replay a public key to ssh-keyscan.
+    pub key_proof_due: Option<IpAddr>,
     persisted_last_seen_ms: u64,
 }
 
@@ -248,6 +253,7 @@ impl Device {
             icmp_answered: false,
             icmp_misses_while_up: 0,
             attributed_names: Vec::new(),
+            key_proof_due: None,
             persisted_last_seen_ms: 0,
         }
     }
@@ -413,6 +419,7 @@ impl Device {
         self.latency_ms = None;
         self.icmp_misses_while_up = 0;
         self.attributed_names.clear();
+        self.key_proof_due = None;
     }
 }
 
@@ -1231,6 +1238,7 @@ impl Registry {
             return f;
         }
         let id_due = d.identity == IdentityState::Unknown
+            || d.key_proof_due.is_some()
             || d.identity_recheck
             || d.identity_ip != Some(ip)
             || d.port_opened
@@ -1399,6 +1407,9 @@ impl Registry {
         if d.rec.current_ip != Some(ip) {
             return wake;
         }
+        let proven_here = d.identity == IdentityState::Verified
+            && d.identity_ip == Some(ip)
+            && d.key_proof_due.is_none();
         let keys = match scanned {
             Ok(k) => k,
             Err(e) => {
@@ -1430,6 +1441,12 @@ impl Registry {
                 ..
             } if device == name => {
                 self.fill_pin_blobs(name, &keys, now);
+                if !proven_here {
+                    // Matching a pin is not enough at a new address: the
+                    // monitor asks the host to prove it holds the key.
+                    self.devices.get_mut(name).unwrap().key_proof_due = Some(ip);
+                    return wake;
+                }
                 if let Some(mac) = obs.mac.as_deref() {
                     self.learn_mac(name, mac);
                 }
@@ -1585,13 +1602,75 @@ impl Registry {
             "key_pinned",
             format!("pinned host key {fp} (already trusted in ~/.ssh/known_hosts)"),
         );
-        self.set_identity(
-            name,
-            IdentityState::Verified,
-            Some(Signal::Fingerprint),
-            ip,
-            format!("SSH fingerprint verified at {ip} ({fp})"),
-        );
+        self.devices.get_mut(name).unwrap().key_proof_due = Some(ip);
+        self.mark(name);
+        self.urgent = true;
+    }
+
+    /// The target for a pending host-key possession proof (same addressing
+    /// and pinned options as `lablink ssh`, through a gateway if any).
+    pub fn key_proof_target(&self, name: &str) -> Option<(IpAddr, Target)> {
+        let d = self.devices.get(name)?;
+        let ip = d.key_proof_due.filter(|ip| d.rec.current_ip == Some(*ip))?;
+        let t = self.target_for(name, d.username()).ok()?;
+        t.host_key_alias.is_some().then_some((ip, t))
+    }
+
+    /// Apply a host-key possession proof (see [`Device::key_proof_due`]).
+    pub fn apply_key_proof(&mut self, name: &str, ip: IpAddr, proof: &KeyProof, now: u64) {
+        let mac = self.neighbor_mac(ip);
+        let Some(d) = self.devices.get_mut(name) else {
+            return;
+        };
+        if d.key_proof_due != Some(ip) || d.rec.current_ip != Some(ip) {
+            return;
+        }
+        d.key_proof_due = None;
+        d.last_identity_check_ms = now;
+        let pins = d
+            .pinned_fingerprints()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        match proof {
+            KeyProof::Proven => {
+                if let Some(mac) = mac.as_deref() {
+                    self.learn_mac(name, mac);
+                }
+                self.set_identity(
+                    name,
+                    IdentityState::Verified,
+                    Some(Signal::Fingerprint),
+                    ip,
+                    format!("SSH fingerprint verified at {ip} ({pins}); the host proved it holds the key"),
+                );
+            }
+            KeyProof::Refused(why) => {
+                let detail = format!(
+                    "SECURITY: {ip} presented the pinned host key of '{name}' but {why}: another machine may be replaying the key. Not accepted; check the device, then `lablink status {name}`"
+                );
+                self.set_identity(
+                    name,
+                    IdentityState::Mismatch,
+                    Some(Signal::Fingerprint),
+                    ip,
+                    detail,
+                );
+            }
+            KeyProof::Inconclusive(why) => {
+                let detail = format!(
+                    "host key at {ip} matches the pin, but the host has not proved it holds the key yet ({why}); retrying at the next identity check"
+                );
+                self.devices.get_mut(name).unwrap().last_error = Some(detail.clone());
+                self.set_identity(
+                    name,
+                    IdentityState::Unverified,
+                    Some(Signal::Fingerprint),
+                    ip,
+                    detail,
+                );
+            }
+        }
     }
 
     /// Apply a login check result.
@@ -1876,9 +1955,6 @@ impl Registry {
         let iface = self.ifname(ip);
         if verified {
             self.fill_pin_blobs(name, &obs.host_keys, now);
-            if let Some(mac) = obs.mac.as_deref() {
-                self.learn_mac(name, mac);
-            }
         }
         let d = self.devices.get_mut(name).unwrap();
         let is_current = d.rec.current_ip == Some(ip);
@@ -1898,9 +1974,11 @@ impl Registry {
             }
         }
         if is_current {
-            if verified {
-                d.identity = IdentityState::Verified;
-                d.identity_ip = Some(ip);
+            // A sighting with the pinned key re-checks the identity (with a
+            // possession proof); it never sets Verified by itself.
+            if verified && !(d.identity == IdentityState::Verified && d.identity_ip == Some(ip)) {
+                d.identity_recheck = true;
+                wake.push(name.to_string());
             }
             return;
         }
@@ -1928,11 +2006,7 @@ impl Registry {
         }
         let old = d.rec.current_ip.replace(ip);
         d.reset_runtime_for_new_ip();
-        if verified {
-            d.identity = IdentityState::Verified;
-            d.identity_ip = Some(ip);
-            d.identity_signal = Some(Signal::Fingerprint);
-        } else if signal == Signal::Hostname {
+        if signal == Signal::Hostname {
             d.attributed_names = obs.names.clone();
         }
         let msg = match old {
@@ -2651,13 +2725,8 @@ impl Registry {
                 }
             ),
         );
-        self.set_identity(
-            name,
-            IdentityState::Verified,
-            Some(Signal::Fingerprint),
-            ip,
-            format!("SSH fingerprint verified at {ip} (explicitly trusted)"),
-        );
+        // Verified once the host proves it holds the key (next check).
+        self.devices.get_mut(name).unwrap().key_proof_due = Some(ip);
         self.mark(name);
         self.urgent = true;
         Ok(TrustReport {
@@ -3797,9 +3866,17 @@ mod security_tests {
             );
             assert!(r.device("default/dev").unwrap().rec.pinned.is_empty());
         }
-        // The user adopted the device at this address: accepted.
+        // The user adopted the device at this address: pinned, and Verified
+        // once the host proves it holds the key.
         let mut r = setup("adopt", 5);
         r.apply_keys("default/dev", ip, Ok(vec![k.clone()]), &by_ip, 10);
+        assert_eq!(r.device("default/dev").unwrap().rec.pinned.len(), 1);
+        assert_eq!(r.device("default/dev").unwrap().key_proof_due, Some(ip));
+        assert_ne!(
+            r.device("default/dev").unwrap().identity,
+            IdentityState::Verified
+        );
+        r.apply_key_proof("default/dev", ip, &KeyProof::Proven, 11);
         assert_eq!(
             r.device("default/dev").unwrap().identity,
             IdentityState::Verified
@@ -3824,6 +3901,8 @@ mod security_tests {
             by_ip: vec![],
         };
         r.apply_keys("default/dev", ip, Ok(vec![k]), &by_name, 10);
+        assert_eq!(r.device("default/dev").unwrap().key_proof_due, Some(ip));
+        r.apply_key_proof("default/dev", ip, &KeyProof::Proven, 11);
         assert_eq!(
             r.device("default/dev").unwrap().identity,
             IdentityState::Verified

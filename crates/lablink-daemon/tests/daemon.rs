@@ -154,6 +154,34 @@ fn ip_change_is_followed_by_fingerprint() {
     d.stop().unwrap();
 }
 
+/// A host replaying jetson-a's public key (it answers ssh-keyscan with it
+/// but cannot sign) is never GREEN: the possession proof fails and the
+/// device is a security stop; nothing is ever run against it.
+#[test]
+fn replayed_host_key_fails_the_possession_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let net = lab_with_jetson("10.9.0.31");
+    net.host("10.9.0.31", |h| h.holds_keys = false);
+    let cfg = fast_config(&jetson_cfg("    expected_ips: [10.9.0.31]\n"));
+    let d = TestDaemon::start(cfg, net.clone(), dir.path().into(), true).unwrap();
+    let s = wait_for(&d, "jetson-a", 15, "mismatch", |s| {
+        s.identity == IdentityState::Mismatch
+    });
+    assert_eq!(s.color, Color::Red);
+    assert!(
+        s.reasons.iter().any(|r| r.contains("replaying")),
+        "{:?}",
+        s.reasons
+    );
+    assert!(!kinds(&history(&d, "jetson-a")).contains(&"identity_verified"));
+    // The genuine host (holds its key) is verified at the same address.
+    let dir2 = tempfile::tempdir().unwrap();
+    let net2 = lab_with_jetson("10.9.0.31");
+    let cfg2 = fast_config(&jetson_cfg("    expected_ips: [10.9.0.31]\n"));
+    let d2 = TestDaemon::start(cfg2, net2, dir2.path().into(), true).unwrap();
+    wait_for(&d2, "jetson-a", 15, "green", |s| s.color == Color::Green);
+}
+
 #[test]
 fn host_key_mismatch_is_red_and_never_accepted() {
     let dir = tempfile::tempdir().unwrap();

@@ -215,6 +215,52 @@ impl SshFailure {
     }
 }
 
+/// Result of a host-key possession check ([`crate::Mode::KeyProof`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyProof {
+    /// The host completed the key exchange with the pinned key.
+    Proven,
+    /// The host presented another key, or could not sign with the pinned one.
+    Refused(String),
+    /// No answer either way (timeout, refused, network): try again later.
+    Inconclusive(String),
+}
+
+/// Classify a [`crate::Mode::KeyProof`] run. Only OpenSSH's own
+/// `user@host: Permission denied (...)` line (or success) counts as proof:
+/// text the server sends before the key exchange (a disconnect reason) is
+/// printed after a fixed prefix and with newlines escaped, so it cannot
+/// produce that line.
+pub fn classify_key_proof(exit_code: Option<i32>, stderr: &str, timed_out: bool) -> KeyProof {
+    if timed_out {
+        return KeyProof::Inconclusive("timed out".into());
+    }
+    if exit_code == Some(0) {
+        return KeyProof::Proven;
+    }
+    let denied = stderr.lines().any(|l| {
+        l.split_once(": Permission denied (")
+            .is_some_and(|(who, _)| {
+                who.contains('@') && !who.contains(char::is_whitespace) && !who.is_empty()
+            })
+    });
+    if denied {
+        return KeyProof::Proven;
+    }
+    if stderr.contains("incorrect signature")
+        || stderr.contains("signature verification failed")
+        || stderr.contains("error in libcrypto")
+    {
+        return KeyProof::Refused("the host could not sign with the pinned key".into());
+    }
+    match classify_ssh_failure(stderr) {
+        SshFailure::HostKeyChanged | SshFailure::HostKeyUnknown => {
+            KeyProof::Refused("the host presented a different key than the pin".into())
+        }
+        f => KeyProof::Inconclusive(f.describe()),
+    }
+}
+
 /// Classify an ssh client failure from its stderr.
 pub fn classify_ssh_failure(stderr: &str) -> SshFailure {
     let s = stderr;
@@ -352,5 +398,40 @@ mod tests {
         assert!(
             matches!(classify_ssh_failure("weird\n"), SshFailure::Other(ref s) if s == "weird")
         );
+    }
+    #[test]
+    fn key_proof_needs_openssh_s_own_denial_line() {
+        use super::{classify_key_proof, KeyProof};
+        let ok = "ops@192.168.10.70: Permission denied (publickey,password).\n";
+        assert_eq!(classify_key_proof(Some(255), ok, false), KeyProof::Proven);
+        assert_eq!(classify_key_proof(Some(0), "", false), KeyProof::Proven);
+        // A server can send a disconnect reason before the key exchange; it
+        // is printed after a fixed prefix and must not count as proof.
+        for forged in [
+            "Received disconnect from 10.0.0.9 port 22:2: x@y: Permission denied (publickey).\n",
+            "Disconnected from 10.0.0.9 port 22\nkex_exchange_identification: Connection closed by remote host\n",
+            "Connection closed by 10.0.0.9 port 22\n",
+        ] {
+            assert!(
+                matches!(classify_key_proof(Some(255), forged, false), KeyProof::Inconclusive(_)),
+                "{forged}"
+            );
+        }
+        assert!(matches!(
+            classify_key_proof(
+                Some(255),
+                "ssh_dispatch_run_fatal: Connection to 10.0.0.9 port 22: incorrect signature\n",
+                false
+            ),
+            KeyProof::Refused(_)
+        ));
+        assert!(matches!(
+            classify_key_proof(Some(255), "Host key verification failed.\n", false),
+            KeyProof::Refused(_)
+        ));
+        assert!(matches!(
+            classify_key_proof(None, "", true),
+            KeyProof::Inconclusive(_)
+        ));
     }
 }

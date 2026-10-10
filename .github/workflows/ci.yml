@@ -37,8 +37,9 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # ssh-keygen is used by the OpenSSH cross-check tests (skipped if absent).
-      - run: sudo apt-get update && sudo apt-get install -y openssh-client
+      # ssh-keygen and a throwaway, unprivileged sshd on 127.0.0.1 are used by
+      # the OpenSSH cross-check tests (skipped if absent).
+      - run: sudo apt-get update && sudo apt-get install -y openssh-client openssh-server
       # Includes: site migration, two-site detection fixtures, AWAY semantics,
       # ambiguous names, completion, support-bundle redaction (adversarial),
       # import hardening. Every test uses temporary HOME/XDG/state/socket
