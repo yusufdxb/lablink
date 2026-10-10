@@ -418,6 +418,10 @@ pub fn proxy_command_through(gateway: &Target, batch: bool) -> String {
                 "BatchMode=yes".to_string(),
                 "-o".to_string(),
                 "ControlMaster=no".to_string(),
+                // The hop's stderr is merged into the background check's:
+                // keep text the gateway side could send out of it.
+                "-o".to_string(),
+                "LogLevel=FATAL".to_string(),
             ],
         );
     }

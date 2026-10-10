@@ -179,6 +179,7 @@ impl Prober for RealProber {
                     o.exit_code,
                     &String::from_utf8_lossy(&o.stderr),
                     o.timed_out,
+                    &target.ip,
                 ),
                 Ok(Err(e)) => KeyProof::Inconclusive(format!("cannot run ssh: {e}")),
                 Err(e) => KeyProof::Inconclusive(e.to_string()),

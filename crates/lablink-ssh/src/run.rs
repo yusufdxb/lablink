@@ -239,14 +239,24 @@ const SERVER_TEXT_MARKERS: &[&str] = &[
     "banner",
     "protocol version",
     "Protocol major versions",
+    "Unable to negotiate",
+    "Their offer",
 ];
 
-/// Classify a [`crate::Mode::KeyProof`] run (made with `LogLevel=FATAL`, so
-/// a server's disconnect text is not printed at all). Proof is either
-/// success or OpenSSH's own `user@host: Permission denied (...)` line, and
-/// never when any sign of server-originated text or an early disconnect is
+/// Classify a [`crate::Mode::KeyProof`] run against `host` (the address
+/// given as `HostName`), made with `LogLevel=FATAL`, so text a server sends
+/// is not printed at all. Proof is success, or a stderr that is exactly one
+/// line, OpenSSH's own `user@<host>: Permission denied (<methods>).`: any
+/// server text that reached stderr would arrive inside a client message
+/// with its own prefix line, so it can never make up the whole output.
+/// Never proof when any sign of server text or an early disconnect is
 /// present.
-pub fn classify_key_proof(exit_code: Option<i32>, stderr: &str, timed_out: bool) -> KeyProof {
+pub fn classify_key_proof(
+    exit_code: Option<i32>,
+    stderr: &str,
+    timed_out: bool,
+    host: &str,
+) -> KeyProof {
     if timed_out {
         return KeyProof::Inconclusive("timed out".into());
     }
@@ -256,12 +266,28 @@ pub fn classify_key_proof(exit_code: Option<i32>, stderr: &str, timed_out: bool)
     if exit_code == Some(0) {
         return KeyProof::Proven;
     }
-    let denied = stderr.lines().any(|l| {
-        l.split_once(": Permission denied (")
-            .is_some_and(|(who, _)| {
-                who.contains('@') && !who.contains(char::is_whitespace) && !who.is_empty()
-            })
-    });
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let user_ok = |u: &str| {
+        !u.is_empty()
+            && u.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    };
+    let methods_ok = |m: &str| {
+        m.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@.,_-".contains(c))
+    };
+    let denied = lines.len() == 1
+        && lines[0]
+            .split_once(": Permission denied (")
+            .is_some_and(|(who, rest)| {
+                who.split_once('@')
+                    .is_some_and(|(u, h)| h == host && user_ok(u))
+                    && rest.strip_suffix(").").is_some_and(methods_ok)
+            });
     if denied {
         return KeyProof::Proven;
     }
@@ -420,36 +446,43 @@ mod tests {
     #[test]
     fn key_proof_needs_openssh_s_own_denial_line() {
         use super::{classify_key_proof, KeyProof};
+        let h = "192.168.10.70";
+        let p = |code, err: &str| classify_key_proof(code, err, false, h);
         let ok = "ops@192.168.10.70: Permission denied (publickey,password).\n";
-        assert_eq!(classify_key_proof(Some(255), ok, false), KeyProof::Proven);
-        assert_eq!(classify_key_proof(Some(0), "", false), KeyProof::Proven);
-        // A server can send a disconnect reason before the key exchange; it
-        // is printed after a fixed prefix and must not count as proof.
+        assert_eq!(p(Some(255), ok), KeyProof::Proven);
+        assert_eq!(
+            p(
+                Some(255),
+                "ops@192.168.10.70: Permission denied (publickey).\r\n"
+            ),
+            KeyProof::Proven
+        );
+        assert_eq!(p(Some(0), ""), KeyProof::Proven);
+        // Anything a server could have injected, and anything not exactly
+        // OpenSSH's single denial line about this host, proves nothing.
         for forged in [
             "Received disconnect from 10.0.0.9 port 22:2: x@y: Permission denied (publickey).\n",
-            "Received disconnect from 10.0.0.9 port 22:2: x\nops@10.0.0.9: Permission denied (publickey).\n",
+            "Received disconnect from 10.0.0.9 port 22:2: x\nops@192.168.10.70: Permission denied (publickey).\n",
+            "Unable to negotiate with 192.168.10.70 port 22: no matching key exchange method found. Their offer: x\nops@192.168.10.70: Permission denied (publickey).\n",
+            "some other line\nops@192.168.10.70: Permission denied (publickey).\n",
+            "ops@10.0.0.99: Permission denied (publickey).\n",
+            "ops x@192.168.10.70: Permission denied (publickey).\n",
             "Disconnected from 10.0.0.9 port 22\nkex_exchange_identification: Connection closed by remote host\n",
             "Connection closed by 10.0.0.9 port 22\n",
+            "",
         ] {
-            assert!(
-                matches!(classify_key_proof(Some(255), forged, false), KeyProof::Inconclusive(_)),
-                "{forged}"
-            );
+            assert!(matches!(p(Some(255), forged), KeyProof::Inconclusive(_)), "{forged:?}");
         }
         assert!(matches!(
-            classify_key_proof(
-                Some(255),
-                "ssh_dispatch_run_fatal: Connection to 10.0.0.9 port 22: incorrect signature\n",
-                false
-            ),
+            p(Some(255), "ssh_dispatch_run_fatal: Connection to 192.168.10.70 port 22: incorrect signature\n"),
             KeyProof::Refused(_)
         ));
         assert!(matches!(
-            classify_key_proof(Some(255), "Host key verification failed.\n", false),
+            p(Some(255), "Host key verification failed.\n"),
             KeyProof::Refused(_)
         ));
         assert!(matches!(
-            classify_key_proof(None, "", true),
+            classify_key_proof(None, "", true, h),
             KeyProof::Inconclusive(_)
         ));
     }
