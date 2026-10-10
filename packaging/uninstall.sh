@@ -58,11 +58,19 @@ if [ -f "$entry" ]; then
         rm -f "$entry" "$data/icons/hicolor/scalable/apps/lablink.svg" "$data/bash-completion/completions/lablink"
     fi
 fi
-rm -f "$prefix/bin/lablink" "$prefix/bin/lablinkd" "$prefix/bin/lablink-gui"       "$prefix/share/applications/lablink-gui.desktop"       "$prefix/share/icons/hicolor/scalable/apps/lablink.svg" "$prefix/share/lablink/data-dir"
+rm -f "$prefix/bin/lablink" "$prefix/bin/lablinkd" "$prefix/bin/lablink-gui" "$prefix/share/lablink/data-dir"
+# Under the default prefix these are the shared entries kept above.
+[ "$prefix/share/applications/lablink-gui.desktop" -ef "$entry" ] || rm -f "$prefix/share/applications/lablink-gui.desktop"
+[ "$prefix/share/icons/hicolor/scalable/apps/lablink.svg" -ef "$data/icons/hicolor/scalable/apps/lablink.svg" ] || rm -f "$prefix/share/icons/hicolor/scalable/apps/lablink.svg"
 if [ "$purge" = yes ]; then
     case ${LABLINK_CONFIG:-} in /*) rm -f "$LABLINK_CONFIG" ;; *) rm -rf "$config/lablink" ;; esac
-    case ${LABLINK_STATE_DIR:-} in /*) rm -rf "$LABLINK_STATE_DIR" ;; *) rm -rf "$state/lablink" ;; esac
-    echo "Removed LabLink from $prefix and deleted its configuration and state."
+    # A custom state directory may hold other files: never delete it wholesale.
+    case ${LABLINK_STATE_DIR:-} in
+        /*) echo "LABLINK_STATE_DIR is set; delete $LABLINK_STATE_DIR yourself if it holds only LabLink state." >&2
+            echo "Removed LabLink from $prefix and deleted its configuration (state kept in $LABLINK_STATE_DIR)." ;;
+        *) rm -rf "$state/lablink"
+            echo "Removed LabLink from $prefix and deleted its configuration and state." ;;
+    esac
 else
     echo "Removed LabLink from $prefix (configuration and state kept; --purge deletes them)."
 fi

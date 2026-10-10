@@ -510,7 +510,12 @@ as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./uninstall.sh' >> "$out/tarbal
 as_tester 'test ! -e ~/.local/bin/lablink && test -f ~/.config/lablink/config.yaml && ! pgrep -x lablinkd' || fail "tarball uninstall" "binaries left, daemon running, or config deleted"
 as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./uninstall.sh --purge' >> "$out/tarball.txt" 2>&1 || fail "tarball uninstall" "--purge failed"
 as_tester 'test ! -e ~/.config/lablink && test ! -e ~/.local/state/lablink' || fail "tarball uninstall" "--purge kept data"
-pass "tarball install / uninstall" "checksum, install.sh into ~/.local, '$tv', init + user unit, daemon, discover; uninstall kept config, --purge removed it"
+# Prefixes: "=" is refused, uninstalling one prefix keeps another prefix's menu
+# entry, and --purge never deletes a custom LABLINK_STATE_DIR wholesale.
+as_tester 'cd /var/tmp/lablink-*-x86_64-linux && mkdir -p "$HOME/a=b" && ! ./install.sh "$HOME/a=b"' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "a PREFIX containing = was accepted"
+as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./install.sh && ./install.sh "$HOME/opt-ll" && ./uninstall.sh && grep -q opt-ll ~/.local/share/applications/lablink-gui.desktop && test -f ~/.local/share/icons/hicolor/scalable/apps/lablink.svg && test -x ~/opt-ll/bin/lablink' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "uninstalling ~/.local removed another prefix's menu entry or files"
+as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./uninstall.sh "$HOME/opt-ll" && mkdir -p ~/state && echo keep > ~/state/other.txt && LABLINK_STATE_DIR=$HOME/state ./uninstall.sh --purge && test -f ~/state/other.txt' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "--purge deleted a custom LABLINK_STATE_DIR"
+pass "tarball install / uninstall" "checksum, install.sh into ~/.local, '$tv', init + user unit, daemon, discover; uninstall kept config, --purge removed it; PREFIX with = refused; a second prefix's menu entry and a custom state dir survive"
 
 echo
 echo "== all steps passed; evidence in $out"

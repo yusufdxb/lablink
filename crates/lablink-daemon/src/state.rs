@@ -38,6 +38,8 @@ pub struct State {
     pub started: Instant,
     pub paths: Paths,
     pub icmp_unsupported: AtomicBool,
+    /// Serializes known_hosts writers so an older snapshot never lands last.
+    pub known_hosts_writer: tokio::sync::Mutex<()>,
 }
 
 impl State {
@@ -65,6 +67,7 @@ impl State {
             started: Instant::now(),
             paths,
             icmp_unsupported: AtomicBool::new(false),
+            known_hosts_writer: tokio::sync::Mutex::new(()),
         }
     }
 

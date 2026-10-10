@@ -162,6 +162,34 @@ fn a_link_to_a_cache_in_a_private_state_dir_is_refused() {
     assert_eq!(std::fs::read_to_string(victim).unwrap(), "do not overwrite");
 }
 
+#[test]
+fn a_hard_linked_journal_in_a_private_state_dir_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let cfg = t.path().join("config.yaml");
+    std::fs::write(&cfg, "").unwrap();
+    chmod(&cfg, 0o600);
+    let state = t.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    chmod(&state, 0o700);
+    let victim = t.path().join("victim");
+    std::fs::write(&victim, "do not truncate").unwrap();
+    std::fs::hard_link(&victim, state.join("cache.db-wal")).unwrap();
+    let out = daemon(
+        t.path(),
+        &[
+            "--config",
+            cfg.to_str().unwrap(),
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+        5,
+    )
+    .expect("hard-linked journal must be refused");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no other links"));
+    assert_eq!(std::fs::read_to_string(victim).unwrap(), "do not truncate");
+}
+
 /// A configuration that cannot be resolved to a file, here `/dev/stdin` on a
 /// pipe, is refused rather than read unchecked.
 #[test]

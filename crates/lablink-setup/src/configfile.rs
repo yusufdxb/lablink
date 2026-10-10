@@ -108,6 +108,33 @@ fn lock(path: &Path) -> Result<std::fs::File, String> {
     }
 }
 
+/// Backups kept next to the configuration; older ones are deleted.
+const KEEP_BACKUPS: usize = 20;
+
+/// Delete all but the newest `KEEP_BACKUPS` regular files named
+/// `<prefix>...`. Names start with a UTC time, so they sort by age. Best
+/// effort: a backup that cannot be listed or removed is left in place.
+fn prune_backups(dir: &Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut backups: Vec<(String, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.starts_with(prefix).then(|| (name, e.path()))
+        })
+        .collect();
+    if backups.len() <= KEEP_BACKUPS {
+        return;
+    }
+    backups.sort();
+    for (_, old) in &backups[..backups.len() - KEEP_BACKUPS] {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
 fn write_locked(path: &Path, cfg: &Config) -> Result<Option<PathBuf>, String> {
     cfg.validate().map_err(|e| e.to_string())?;
     let text = render(cfg);
@@ -132,11 +159,13 @@ fn write_locked(path: &Path, cfg: &Config) -> Result<Option<PathBuf>, String> {
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
     let backup = if path.exists() {
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config.yaml");
         let name = format!(
             "{}.bak-{}-{}-{}-{}",
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("config.yaml"),
+            file_name,
             utc_stamp(lablink_core::time::now_ms()),
             lablink_core::time::now_ms(),
             std::process::id(),
@@ -170,6 +199,7 @@ fn write_locked(path: &Path, cfg: &Config) -> Result<Option<PathBuf>, String> {
                 Err(e) => return Err(format!("cannot write {}: {e}", b.display())),
             }
         };
+        prune_backups(dir, &format!("{}.bak-", file_name));
         Some(b)
     } else {
         None
@@ -225,6 +255,27 @@ mod tests {
         assert_eq!(utc_stamp(0), "19700101-000000");
         assert_eq!(utc_stamp(1_728_496_800_000), "20241009-180000");
         assert_eq!(utc_stamp(951_782_400_000), "20000229-000000");
+    }
+
+    #[test]
+    fn only_the_newest_backups_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let other = dir.path().join("notes.bak-keep");
+        std::fs::write(&other, "not a LabLink backup").unwrap();
+        let cfg = Config::default();
+        for _ in 0..KEEP_BACKUPS + 5 {
+            write(&path, &cfg).unwrap();
+        }
+        let backups = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                let n = e.as_ref().unwrap().file_name();
+                n.to_string_lossy().starts_with("config.yaml.bak-")
+            })
+            .count();
+        assert_eq!(backups, KEEP_BACKUPS);
+        assert!(other.exists());
     }
 
     #[test]

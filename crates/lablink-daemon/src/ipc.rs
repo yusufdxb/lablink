@@ -486,6 +486,9 @@ pub async fn flush(state: &State) {
 /// Make sure LabLink's known_hosts file reflects the current pins. Must run
 /// before any ssh invocation that uses `HostKeyAlias` (resolve, auth checks).
 pub async fn ensure_known_hosts(state: &State) {
+    // Held until the file is written: a caller that finds the file clean
+    // also finds it finished, and writes land in snapshot order.
+    let _writer = state.known_hosts_writer.lock().await;
     let entries = {
         let mut reg = state.reg();
         // Also rewrite a file that was deleted behind LabLink's back.

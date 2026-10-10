@@ -109,9 +109,11 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
         for name in ["cache.db", "cache.db-wal", "cache.db-shm", "lablinkd.lock"] {
             let path = opts.state_dir.join(name);
             match std::fs::symlink_metadata(&path) {
-                Ok(m) if !m.is_file() || m.uid() != me => {
+                // A second link could be another file of yours that SQLite
+                // would then write or truncate.
+                Ok(m) if !m.is_file() || m.uid() != me || m.nlink() != 1 => {
                     return Err(format!(
-                        "refusing state file {}: must be a regular file owned by you",
+                        "refusing state file {}: must be a regular file owned by you, with no other links",
                         path.display()
                     ));
                 }

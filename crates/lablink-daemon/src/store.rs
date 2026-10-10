@@ -177,8 +177,12 @@ fn snapshot_journals(path: &Path, dir: &Path) -> Result<Vec<JournalSnapshot>, St
             Err(e) => return Err(format!("cannot check cache journal: {e}")),
         };
         // SAFETY: getuid is infallible.
-        if !checked.is_file() || checked.uid() != unsafe { libc::getuid() } {
-            return Err("refusing cache journal: must be a regular file owned by you".into());
+        if !checked.is_file() || checked.uid() != unsafe { libc::getuid() } || checked.nlink() != 1
+        {
+            return Err(
+                "refusing cache journal: must be a regular file owned by you, with no other links"
+                    .into(),
+            );
         }
         if let Some(why) = lablink_core::paths::writable_by_others(&original) {
             return Err(format!("refusing cache journal: {why}"));

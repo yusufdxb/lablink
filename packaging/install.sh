@@ -12,6 +12,8 @@ fi
 case ${XDG_DATA_HOME:-} in /*) data=$XDG_DATA_HOME ;; *) data=$HOME/.local/share ;; esac
 mkdir -p "$prefix"
 prefix=$(cd "$prefix" && pwd -P)
+# /usr/bin/env would take a launcher path containing "=" for a variable.
+case $prefix in *=*) echo "PREFIX must not contain '='" >&2; exit 1 ;; esac
 # Escape once for Exec's quoted word, then again for Desktop Entry strings.
 # Percent signs are literal, never desktop field codes. A fixed env executable
 # also lets GLib validate paths containing percent signs before field expansion.
