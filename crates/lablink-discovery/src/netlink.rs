@@ -553,6 +553,48 @@ pub async fn snapshot_async(timeout: Duration) -> io::Result<Snapshot> {
 mod tests {
     use super::*;
 
+    /// Arbitrary and truncated datagrams never panic or loop, and each
+    /// message consumes at least its 16-byte header.
+    #[test]
+    fn fuzz_parse_datagram() {
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let types = [
+            NLMSG_DONE,
+            NLMSG_ERROR,
+            RTM_NEWLINK,
+            RTM_DELLINK,
+            RTM_NEWADDR,
+            RTM_NEWNEIGH,
+            RTM_DELNEIGH,
+        ];
+        for round in 0..50_000 {
+            let n = (next() % 256) as usize;
+            let mut b: Vec<u8> = (0..n).map(|_| next() as u8).collect();
+            // Half the rounds start with a plausible header so the body
+            // parsers (not just the length check) see hostile input.
+            if round % 2 == 0 && b.len() >= 16 {
+                let len = 16 + (next() as usize % (b.len() - 15));
+                b[0..4].copy_from_slice(&(len as u32).to_ne_bytes());
+                let ty = types[(next() % types.len() as u64) as usize];
+                b[4..6].copy_from_slice(&ty.to_ne_bytes());
+            }
+            let msgs = parse_datagram(&b);
+            assert!(
+                msgs.len() <= b.len() / 16,
+                "{} msgs from {} bytes",
+                msgs.len(),
+                b.len()
+            );
+            let _ = to_events(msgs);
+        }
+    }
+
     fn attr(ty: u16, payload: &[u8]) -> Vec<u8> {
         let len = 4 + payload.len();
         let mut v = Vec::new();

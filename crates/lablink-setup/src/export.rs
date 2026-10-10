@@ -670,6 +670,72 @@ mod tests {
         assert_eq!(p.config.preferences.terminal, None);
     }
 
+    /// Hostile import files (random YAML fragments) never panic, and every
+    /// file that parses yields a plan whose config passes validation.
+    #[test]
+    fn fuzz_import_parse_and_plan() {
+        let mut x: u64 = 0x1234_5678_9abc_def1;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let pieces = [
+            "lablink_export: 1\n",
+            "config:\n",
+            "  sites:\n",
+            "    - id: a\n",
+            "      name: A\n",
+            "      devices:\n",
+            "        - name: d\n",
+            "          via: d\n",
+            "          ssh_host: -oX\n",
+            "          usernames: [\"$(id)\"]\n",
+            "  ssh:\n",
+            "    options:\n",
+            "      ForwardAgent: yes\n",
+            "      networks:\n",
+            "        - name: n\n",
+            "          cidr: 0.0.0.0/0\n",
+            "          active_scan: true\n",
+            "&a [*a, *a]\n",
+            "!!binary aGk=\n",
+            "{",
+            "}",
+            "[",
+            "]",
+            ": ",
+            "- ",
+            "\"",
+            "'",
+            "\n",
+            "  ",
+            "\u{0}",
+            "\u{202e}",
+            "99999999999999999999",
+        ];
+        for _ in 0..5_000 {
+            let mut s = String::new();
+            for _ in 0..(next() % 40) {
+                s.push_str(pieces[(next() % pieces.len() as u64) as usize]);
+            }
+            if let Ok(doc) = parse(&s) {
+                for replace in [false, true] {
+                    let opts = ImportOptions {
+                        replace,
+                        ..Default::default()
+                    };
+                    if let Ok(p) = plan(&Config::default(), &doc, opts) {
+                        p.config.validate().unwrap();
+                        assert!(p.config.ssh.options.is_empty());
+                    }
+                }
+            }
+            let _ = Config::parse(&s, "fuzz");
+        }
+    }
+
     #[test]
     fn import_never_takes_ssh_options_even_with_replace() {
         // A crafted file must not be able to forward the user's agent to the

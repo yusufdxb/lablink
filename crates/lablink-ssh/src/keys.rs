@@ -49,18 +49,26 @@ pub fn parse_keyscan_output(out: &str) -> Vec<HostKey> {
 }
 
 /// Parse known_hosts lines as printed by `ssh-keygen -F`. Lines carrying
-/// `@revoked` or `@cert-authority` markers are never treated as host keys.
+/// `@revoked` or `@cert-authority` markers are never treated as host keys,
+/// and a key the user marked `@revoked` is dropped even where another line
+/// lists it: LabLink's own known_hosts would not carry the marker, so OpenSSH
+/// would otherwise accept a key the user revoked.
 pub fn parse_known_hosts_lines(out: &str) -> Vec<HostKey> {
-    let mut keys: Vec<HostKey> = out
+    let lines: Vec<Vec<&str>> = out
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('@'))
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split_whitespace().collect();
-            (f.len() >= 3)
-                .then(|| parse_key_fields(f[1], f[2]))
-                .flatten()
-        })
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    let revoked: Vec<&str> = lines
+        .iter()
+        .filter(|f| f.len() >= 4 && f[0] == "@revoked")
+        .map(|f| f[3])
+        .collect();
+    let mut keys: Vec<HostKey> = lines
+        .iter()
+        .filter(|f| f.len() >= 3 && !f[0].starts_with('@') && !revoked.contains(&f[2]))
+        .filter_map(|f| parse_key_fields(f[1], f[2]))
         .collect();
     keys.sort();
     keys.dedup();
@@ -118,9 +126,67 @@ mod tests {
     }
 
     #[test]
+    fn revoked_key_is_never_taken_from_another_line() {
+        let out = format!("10.0.0.1 ssh-ed25519 {BLOB}\n@revoked * ssh-ed25519 {BLOB}\n");
+        assert!(parse_known_hosts_lines(&out).is_empty());
+    }
+
+    /// Hostile or corrupt scanner output never panics and only yields keys
+    /// whose blob decodes to the declared type.
+    #[test]
+    fn fuzz_keyscan_and_known_hosts_parsers() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let pieces = [
+            "ssh-ed25519",
+            "ssh-rsa",
+            "@revoked",
+            "@cert-authority",
+            "#",
+            " ",
+            "\n",
+            "\t",
+            "\0",
+            "|1|",
+            "*",
+            "10.0.0.1",
+            BLOB,
+            "AAAA",
+            "====",
+            "\u{202e}",
+            "é",
+        ];
+        for _ in 0..20_000 {
+            let mut s = String::new();
+            for _ in 0..(next() % 24) {
+                if next() % 4 == 0 {
+                    s.push(char::from_u32((next() % 0x2_0000) as u32).unwrap_or('?'));
+                } else {
+                    s.push_str(pieces[(next() % pieces.len() as u64) as usize]);
+                }
+            }
+            for k in parse_keyscan_output(&s)
+                .into_iter()
+                .chain(parse_known_hosts_lines(&s))
+            {
+                let blob = k.public_key.as_deref().unwrap();
+                assert_eq!(
+                    crate::fingerprint::fingerprint_of_blob(&k.key_type, blob).as_deref(),
+                    Ok(k.fingerprint.as_str())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn known_hosts_markers_ignored() {
         let out = format!(
-            "# Host 10.0.0.1 found: line 3\n|1|abc=|def= ssh-ed25519 {BLOB}\n@revoked 10.0.0.1 ssh-ed25519 {BLOB}\n"
+            "# Host 10.0.0.1 found: line 3\n|1|abc=|def= ssh-ed25519 {BLOB}\n@revoked 10.0.0.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOTHERKEY\n@cert-authority *.lab ssh-ed25519 {BLOB}\n"
         );
         assert_eq!(parse_known_hosts_lines(&out).len(), 1);
         let only_revoked = format!("@revoked 10.0.0.1 ssh-ed25519 {BLOB}\n");
