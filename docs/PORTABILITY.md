@@ -2,7 +2,11 @@
 
 LabLink 0.3 supports Linux only (tested on Ubuntu 20.04, 22.04 and 24.04,
 x86_64; the CLI and daemon also build for aarch64 Linux). macOS is not
-supported yet. This page draws the line between the generic core, which
+supported yet. The one macOS-facing piece is remote access
+([REMOTE_ACCESS.md](REMOTE_ACCESS.md)): the `lablink` CLI can reach devices
+with a `remote:` block without a daemon, and it looks for the Tailscale CLI
+inside `/Applications/Tailscale.app` as well as on `PATH`. Its dependency
+tree is pure Rust plus libc, but it has not been built or run on macOS yet. This page draws the line between the generic core, which
 should not need changes for another OS, and the platform layer, which would
 be reimplemented.
 

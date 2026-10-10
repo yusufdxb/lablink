@@ -271,6 +271,7 @@ Scripts and AI agents: [docs/AUTOMATION.md](docs/AUTOMATION.md).
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): what LabLink defends against, and how
 - [docs/PORTABILITY.md](docs/PORTABILITY.md): what is Linux-specific, and the boundary for other OSes
 - [docs/AUTOMATION.md](docs/AUTOMATION.md): JSON output and exit codes for scripts and agents
+- [docs/REMOTE_ACCESS.md](docs/REMOTE_ACCESS.md): optional remote access over Tailscale (LAN first, same pinned host key)
 - [docs/TESTING.md](docs/TESTING.md), [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
 - [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md)
 

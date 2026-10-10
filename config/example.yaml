@@ -102,6 +102,14 @@ sites:
         usernames: [ops]
         expected_ips: [10.20.30.31]
 
+# Optional remote access (docs/REMOTE_ACCESS.md): add to a device that has
+# host_key_fingerprints. `lablink remote setup` on the device prints this.
+#       remote:
+#         tailscale:
+#           address: jetson-a.tail1234.ts.net
+#           tailnet: tail1234.ts.net
+#           node_id: nAbC123CNTRL
+
 # Client preferences (GUI). The daemon ignores this section.
 # preferences:
 #   terminal: gnome-terminal

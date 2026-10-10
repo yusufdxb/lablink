@@ -116,6 +116,13 @@ exits with 3-7 is indistinguishable from a LabLink error by exit code alone.
 Use `--json`: LabLink errors always have `"status": "lablink_error"` and an
 `error.code` string; remote results never do.
 
+Remote access (`docs/REMOTE_ACCESS.md`) adds no exit codes: an unpinned
+endpoint key is 6, a tailnet or node disagreement 7, every other remote
+failure 5, each with a specific `error.code` (`tailscale_unauthenticated`,
+`tailscale_peer_not_found`, `dns_failure`, ...). Without a daemon, `ssh`,
+`exec` and `remote status` still work for devices with a `remote:` block;
+for every other device exit 3 is unchanged.
+
 ## JSON shapes (schema_version 1)
 
 All `--json` outputs carry `"schema_version": 1`. Fields are only ever added.
@@ -163,9 +170,16 @@ For a non-GREEN device, `lablink status <device>` (human output) adds an explana
   "user": "ops", "command": "uname -a", "status": "ok", "exit_code": 0,
   "timed_out": false, "duration_ms": 41, "stdout": "Linux ...\n", "stderr": "",
   "stdout_truncated": false, "stderr_truncated": false, "ssh_error": null,
-  "advice": null, "identity_pinned": true
+  "advice": null, "identity_pinned": true, "transport": "lan", "notes": []
 }
 ```
+
+`transport` is `lan` or `tailscale` (the path actually used) and `notes` lists
+facts about the selection (for example that the Tailscale CLI was not found).
+`lablink remote status <device> --json` reports `tailscale` (local client
+state), `daemon` (the LAN as the daemon sees it), `attempts` (each path with
+`result` `ok` or an error code) and `would_use`; its exit code is what
+`lablink ssh` would get (0, 5, 6 or 7).
 
 When OpenSSH itself fails (exit 255), `ssh_error` classifies it and `advice`
 (added in 0.3.0) gives the safest next step, for example installing a key

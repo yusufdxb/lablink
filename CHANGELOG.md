@@ -4,6 +4,22 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Optional remote access over Tailscale (`docs/REMOTE_ACCESS.md`): a
+  device's `remote: tailscale:` block lets `lablink ssh`/`exec` fall back to
+  its tailnet address when the LAN does not answer, verifying the same pinned
+  host key on both paths. `--transport auto|lan|tailscale`,
+  `lablink remote status` and `lablink remote setup` (read-only). Works
+  without the daemon for configured devices (daemon-less clients).
+
+### Changed
+
+- `lablink ssh/exec --force` on a device with `remote:` whose LAN is offline
+  now tries the tailnet; `--transport lan --force` keeps the old behaviour.
+
 ## [0.3.0] - Unreleased
 
 First public release.

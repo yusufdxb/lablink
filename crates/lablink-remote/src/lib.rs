@@ -143,7 +143,13 @@ pub fn write_pin_file(
             })
         })
         .collect();
-    lablink_ssh::write_known_hosts(&path, &entries)?;
+    // Concurrent connections to the same device each write a private temp
+    // file and rename it into place, so no reader sees a partial file.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{site}.{name}.{}-{seq}.tmp", std::process::id()));
+    lablink_ssh::write_known_hosts(&tmp, &entries)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
 
@@ -170,6 +176,43 @@ mod tests {
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&p), 0o600);
         assert_eq!(mode(&d.path().join("remote")), 0o700);
+    }
+
+    #[test]
+    fn concurrent_pin_writes_never_expose_a_partial_file() {
+        let d = tempfile::tempdir().unwrap();
+        let k = HostKey {
+            key_type: "ssh-ed25519".into(),
+            fingerprint: "SHA256:x".into(),
+            public_key: Some(
+                "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl".into(),
+            ),
+        };
+        let want = format!(
+            "lablink.home.box ssh-ed25519 {}",
+            k.public_key.as_ref().unwrap()
+        );
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..50 {
+                        let p = write_pin_file(d.path(), "home", "box", std::slice::from_ref(&k))
+                            .unwrap();
+                        let t = std::fs::read_to_string(p).unwrap();
+                        assert_eq!(
+                            t.lines()
+                                .filter(|l| !l.starts_with('#'))
+                                .collect::<Vec<_>>(),
+                            [want.as_str()]
+                        );
+                    }
+                });
+            }
+        });
+        let left: Vec<_> = std::fs::read_dir(d.path().join("remote"))
+            .unwrap()
+            .collect();
+        assert_eq!(left.len(), 1, "no temp files left behind");
     }
 
     #[test]

@@ -31,11 +31,16 @@ open items are listed at the end.
 | `lablink-daemon` | lib + `lablinkd` | Registry, per-device monitors, discovery coordinator, persistence, IPC server, metrics, service-check extension point, test harness (`testing`). | rusqlite (bundled SQLite), tokio, tracing |
 | `lablink-doctor` | lib | Read-only health checks: plans checks per device (config `checks:`, else the device profile), runs one batch SSH session per device through the same resolve and pinned-identity path as `exec`, renders human and JSON reports. | lablink-ssh |
 | `lablink-setup` | lib | Actions shared by the CLI and GUI that are not daemon requests: first-run `init`, site creation, systemd user-service control, completion install, local network detection (`getifaddrs`, read-only), validated atomic config writes with backups, export/import, redacted support bundles. No probing. | libc, tempfile |
+| `lablink-remote` | lib | Optional remote access: read-only Tailscale adapter (`tailscale status --json`), verified endpoint selection (LAN hints, then the tailnet address; bounded TCP, host keys against pins), per-device pin files. See [REMOTE_ACCESS.md](REMOTE_ACCESS.md). | lablink-ssh, serde_json |
 | `lablink-cli` | `lablink` | Client commands, prompts, human and JSON output, `ssh`/`exec`/`copy-id` via OpenSSH. No async runtime. | clap |
 | `lablink-gui` | `lablink-gui` | Native egui client of the daemon API and `lablink-setup`: setup wizard, site selector and views, device lifecycle, Health, Sites and Settings tabs. No networking logic of its own. | eframe |
 
 Dependency rule: clients depend on `lablink-core` (and `lablink-ssh` to launch
-OpenSSH); only `lablink-daemon` depends on `lablink-discovery`. The GUI cannot
+OpenSSH; the CLI also on `lablink-remote`); only `lablink-daemon` depends on
+`lablink-discovery`. Remote access is the one place a client probes: at
+connect time, for a device with a `remote:` block whose LAN path the daemon
+reports unusable (or when no daemon runs), it opens bounded TCP connections
+and `ssh-keyscan`s to the configured endpoints, never ranges. The GUI cannot
 probe the network because it does not link the code that does.
 
 ### Why these choices
@@ -294,6 +299,20 @@ ssh -o HostName=<current ip> -o Port=<port>
   (the master checked it when it was established). Background checks reuse
   such masters by default (required for password-only servers);
   `ssh.reuse_control_master: false` passes `ControlPath=none` to them.
+
+### Remote access
+
+For a device with `remote: tailscale:` the CLI chooses the path at connect
+time (details and threat model in [REMOTE_ACCESS.md](REMOTE_ACCESS.md)): the
+daemon's LAN answer when it is usable, otherwise the device's tailnet address
+from `tailscale status --json` (same tailnet, same stable node ID), and, when
+no daemon runs, the config's LAN hints first. Every endpoint must offer a key
+from `host_key_fingerprints`; ssh then runs with the same
+`HostKeyAlias=lablink.<site>.<name>` and `StrictHostKeyChecking=yes` against
+`<state>/remote/<site>.<name>.known_hosts` (only the pinned keys). Any
+identity disagreement stops the selection. The selection runs in the client,
+not the daemon, because the daemon is Linux-only and must not send background
+traffic over a VPN; the daemon ignores `remote:`.
 
 ## IPC
 
