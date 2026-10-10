@@ -4,7 +4,7 @@
 #   - in the pinned Ubuntu 20.04 container (packaging/build.Dockerfile) with
 #     the Rust toolchain from rust-toolchain.toml,
 #   - with the full commit SHA embedded (`lablink version`).
-# Output: dist/ (.deb, tarball, SHA256SUMS, BUILDINFO).
+# Output: dist/ (.deb, tarball, CycloneDX SBOM, SHA256SUMS, BUILDINFO).
 #
 # Usage: scripts/release.sh
 #   LABLINK_MAINTAINER="Name <email>"   Debian Maintainer field (optional)
@@ -41,5 +41,6 @@ docker run --rm \
 
 rm -rf dist
 cp -r "$work/src/dist" dist
+scripts/sbom.sh
 echo "== release artifacts for $sha"
 cat dist/SHA256SUMS

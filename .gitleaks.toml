@@ -1,0 +1,14 @@
+# Secret scanning (gitleaks) for this repository: the default rules, plus an
+# allowlist for the synthetic secrets the support-bundle redaction tests must
+# contain (a fake GitHub token and a truncated fake OpenSSH key). They are not
+# credentials; the tests prove the bundle never carries them.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "synthetic fixtures in the redaction tests"
+paths = ['''crates/lablink-setup/src/bundle\.rs''']
+regexes = [
+  '''ghp_0123456789abcdefghijklmnopqrstuvwxyz0''',
+  '''b3BlbnNzaC1rZXktdjEAAAAA''',
+]
