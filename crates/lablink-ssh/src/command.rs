@@ -83,6 +83,28 @@ pub fn automated_session_args() -> Vec<String> {
         .collect()
 }
 
+/// Does this ssh accept `KnownHostsCommand` (OpenSSH 8.5+)? Asked once per
+/// binary with `ssh -G`, which parses options without connecting. Older
+/// clients reject the option, but their config files cannot use it either.
+fn supports_known_hosts_command(binary: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = cache.lock().unwrap().get(binary) {
+        return *v;
+    }
+    let v = std::process::Command::new(binary)
+        .args(["-G", "-o", "KnownHostsCommand=none", "lablink-option-check"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    cache.lock().unwrap().insert(binary.to_string(), v);
+    v
+}
+
 fn opt(args: &mut Vec<String>, k: &str, v: impl AsRef<str>) {
     args.push("-o".into());
     args.push(format!("{k}={}", v.as_ref()));
@@ -107,6 +129,11 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
         opt(&mut a, "StrictHostKeyChecking", "yes");
         opt(&mut a, "UpdateHostKeys", "no");
         opt(&mut a, "CheckHostIP", "no");
+        // A KnownHostsCommand in ~/.ssh/config or /etc/ssh/ssh_config would
+        // add accepted keys next to the pinned file.
+        if supports_known_hosts_command(&t.binary) {
+            opt(&mut a, "KnownHostsCommand", "none");
+        }
     }
     match mode {
         Mode::Interactive => {}
@@ -267,6 +294,9 @@ mod tests {
         );
         assert!(a.contains(&"HostKeyAlias=lablink.jetson-a".to_string()));
         assert!(a.contains(&"HostName=192.168.10.71".to_string()));
+        if supports_known_hosts_command("ssh") {
+            assert!(a.contains(&"KnownHostsCommand=none".to_string()), "{a:?}");
+        }
         assert_eq!(
             &a[a.len() - 2..],
             &["--".to_string(), "jetson-a".to_string()]
@@ -387,9 +417,17 @@ pub fn proxy_command_through(gateway: &Target, batch: bool) -> String {
         );
     }
     let args = build_args(gateway, &Mode::Interactive, &extra);
+    // ssh %-expands ProxyCommand before the shell runs it: a literal '%'
+    // (e.g. in the known_hosts path) must be doubled, except in %h:%p.
     std::iter::once(gateway.binary.as_str())
         .chain(args.iter().map(String::as_str))
-        .map(shell_quote)
+        .map(|a| {
+            if a == "%h:%p" {
+                a.to_string()
+            } else {
+                shell_quote(&a.replace('%', "%%"))
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -405,6 +443,25 @@ mod proxy_tests {
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn proxy_command_escapes_percent_outside_the_tokens() {
+        let gw = Target {
+            binary: "ssh".into(),
+            ip: "10.0.0.1".into(),
+            port: 22,
+            ssh_host: "gw".into(),
+            username: None,
+            host_key_alias: Some("lablink.s.gw".into()),
+            known_hosts_file: Some(PathBuf::from("/s/100%/known_hosts")),
+            connect_timeout_s: 5,
+            options: Default::default(),
+            proxy_command: None,
+        };
+        let p = proxy_command_through(&gw, true);
+        assert!(p.contains("UserKnownHostsFile=/s/100%%/known_hosts"), "{p}");
+        assert!(p.contains(" -W %h:%p "), "{p}");
     }
 
     #[test]
