@@ -7,7 +7,7 @@
 //! a unit written to `~/.config/systemd/user/` pointing at their `lablinkd`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub const UNIT_NAME: &str = "lablinkd.service";
 /// Where distribution packages put user units.
@@ -42,7 +42,9 @@ pub fn find_daemon() -> Result<PathBuf, String> {
         }
     }
     if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
+        // Only absolute entries: a relative one is the current directory,
+        // and its `lablinkd` would be written into the unit.
+        for dir in std::env::split_paths(&path).filter(|d| d.is_absolute()) {
             let p = dir.join("lablinkd");
             if p.is_file() {
                 // A relative PATH entry must not become a relative ExecStart.
@@ -116,7 +118,8 @@ WantedBy=default.target
 }
 
 fn systemctl_output(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new("systemctl")
+    lablink_core::program::command("systemctl")
+        .map_err(|e| format!("cannot run systemctl: {e}"))?
         .arg("--user")
         .args(args)
         .stdin(Stdio::null())

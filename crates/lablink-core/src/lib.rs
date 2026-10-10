@@ -17,6 +17,7 @@ pub mod model;
 pub mod net;
 pub mod paths;
 pub mod profile;
+pub mod program;
 pub mod protocol;
 pub mod site;
 pub mod time;

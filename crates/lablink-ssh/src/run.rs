@@ -2,7 +2,7 @@
 
 use std::io::Read;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// Per-stream capture limit; output beyond this is discarded and flagged.
@@ -74,7 +74,7 @@ pub fn run_captured(
     output: OutputMode,
     own_group: bool,
 ) -> std::io::Result<ExecOutput> {
-    let mut cmd = Command::new(binary);
+    let mut cmd = lablink_core::program::command(binary)?;
     cmd.args(args);
     match output {
         OutputMode::Capture => {

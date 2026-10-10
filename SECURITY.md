@@ -114,6 +114,12 @@ LabLink is a policy layer over OpenSSH and the operating system:
   all authentication. LabLink's guarantees assume an uncompromised `ssh`
   binary and that options given on the command line take precedence over
   configuration files (true for OpenSSH).
+- **Your environment and files.** LabLink runs the OpenSSH programs found in
+  the absolute directories of your `PATH` (never the current directory) with
+  your environment, and reads its configuration and pins under your home
+  directory (from `HOME`, else the password database; never /tmp). It
+  refuses a configuration or state directory that another user, or every
+  user, could have changed.
 - **The operating system** separates users. Root, and anyone who can act as
   your user, can read LabLink's state, edit its pins and talk to its socket.
 - **You** decide the first time whether a key is right: compare the

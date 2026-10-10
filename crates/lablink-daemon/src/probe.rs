@@ -130,6 +130,15 @@ impl Prober for RealProber {
             if !self.user_known_hosts.exists() {
                 return Vec::new();
             }
+            // Entries in this file can pin keys, so one that another user
+            // could have written is not read.
+            if let Some(why) = lablink_core::paths::writable_by_others(&self.user_known_hosts) {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!("not reading {}: {why}", self.user_known_hosts.display())
+                });
+                return Vec::new();
+            }
             let bin = self.keygen_binary.clone();
             let file = self.user_known_hosts.clone();
             tokio::task::spawn_blocking(move || {

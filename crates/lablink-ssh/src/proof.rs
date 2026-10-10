@@ -154,7 +154,9 @@ impl Transport {
                 let fail = |e: std::io::Error| format!("cannot start the gateway hop: {e}");
                 let (ours, theirs) = UnixStream::pair().map_err(fail)?;
                 let theirs_in = OwnedFd::from(theirs.try_clone().map_err(fail)?);
+                // The hop's `ssh` is looked up like LabLink's own.
                 Command::new("/bin/sh")
+                    .env("PATH", lablink_core::program::search_path())
                     .arg("-c")
                     .arg(format!("exec {cmd}"))
                     .stdin(Stdio::from(theirs_in))
@@ -299,14 +301,15 @@ pub fn prove_host_key(t: &Target, timeout: Duration) -> KeyProof {
         format!("HostKeyAlgorithms={}", algorithms.join(",")),
     ];
     args.extend(build_args(t, &Mode::KeyProof, &[]));
-    let mut ssh = match Command::new(&t.binary)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-    {
+    let spawned = lablink_core::program::command(&t.binary).and_then(|mut c| {
+        c.args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+    });
+    let mut ssh = match spawned {
         Ok(c) => c,
         Err(e) => {
             transport.close();

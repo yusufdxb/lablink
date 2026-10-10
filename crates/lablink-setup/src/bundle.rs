@@ -22,7 +22,6 @@ use lablink_core::site::SitesReport;
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 /// LabLink's own vocabulary: never treated as a sensitive word even when a
@@ -406,7 +405,7 @@ fn match_at(c: &[char]) -> Option<(usize, &'static str)> {
 }
 
 fn run(cmd: &str, args: &[&str]) -> String {
-    match Command::new(cmd).args(args).output() {
+    match lablink_core::program::command(cmd).and_then(|mut c| c.args(args).output()) {
         Ok(o) => {
             let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
             let e = String::from_utf8_lossy(&o.stderr);
@@ -860,7 +859,8 @@ pub fn create(opts: &BundleOptions) -> Result<Bundle, String> {
         listed.push(fname.clone());
     }
     let staged = tmp.path().join("bundle.tar.gz");
-    let st = Command::new("tar")
+    let st = lablink_core::program::command("tar")
+        .map_err(|e| format!("cannot run tar: {e}"))?
         .arg("-czf")
         .arg(&staged)
         .arg("-C")
@@ -1095,7 +1095,7 @@ ssh: erin@10.77.0.42: Permission denied (publickey)\n".into();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
         let x = dir.path().join("x");
         std::fs::create_dir(&x).unwrap();
-        assert!(Command::new("tar")
+        assert!(std::process::Command::new("tar")
             .arg("-xzf")
             .arg(&b.path)
             .arg("-C")

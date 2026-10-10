@@ -49,7 +49,7 @@ First public release.
 ### Security
 
 Hardening from an adversarial security review before the first public
-release (details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T26-T35).
+release (details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T26-T36).
 
 - A device is *verified* only after the host proves it holds the pinned
   private key (credential-free OpenSSH key exchange, decided from the bytes
@@ -82,6 +82,15 @@ release (details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T26-T35).
   dependabot, job timeouts; reproducible `.deb`/tarball; CycloneDX SBOM;
   build provenance attestations on tags; checksum-verified toolchain
   installer.
+- LabLink never takes its configuration, pins or programs from a place
+  another user or the current directory controls: with `HOME` unset it uses
+  the home directory from the password database instead of /tmp (where
+  another user could plant a configuration naming the ssh program, or own
+  the directory holding the pins); relative `HOME`, `XDG_*` and `LABLINK_*`
+  paths are ignored; a configuration, state directory or `~/.ssh/known_hosts`
+  that another user or every user can change is refused; and `ssh` and the
+  other programs LabLink starts are looked up only in absolute `PATH`
+  directories, so an `ssh` in the current directory is never run.
 
 Earlier in the 0.3.0 cycle:
 

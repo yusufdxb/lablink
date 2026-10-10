@@ -347,7 +347,7 @@ fn find_pubkey(explicit: Option<PathBuf>) -> Option<PathBuf> {
         };
         return Some(p);
     }
-    let ssh = PathBuf::from(std::env::var_os("HOME")?).join(".ssh");
+    let ssh = lablink_core::paths::home().join(".ssh");
     ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"]
         .iter()
         .map(|n| ssh.join(n))
@@ -394,9 +394,8 @@ pub fn cmd_copy_id(
                     true,
                 )
             {
-                let st = std::process::Command::new("ssh-keygen")
-                    .args(["-t", "ed25519"])
-                    .status()
+                let st = lablink_core::program::command("ssh-keygen")
+                    .and_then(|mut c| c.args(["-t", "ed25519"]).status())
                     .map_err(|e| {
                         Fail::new(exit::FAILURE, "exec", format!("cannot run ssh-keygen: {e}"))
                     })?;
@@ -424,9 +423,8 @@ pub fn cmd_copy_id(
         if r.shared_name { &id } else { &r.name },
         r.ip
     );
-    let st = std::process::Command::new("ssh-copy-id")
-        .args(&args)
-        .status()
+    let st = lablink_core::program::command("ssh-copy-id")
+        .and_then(|mut c| c.args(&args).status())
         .map_err(|e| {
             Fail::new(
                 exit::FAILURE,

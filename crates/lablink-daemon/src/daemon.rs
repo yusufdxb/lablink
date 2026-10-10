@@ -75,6 +75,27 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
             .create(&opts.state_dir)
             .map_err(|e| format!("cannot create state dir {}: {e}", opts.state_dir.display()))?;
         let _ = std::fs::set_permissions(&opts.state_dir, std::fs::Permissions::from_mode(0o700));
+        // The state dir holds the pins: it must be this user's own, private
+        // directory, in a path no other user can rearrange.
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(&opts.state_dir)
+            .map_err(|e| format!("cannot check state dir {}: {e}", opts.state_dir.display()))?;
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let me = unsafe { libc::getuid() };
+        if m.uid() != me || m.mode() & 0o077 != 0 {
+            return Err(format!(
+                "state dir {} must belong to you with mode 0700 (it belongs to uid {}, mode {:o})",
+                opts.state_dir.display(),
+                m.uid(),
+                m.mode() & 0o7777
+            ));
+        }
+        if let Some(why) = lablink_core::paths::writable_by_others(&opts.state_dir) {
+            return Err(format!(
+                "refusing state dir {}: {why}",
+                opts.state_dir.display()
+            ));
+        }
     }
     let lock = lock_state_dir(&opts.state_dir)?;
     let paths = Paths {

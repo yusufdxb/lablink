@@ -1309,7 +1309,10 @@ fn cmd_ssh(
             describe_identity(&r)
         );
     }
-    let err = std::process::Command::new(&t.binary).args(&args).exec();
+    let err = match lablink_core::program::command(&t.binary) {
+        Ok(mut c) => c.args(&args).exec(),
+        Err(e) => e,
+    };
     Err(Fail::new(
         exit::FAILURE,
         "exec",

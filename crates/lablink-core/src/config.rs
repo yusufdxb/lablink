@@ -572,6 +572,14 @@ impl Config {
             source,
         };
         let len = std::fs::metadata(path).map_err(io)?.len();
+        // The configuration names the programs LabLink runs and the keys it
+        // trusts, so a file another user could have written is refused.
+        if let Some(why) = crate::paths::writable_by_others(path) {
+            return Err(ConfigError::Parse {
+                path: path.display().to_string(),
+                message: format!("refusing a configuration other users can change: {why}"),
+            });
+        }
         if len > MAX_CONFIG_BYTES {
             return Err(ConfigError::Parse {
                 path: path.display().to_string(),
