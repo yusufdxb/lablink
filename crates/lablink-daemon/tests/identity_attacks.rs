@@ -1,6 +1,6 @@
 //! [unit, simulated] Identity attacks from the LAN, driven through the
 //! registry's public API (no daemon, no network). The scenarios are the
-//! proofs of concept from the 0.3.1 adversarial review: each failed before
+//! proofs of concept from the adversarial review before 0.3.0: each failed before
 //! the fix it guards.
 
 use lablink_core::config::Config;

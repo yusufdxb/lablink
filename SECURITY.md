@@ -148,11 +148,19 @@ LabLink is a policy layer over OpenSSH and the operating system:
   LabLink's files and directories unwritable by group (`chmod g-w`). Where
   the primary group is shared (such as AD's "Domain Users") or named
   differently from the user, a umask of 002 makes LabLink refuse its
-  configuration and state directory: use a umask of 022, or `chmod g-w` the
+  configuration and state directory (and the app refuses a `lablink`
+  program installed that way): use a umask of 022, or `chmod g-w` the
   files and directories it names. SSSD's `auto_private_groups` provides
   private groups that LabLink accepts. The answer is looked up at most once
   a minute, so a group change is noticed within a minute without a restart;
   a failed lookup counts as no private group.
+- **ACLs.** With a POSIX ACL, the group bits of a file's mode are only the
+  ACL's mask, so a group-writable file or directory is also refused when its
+  access ACL lets a user other than you (or root), or a group other than
+  your private group, write it. NFSv4 ACLs and other access controls beyond
+  the mode and POSIX ACLs (for example on network filesystems) are not
+  inspected; keep LabLink's files on a local filesystem, or make sure no
+  one else is granted write there.
 - `ssh.reuse_control_master: true` (the default) lets background checks ride
   an OpenSSH ControlMaster connection you opened yourself; such a connection
   was verified by OpenSSH when it was opened, not by LabLink. Set it to

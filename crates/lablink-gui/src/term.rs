@@ -70,20 +70,35 @@ pub fn installed_terminals() -> Vec<&'static str> {
     CANDIDATES.into_iter().filter(|c| runnable(c)).collect()
 }
 
-/// The `lablink` the terminal runs: the one next to the current executable,
-/// else the first in an absolute `$PATH` directory. Always an absolute path
-/// to an executable file no other user could have replaced; never a bare
-/// name, which the terminal would look up on its own `PATH` and from its own
-/// current directory.
+/// The `lablink` the terminal runs: the one next to the current executable
+/// if it is trusted, else the first in an absolute `$PATH` directory. Always
+/// an absolute path to an executable file no other user could have replaced;
+/// never a bare name, which the terminal would look up on its own `PATH` and
+/// from its own current directory.
 pub fn lablink_binary() -> Result<PathBuf, String> {
     let beside = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join("lablink")))
         .filter(|p| p.is_file());
-    let found = beside
-        .or_else(|| lablink_core::program::find("lablink").ok())
-        .ok_or_else(|| "cannot find the lablink program next to the app or in $PATH".to_string())?;
-    trusted_executable(&found)
+    first_trusted(beside, || lablink_core::program::find("lablink").ok())
+}
+
+/// `beside` if it is a trusted executable, else the one `on_path` finds,
+/// which must be trusted too.
+fn first_trusted(
+    beside: Option<PathBuf>,
+    on_path: impl FnOnce() -> Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    let beside = beside.map(|p| trusted_executable(&p));
+    if let Some(Ok(p)) = beside {
+        return Ok(p);
+    }
+    match on_path() {
+        Some(p) => trusted_executable(&p),
+        None => Err(beside.and_then(Result::err).unwrap_or_else(|| {
+            "cannot find the lablink program next to the app or in $PATH".to_string()
+        })),
+    }
 }
 
 /// `p` if it is an absolute path to an executable regular file that no other
@@ -197,6 +212,28 @@ mod tests {
         assert!(why.contains("writable by every user"), "{why}");
         assert!(trusted_executable(&d.path().join("missing")).is_err());
         assert!(trusted_executable(d.path()).is_err(), "a directory");
+        // An untrusted `lablink` beside the app gives way to a trusted one
+        // on `$PATH`; with none there, its refusal is the answer.
+        let good = d.path().join("good");
+        std::fs::create_dir(&good).unwrap();
+        let other = good.join("lablink");
+        std::fs::write(&other, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            first_trusted(Some(exe.clone()), || Some(other.clone())).unwrap(),
+            other
+        );
+        let why = first_trusted(Some(exe.clone()), || None).unwrap_err();
+        assert!(why.contains("writable by every user"), "{why}");
+        mode(0o755).unwrap();
+        assert_eq!(
+            first_trusted(Some(exe.clone()), || Some(other.clone())).unwrap(),
+            exe
+        );
+        assert!(first_trusted(None, || None)
+            .unwrap_err()
+            .contains("cannot find"));
+        assert!(first_trusted(None, || Some(PathBuf::from("lablink"))).is_err());
         // Whatever is found, the result is absolute.
         if let Ok(p) = lablink_binary() {
             assert!(p.is_absolute(), "{}", p.display());

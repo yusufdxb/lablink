@@ -89,7 +89,8 @@ release (details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T26-T36).
   the directory holding the pins); relative `HOME`, `XDG_*` and `LABLINK_*`
   paths are ignored with a warning; a configuration, state directory or
   `~/.ssh/known_hosts` that another user could change (owned by them,
-  writable by everyone or by a group other than your private group, or
+  writable by everyone or by a group other than your private group,
+  granted to another user or group by a POSIX ACL, or
   reached through their directory or through their link anywhere in a
   chain of links) is refused, and so is a path that cannot be resolved to a
   file, such as `/dev/stdin` on a pipe; `ssh` and the other programs LabLink

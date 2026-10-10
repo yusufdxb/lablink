@@ -166,6 +166,81 @@ fn uid() -> u32 {
 /// Most symbolic links followed while checking one path (the kernel's limit).
 const MAX_LINKS: u32 = 40;
 
+/// Whether the POSIX access ACL of `p` (if it has one) lets a user other
+/// than this one or root, or a group other than the private group, write
+/// it. With an ACL, the group bits of the mode are only the ACL's mask, so
+/// they do not show who the named entries are. No ACL, or a filesystem
+/// without ACLs, means no such writer; any other failure to read it is an
+/// error.
+fn acl_lets_others_write(p: &Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(p.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let name = c"system.posix_acl_access";
+    let get = |buf: &mut [u8]| {
+        // SAFETY: both strings are NUL-terminated and `buf` is valid for
+        // `buf.len()` bytes (a zero length only asks for the size).
+        let n = unsafe {
+            libc::lgetxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if n < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(n as usize)
+        }
+    };
+    let none = |e: &std::io::Error| {
+        matches!(
+            e.raw_os_error(),
+            Some(libc::ENODATA) | Some(libc::EOPNOTSUPP)
+        )
+    };
+    let size = match get(&mut []) {
+        Ok(n) => n,
+        Err(e) if none(&e) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let mut acl = vec![0u8; size];
+    let n = match get(&mut acl) {
+        Ok(n) => n,
+        Err(e) if none(&e) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    acl_writers(&acl[..n], uid(), private_group()).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "unreadable access ACL")
+    })
+}
+
+/// Whether the access ACL `acl` (the kernel's `system.posix_acl_access`
+/// format: a little-endian version 2, then 8-byte tag, permissions and id
+/// entries) gives write to a user other than `me` or root or a group other
+/// than `private`. `None` if it is not in that format.
+fn acl_writers(acl: &[u8], me: u32, private: Option<u32>) -> Option<bool> {
+    const ACL_USER: u16 = 0x02;
+    const ACL_GROUP: u16 = 0x08;
+    const ACL_WRITE: u16 = 0x02;
+    let (version, entries) = acl.split_first_chunk::<4>()?;
+    if u32::from_le_bytes(*version) != 2 || entries.len() % 8 != 0 {
+        return None;
+    }
+    Some(entries.as_chunks::<8>().0.iter().any(|e| {
+        let tag = u16::from_le_bytes([e[0], e[1]]);
+        let write = u16::from_le_bytes([e[2], e[3]]) & ACL_WRITE != 0;
+        let id = u32::from_le_bytes([e[4], e[5], e[6], e[7]]);
+        write
+            && match tag {
+                ACL_USER => id != me && id != 0,
+                ACL_GROUP => Some(id) != private,
+                _ => false,
+            }
+    }))
+}
+
 /// Why another user could have written or replaced `path`, if one could
 /// (see [`trusted_metadata`]).
 pub fn writable_by_others(path: &Path) -> Option<String> {
@@ -183,7 +258,8 @@ pub fn writable_by_others(path: &Path) -> Option<String> {
 /// unless that group is the user's own private group (see [`private_group`]),
 /// so files and directories created with a umask of 002 stay usable. A
 /// shared group such as `lab` is refused, as OpenSSH refuses a
-/// group-writable config. Every symbolic link met, including those inside
+/// group-writable config, and so is a group-writable file or directory whose
+/// POSIX access ACL lets another user or group write it. Every symbolic link met, including those inside
 /// the targets of other links, must belong to this user or root, as its
 /// owner could point it elsewhere at any time.
 ///
@@ -218,15 +294,32 @@ pub fn trusted_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
                 p.display()
             ));
         }
-        if m.mode() & 0o020 != 0 && !sticky && !is_private_group(m.gid()) {
-            return Err(format!(
-                "{} is writable by group {} (chmod g-w)",
-                p.display(),
-                m.gid()
-            ));
+        if m.mode() & 0o020 != 0 && !sticky {
+            if !is_private_group(m.gid()) {
+                return Err(format!(
+                    "{} is writable by group {} (chmod g-w)",
+                    p.display(),
+                    m.gid()
+                ));
+            }
+            // The group bits are an ACL's mask if it has one: the named
+            // users and groups it lists may write too.
+            match acl_lets_others_write(p) {
+                Ok(false) => {}
+                Ok(true) => {
+                    return Err(format!(
+                        "{} has an ACL that lets another user or group write it (chmod g-w, or setfacl -b)",
+                        p.display()
+                    ))
+                }
+                Err(e) => return Err(cannot(p, &e)),
+            }
         }
         Ok(())
     };
+    if path.as_os_str().is_empty() {
+        return Err(cannot(path, &"empty path"));
+    }
     // A relative path starts at the current directory, which the kernel
     // reports without links.
     let full = if path.is_absolute() {
@@ -236,9 +329,16 @@ pub fn trusted_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
             .map_err(|e| cannot(path, &e))?
             .join(path)
     };
-    // Components still to walk, the next one last.
+    // Components still to walk, the next one last. `.` stands for a
+    // trailing `/` or `/.`, which `components` drops but the kernel reads as
+    // "this must be a directory".
     let mut todo: Vec<std::ffi::OsString> = Vec::new();
     let push = |todo: &mut Vec<std::ffi::OsString>, p: &Path| {
+        use std::os::unix::ffi::OsStrExt;
+        let b = p.as_os_str().as_bytes();
+        if b.ends_with(b"/") || b.ends_with(b"/.") || b == b"." {
+            todo.push(".".into());
+        }
         for c in p.components().rev() {
             match c {
                 Component::Normal(n) => todo.push(n.to_os_string()),
@@ -255,13 +355,16 @@ pub fn trusted_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
     judge(&at, &meta)?;
     let mut links = 0;
     while let Some(name) = todo.pop() {
+        if !meta.is_dir() {
+            return Err(cannot(&at, &"not a directory"));
+        }
+        if name == "." {
+            continue;
+        }
         if name == ".." {
             at.pop();
             meta = std::fs::symlink_metadata(&at).map_err(|e| cannot(&at, &e))?;
             continue;
-        }
-        if !meta.is_dir() {
-            return Err(cannot(&at, &"not a directory"));
         }
         let next = at.join(&name);
         let m = std::fs::symlink_metadata(&next).map_err(|e| cannot(&next, &e))?;
@@ -502,6 +605,142 @@ mod tests {
         // A file is not a directory to walk through.
         let why = writable_by_others(&f.join("x")).unwrap_or_default();
         assert!(why.contains("not a directory"), "{why}");
+    }
+
+    /// Paths the kernel refuses are refused too: the walk never approves a
+    /// path that leads nowhere.
+    #[test]
+    fn what_the_kernel_would_not_open_is_not_approved() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        chmod(d, 0o700);
+        let f = d.join("config.yaml");
+        std::fs::write(&f, "").unwrap();
+        chmod(&f, 0o600);
+        let s = |p: &Path| p.to_str().unwrap().to_string();
+        assert!(writable_by_others(Path::new("")).is_some(), "empty path");
+        for p in [
+            format!("{}/", s(&f)),
+            format!("{}/.", s(&f)),
+            format!("{}/..", s(&f)),
+        ] {
+            assert!(std::fs::metadata(&p).is_err(), "{p}");
+            let why = writable_by_others(Path::new(&p)).unwrap_or_default();
+            assert!(why.contains("not a directory"), "{p}: {why}");
+        }
+        std::os::unix::fs::symlink(format!("{}/", s(&f)), d.join("slash")).unwrap();
+        assert!(writable_by_others(&d.join("slash")).is_some());
+        // A directory, or a link to one, may end in `/` or `/.`.
+        std::os::unix::fs::symlink(d, d.join("here")).unwrap();
+        for p in [
+            format!("{}/", s(d)),
+            format!("{}/.", s(d)),
+            format!("{}/here/", s(d)),
+        ] {
+            assert_eq!(writable_by_others(Path::new(&p)), None, "{p}");
+        }
+    }
+
+    /// With a POSIX ACL the group bits are only the ACL's mask: the users
+    /// and groups it names are judged too.
+    #[test]
+    fn an_acl_that_lets_another_user_write_is_refused() {
+        let acl = |entries: &[(u16, u16, u32)]| {
+            let mut b = 2u32.to_le_bytes().to_vec();
+            for &(tag, perm, id) in entries {
+                b.extend(tag.to_le_bytes());
+                b.extend(perm.to_le_bytes());
+                b.extend(id.to_le_bytes());
+            }
+            b
+        };
+        let base = [
+            (0x01, 6, u32::MAX),
+            (0x04, 6, u32::MAX),
+            (0x10, 6, u32::MAX),
+            (0x20, 4, u32::MAX),
+        ];
+        let with = |e: (u16, u16, u32)| {
+            let mut v = base.to_vec();
+            v.insert(1, e);
+            acl(&v)
+        };
+        let me = 1000;
+        let private = Some(1000);
+        assert_eq!(acl_writers(&acl(&base), me, private), Some(false));
+        assert_eq!(
+            acl_writers(&with((0x02, 6, 2000)), me, private),
+            Some(true),
+            "user:2000:rw"
+        );
+        assert_eq!(
+            acl_writers(&with((0x02, 4, 2000)), me, private),
+            Some(false),
+            "user:2000:r"
+        );
+        assert_eq!(
+            acl_writers(&with((0x02, 6, me)), me, private),
+            Some(false),
+            "user:me:rw"
+        );
+        assert_eq!(
+            acl_writers(&with((0x02, 6, 0)), me, private),
+            Some(false),
+            "user:root:rw"
+        );
+        assert_eq!(
+            acl_writers(&with((0x08, 2, 3000)), me, private),
+            Some(true),
+            "group:3000:w"
+        );
+        assert_eq!(
+            acl_writers(&with((0x08, 6, 1000)), me, private),
+            Some(false),
+            "group:private:rw"
+        );
+        assert_eq!(
+            acl_writers(&with((0x08, 6, 1000)), me, None),
+            Some(true),
+            "no private group"
+        );
+        assert_eq!(acl_writers(&[2, 0, 0], me, private), None, "short");
+        assert_eq!(
+            acl_writers(&acl(&base)[..9], me, private),
+            None,
+            "cut entry"
+        );
+        let mut v1 = acl(&base);
+        v1[0] = 1;
+        assert_eq!(acl_writers(&v1, me, private), None, "version 1");
+
+        // On a real file, where the setfacl tool and ACLs are available.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("config.yaml");
+        std::fs::write(&f, "").unwrap();
+        chmod(dir.path(), 0o700);
+        chmod(&f, 0o600);
+        let setfacl = |args: &[&str]| {
+            std::process::Command::new("setfacl")
+                .args(args)
+                .arg(&f)
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !setfacl(&["-m", "u:65534:rw"]) {
+            eprintln!("setfacl unavailable here: real-file ACL case skipped");
+            return;
+        }
+        let why = writable_by_others(&f).unwrap_or_default();
+        assert!(
+            why.contains("writable by group") || why.contains("has an ACL"),
+            "{why}"
+        );
+        assert!(setfacl(&["-m", "u:65534:r"]));
+        assert!(setfacl(&["-m", "m::r"]));
+        assert_eq!(writable_by_others(&f), None, "read-only grant, mask r");
+        assert!(setfacl(&["-b"]));
+        assert_eq!(writable_by_others(&f), None);
     }
 
     /// A path that does not lead to a file, like a pipe's /proc fd link (what
