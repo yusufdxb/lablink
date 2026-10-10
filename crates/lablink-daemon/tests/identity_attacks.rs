@@ -248,3 +248,49 @@ fn forged_mdns_cannot_import_an_ip_keyed_known_hosts_entry() {
     assert!(r.pinned_view("lab/jetson").is_empty());
     assert!(!has_event(&r, "key_pinned"));
 }
+
+/// One device MAC of another site (a carried laptop, or a forged MAC) on
+/// this link must not make that site ACTIVE, park the site whose subnet is
+/// attached, and send bare names there.
+#[test]
+fn a_foreign_device_mac_cannot_flip_the_site() {
+    let cfg = Config::parse(
+        "sites:\n  - id: alpha\n    name: Alpha\n    networks:\n      - name: lan\n        cidr: 10.10.0.0/24\n    devices:\n      - name: jetson\n        hostnames: [jetson.local]\n  - id: beta\n    name: Beta\n    networks:\n      - name: lan\n        cidr: 10.20.0.0/24\n    devices:\n      - name: jetson\n      - name: laptop\n        macs: [02:00:00:00:00:bb]\n",
+        "test",
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Registry::new(cfg, dir.path().join("known_hosts"));
+    let snap = Snapshot {
+        interfaces: vec![Interface {
+            index: 2,
+            name: "eth0".into(),
+            up: true,
+            loopback: false,
+            mac: None,
+            addrs: vec!["10.10.0.5/24".parse().unwrap()],
+        }],
+        neighbors: vec![Neighbor {
+            ip: ip("10.10.0.6"),
+            mac: Some("02:00:00:00:00:bb".into()),
+            ifindex: 2,
+            state: NeighState::Reachable,
+        }],
+        gateways: vec![],
+        ssids: vec![],
+    };
+    let now = 1_000;
+    for (o, s) in r.set_snapshot(snap) {
+        r.observe(&o, &s, None, now);
+    }
+    r.refresh_sites(now);
+    let beta = r.decision("beta").unwrap();
+    assert!(!beta.confident(), "{beta:?}");
+    let alpha = r.decision("alpha").unwrap();
+    assert_ne!(
+        alpha.state,
+        lablink_core::site::SiteState::Away,
+        "{alpha:?}"
+    );
+    assert_ne!(r.resolve_ref("jetson").ok().as_deref(), Some("beta/jetson"));
+}

@@ -356,6 +356,23 @@ pub fn assess(
         }
     }
 
+    // Sightings of the site's devices (MAC on the local link, pinned key at
+    // an address outside the site's networks) only support a site whose own
+    // network is attached here. Otherwise they say where a device is, not
+    // where you are: a carried laptop, or one forged MAC, must not make
+    // another site ACTIVE and park the site whose subnet you are on.
+    if !ev.iter().any(|e| e.kind == "subnet") {
+        for e in ev.iter_mut() {
+            if e.strength == Strength::Medium
+                && matches!(e.kind.as_str(), "device_mac" | "host_key")
+            {
+                e.strength = Strength::Hint;
+                e.detail
+                    .push_str(" (a hint only: none of this site's networks is attached)");
+            }
+        }
+    }
+
     let score: i64 = ev
         .iter()
         .map(|e| match e.strength {
