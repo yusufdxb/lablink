@@ -211,9 +211,11 @@ fn acl_lets_others_write(p: &Path) -> std::io::Result<bool> {
         Err(e) if none(&e) => return Ok(false),
         Err(e) => return Err(e),
     };
-    acl_writers(&acl[..n], uid(), private_group()).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "unreadable access ACL")
-    })
+    let unreadable =
+        || std::io::Error::new(std::io::ErrorKind::InvalidData, "unreadable access ACL");
+    // A size larger than the buffer means the ACL changed between the calls.
+    let acl = acl.get(..n).ok_or_else(unreadable)?;
+    acl_writers(acl, uid(), private_group()).ok_or_else(unreadable)
 }
 
 /// Whether the access ACL `acl` (the kernel's `system.posix_acl_access`
@@ -381,6 +383,10 @@ pub fn trusted_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
                 return Err(cannot(path, &"too many levels of symbolic links"));
             }
             let target = std::fs::read_link(&next).map_err(|e| cannot(&next, &e))?;
+            // The kernel resolves an empty target to nothing (ENOENT).
+            if target.as_os_str().is_empty() {
+                return Err(cannot(&next, &"empty link target"));
+            }
             if target.is_absolute() {
                 at = PathBuf::from("/");
                 meta = std::fs::symlink_metadata(&at).map_err(|e| cannot(&at, &e))?;
