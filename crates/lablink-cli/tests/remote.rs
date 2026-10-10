@@ -561,7 +561,7 @@ fn missing_slow_or_broken_tailscale_cli() {
         eprintln!("skipped: a real Tailscale CLI is installed on this machine");
         return;
     }
-    let dev = standalone_dev()
+    let with_node = standalone_dev()
         .replace(
             &format!("expected_ips: [{LAN_IP}]"),
             "expected_ips: [127.0.0.5]",
@@ -570,6 +570,14 @@ fn missing_slow_or_broken_tailscale_cli() {
             "address: box.tail-ex.ts.net",
             &format!("address: \"{TS_IP}\""),
         );
+    // node_id configured: it cannot be checked, so the tailnet is not used.
+    let e = setup(&with_node, false, false);
+    let o = e.run(&["exec", "box", "true", "--json"]);
+    assert_eq!(code(&o), exit::DEVICE_UNREACHABLE, "{}", text(&o));
+    assert_eq!(json(&o)["error"]["code"], "tailscale_missing");
+    assert!(e.ssh_args().is_none());
+    // Without node_id: host key only, and LabLink says so.
+    let dev = with_node.replace("        node_id: nBOX\n", "");
     let e = setup(&dev, false, false);
     let o = e.run(&["exec", "box", "true", "--json"]);
     assert_eq!(code(&o), 0, "{}", text(&o));
@@ -585,7 +593,9 @@ fn missing_slow_or_broken_tailscale_cli() {
 
     // A MagicDNS name that does not resolve: DNS failure, distinctly.
     let e = setup(
-        &standalone_dev().replace(&format!("[{LAN_IP}]"), "[127.0.0.5]"),
+        &standalone_dev()
+            .replace(&format!("[{LAN_IP}]"), "[127.0.0.5]")
+            .replace("        node_id: nBOX\n", ""),
         false,
         false,
     );
@@ -609,6 +619,42 @@ fn missing_slow_or_broken_tailscale_cli() {
         .as_str()
         .unwrap()
         .contains("not valid JSON"));
+}
+
+#[test]
+fn device_without_an_address_uses_the_daemons_choice() {
+    // The daemon has never seen the device (no current address): resolve
+    // says unreachable, and the device it meant (inspect) is used.
+    let e = setup(
+        &remote_dev("box", "").replace("10.9.0.31", "10.9.0.77"),
+        true,
+        true,
+    );
+    let r = e.run(&["resolve", "box", "--json"]);
+    assert_eq!(
+        code(&r),
+        exit::DEVICE_UNREACHABLE,
+        "the daemon has no address"
+    );
+    let o = e.run(&["exec", "box", "true", "--json"]);
+    assert_eq!(code(&o), 0, "{}", text(&o));
+    assert_eq!(json(&o)["transport"], "tailscale");
+}
+
+#[test]
+fn shared_names_without_remote_keep_their_exit_codes() {
+    // Two sites with a `box` and no remote access anywhere: no daemon is
+    // exit 3 exactly as before (not "ambiguous").
+    let e = setup("", false, true);
+    std::fs::write(
+        &e.config,
+        "sites:\n  - id: a\n    name: A\n    devices:\n      - name: box\n  - id: b\n    name: B\n    devices:\n      - name: box\n",
+    )
+    .unwrap();
+    let o = e.run(&["exec", "box", "true", "--json"]);
+    assert_eq!(code(&o), exit::DAEMON_UNAVAILABLE, "{}", text(&o));
+    let o = e.run(&["ssh", "box"]);
+    assert_eq!(code(&o), exit::DAEMON_UNAVAILABLE);
 }
 
 #[test]

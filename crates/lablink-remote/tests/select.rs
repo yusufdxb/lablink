@@ -251,7 +251,7 @@ fn stale_lan_ip_belonging_to_a_non_ssh_host_is_skipped() {
 
 #[test]
 fn missing_tailscale_with_name_uses_system_dns_or_reports_dns_failure() {
-    let mut sp = spec(Some("nBOX"));
+    let mut sp = spec(None);
     sp.lan.clear();
     let net = MockNet::default().ts(TsState::Missing);
     let s = run(&sp, Preference::Auto, &net);
@@ -277,6 +277,36 @@ fn missing_tailscale_with_ip_address_still_requires_the_pinned_key() {
     let s = run(&sp, Preference::Auto, &net);
     assert_eq!(kinds(&s), [("tailscale", "host_key_mismatch")]);
     assert!(s.notes[0].starts_with("tailscale status timed out"));
+}
+
+#[test]
+fn configured_node_id_is_never_skipped() {
+    // With node_id set, a missing or broken CLI makes the tailnet path
+    // unusable instead of connecting with the check silently skipped.
+    let mut sp = spec(Some("nBOX"));
+    sp.lan.clear();
+    sp.tailscale.as_mut().unwrap().address = TS.into();
+    for (state, kind) in [
+        (TsState::Missing, "tailscale_missing"),
+        (
+            TsState::Failed("tailscale status timed out"),
+            "tailscale_error",
+        ),
+    ] {
+        let net = MockNet::default()
+            .ts(state)
+            .host(TS, Host::Ssh(vec![key(1)]));
+        let s = run(&sp, Preference::Auto, &net);
+        assert_eq!(kinds(&s), [("tailscale", kind)]);
+        assert!(s.endpoint.is_none() && s.fatal().is_none());
+        assert!(!net.touched(TS), "nothing is sent");
+        assert!(s.attempts[0]
+            .problem
+            .as_ref()
+            .unwrap()
+            .describe()
+            .contains("node_id"));
+    }
 }
 
 #[test]

@@ -181,8 +181,10 @@ impl Problem {
                 "SECURITY STOP: the SSH server offered host key(s) {} which are not pinned for this device; it may be a different machine or an interception attempt",
                 offered.join(", ")
             ),
-            Problem::TailscaleMissing => "Tailscale is not installed or its CLI was not found".into(),
-            Problem::TailscaleFailed(r) => (*r).to_string(),
+            Problem::TailscaleMissing => "the Tailscale CLI was not found, so the configured node_id cannot be checked (enable the CLI, or remove node_id to rely on the pinned host key alone)".into(),
+            Problem::TailscaleFailed(r) => format!(
+                "{r}, so the configured node_id cannot be checked (remove node_id to rely on the pinned host key alone)"
+            ),
             Problem::TailscaleLoggedOut { state } => format!(
                 "Tailscale is not logged in on this machine (state {state}); log in yourself (`tailscale up` or the Tailscale app)"
             ),
@@ -432,6 +434,11 @@ pub fn select(
     };
     let ip = match net.tailscale() {
         TsState::Running(s) => tailnet_ip_from(ts, &s, &mut sel.notes),
+        // A configured node id is a check the user asked for: when it cannot
+        // be made, the tailnet path is not used. Without one, the configured
+        // address is tried and the pinned host key is the only check.
+        TsState::Missing if ts.node_id.is_some() => Err(Problem::TailscaleMissing),
+        TsState::Failed(why) if ts.node_id.is_some() => Err(Problem::TailscaleFailed(why)),
         TsState::Missing => {
             tailnet_ip_unchecked(net, ts, "Tailscale CLI not found", t, &mut sel.notes)
         }

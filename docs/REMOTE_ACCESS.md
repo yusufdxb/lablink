@@ -143,10 +143,11 @@ for devices with a `remote:` block (`ssh`, `exec`, `remote status`).
 
 1. Install Tailscale from https://tailscale.com/download/mac and log in from
    the app. LabLink finds the CLI on `PATH` or inside
-   `/Applications/Tailscale.app/Contents/MacOS/Tailscale`; if it finds none,
-   it still connects to a configured Tailscale IP or resolvable MagicDNS name,
-   but cannot check the tailnet and node (it says so; the host key is still
-   verified).
+   `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. If it finds no
+   working CLI and the device has a `node_id`, the tailnet path is refused
+   (`tailscale_missing` / `tailscale_error`): a configured check is never
+   skipped. Without `node_id` it connects to the configured Tailscale IP or
+   MagicDNS name and says that only the host key was checked.
 2. Build the CLI (needs Rust from https://rustup.rs; macOS builds are
    **not yet tested**):
 
@@ -178,7 +179,7 @@ for devices with a `remote:` block (`ssh`, `exec`, `remote status`).
 | `tailscale_peer_mismatch` | 7 | the address belongs to another node than `node_id` (or to several) |
 | `tailscale_unauthenticated` | 5 | the local Tailscale is not logged in (or awaits admin approval) |
 | `tailscale_stopped` / `tailscale_not_ready` | 5 | Tailscale is installed but not connected |
-| `tailscale_missing` / `tailscale_error` | 5 | no CLI / unusable answer (LabLink then tries the configured address) |
+| `tailscale_missing` / `tailscale_error` | 5 | no CLI / unusable answer while `node_id` is configured (without `node_id` the configured address is tried instead) |
 | `tailscale_peer_not_found` | 5 | the device is not visible in your tailnet (not enrolled, removed, not shared, or hidden by policy) |
 | `tailscale_peer_expired` | 5 | the device's Tailscale key expired |
 | `dns_failure` | 5 | a configured name did not resolve |
@@ -202,5 +203,7 @@ failures are OpenSSH's own (exit 255; `exec --json` classifies them in
 - Remote access is not available for devices behind a gateway (`via:`).
 - If the key pinned in the daemon (`lablink trust --replace`) changes, update
   `host_key_fingerprints` too; the remote path refuses until they agree.
-- Without the Tailscale CLI the tailnet and node are not checked (the host
-  key still is).
+- Without a working Tailscale CLI, a device with `node_id` is not reached
+  over the tailnet; one without `node_id` is, with the host key as the only
+  check. Use distinct host keys per machine (no cloned images) for remote
+  devices.

@@ -69,16 +69,20 @@ fn load_config() -> Result<Option<Config>, String> {
 }
 
 /// The configured device `reference` names, when it has remote access.
-/// A name that matches devices at several sites is ambiguous: remote access
-/// never guesses across site boundaries.
+/// A name that matches devices at several sites, one of which has remote
+/// access, is ambiguous: remote access never guesses across site
+/// boundaries. Names of devices without remote access are left to the
+/// existing behaviour (`None`).
 fn remote_device<'a>(
     cfg: &'a Config,
     reference: &str,
 ) -> Result<Option<(&'a SiteConfig, &'a DeviceConfig)>, Fail> {
     let hits = cfg.find_devices(reference);
+    if !hits.iter().any(|(_, d)| d.remote.is_some()) {
+        return Ok(None);
+    }
     match hits.as_slice() {
-        [] => Ok(None),
-        [(s, d)] => Ok(d.remote.is_some().then_some((*s, *d))),
+        [(s, d)] => Ok(Some((*s, *d))),
         many => {
             let mut f = Fail::new(
                 exit::AMBIGUOUS,
@@ -337,15 +341,24 @@ pub fn plan(
         }
         // The daemon knows the device but has no usable LAN address for it.
         Err(ClientError::Api(e)) if e.code == ErrorCode::Unreachable && pref != Preference::Lan => {
-            match cfg.as_ref().ok().and_then(Option::as_ref) {
-                Some(c) => match remote_device(c, device)? {
+            // The device the daemon chose (it may have settled a shared name
+            // by site confidence); never the raw name.
+            let id = client
+                .call_typed::<lablink_core::model::DeviceDetail>(&Request::Inspect {
+                    device: device.into(),
+                })
+                .ok()
+                .map(|d| d.status.id)
+                .filter(|id| !id.is_empty());
+            match (cfg.as_ref().ok().and_then(Option::as_ref), id) {
+                (Some(c), Some(id)) => match remote_device(c, &id)? {
                     Some((s, d)) => {
                         remote_planned(c, s, d, user, Vec::new(), Preference::Tailscale)
                     }
                     None if pref == Preference::Tailscale => Err(no_remote(device)),
                     None => Err(ClientError::Api(e).into()),
                 },
-                None => Err(ClientError::Api(e).into()),
+                _ => Err(ClientError::Api(e).into()),
             }
         }
         // No daemon (not installed, stopped, or an OS it does not run on):

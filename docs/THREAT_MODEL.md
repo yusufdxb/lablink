@@ -90,8 +90,10 @@ networks.
 - **Cloned images** that share host keys are distinguishable only with other
   signals (MAC, hostname, static IP); otherwise sightings are "ambiguous".
 - **Remote access without the Tailscale CLI** (for example a Mac whose app
-  has no CLI integration) cannot check the tailnet or node; LabLink says so
-  and relies on the pinned host key alone. Remote access is client-side
+  has no CLI integration) cannot check the tailnet or node. With `node_id`
+  configured the tailnet path is then refused; without it LabLink says so and
+  relies on the pinned host key alone (cloned images sharing a host key would
+  defeat that). Remote access is client-side
   only: the daemon does not monitor devices over Tailscale.
 - **MAC and hostname are spoofable.** They only associate addresses; they
   never override a pinned host key.
