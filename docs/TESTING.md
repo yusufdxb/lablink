@@ -1,6 +1,6 @@
 # LabLink tests
 
-Run everything with `cargo test --workspace --locked` (307 tests, 1 ignored
+Run everything with `cargo test --workspace --locked` (319 tests, 1 ignored
 soak test). No test needs a robot, a lab network, root or a running LabLink:
 every test uses temporary HOME, XDG, state and socket directories, and none
 touches the machine's network configuration or its systemd user manager.

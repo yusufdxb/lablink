@@ -52,7 +52,9 @@ release (details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T26-T35).
 - A device is *verified* only after the host proves it holds the pinned
   private key (credential-free OpenSSH key exchange, decided from the bytes
   LabLink's own ssh sends, never from printed text); a replayed public key is
-  a security stop. Scan sightings never verify by themselves.
+  a security stop. Client config files cannot vouch for a key, hide the
+  proof's options or steer it to unpinned key types. Scan sightings never
+  verify by themselves.
 - Forged mDNS/DNS answers or MAC sightings can no longer move a verified
   device on one missed probe, select `~/.ssh/known_hosts` entries to pin, or
   point probes at public addresses; a key contradicting the pin at an

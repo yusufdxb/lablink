@@ -71,7 +71,12 @@ ssh -o ProxyCommand=-            # ssh speaks over stdin/stdout, LabLink carries
 ```
 
 (`KnownHostsCommand` and `GSSAPIKeyExchange` only where the installed ssh
-knows them.)
+knows them; that is checked with `ssh -F /dev/null -G`, so no config file can
+hide them. `HostKeyAlgorithms` is set first to exactly the key types pinned
+for the device, read from LabLink's own known_hosts file, so a config's
+algorithm list or a host certificate cannot steer the exchange to an unpinned
+type; with no entry for the device the proof does not run. `ProxyUseFdpass=no`
+keeps a config from disabling `ProxyCommand=-`.)
 
 The decision is made from the bytes **LabLink's own ssh process sends**, not
 from anything printed. OpenSSH sends its `SSH_MSG_NEWKEYS` message only after
@@ -92,7 +97,8 @@ disconnect, a closed connection, a negotiation error).
 | Result of the proof | Device |
 |---|---|
 | ssh sent `NEWKEYS` | verified |
-| ssh rejected the key: a different key, or a bad signature with the pinned one | **mismatch** (security stop) |
+| ssh rejected the key: a different key of a pinned type, or a bad signature with the pinned one | **mismatch** (security stop) |
+| the host offered no key of a pinned type | unverified, retried (the scan comparison catches contradicting keys) |
 | timeout, refused, connection closed | unverified, retried at the next identity check |
 
 Once verified at an address, periodic re-checks compare keys only; a new
@@ -150,3 +156,13 @@ lablink resolve <device> --json   # host_key_alias and known_hosts_file
   without a new key exchange (see `ssh.reuse_control_master` in
   [SECURITY.md](../SECURITY.md#known-limitations)).
 - Anyone who can act as your user (or root) can edit LabLink's pins.
+- The proof shows that whoever answers at the address can reach the private
+  key; a machine that only relays bytes to the real device passes it. SSH
+  stays secure through such a relay (it sees only ciphertext), but tools you
+  give the address to without LabLink's pin options do not get that
+  protection.
+- OpenSSH 9.8+ servers penalise source addresses that connect without
+  authenticating (`PerSourcePenalties`), which host-key scans and the proof
+  do by design. In normal operation LabLink stays far below the threshold;
+  if a device's sshd ever refuses the LabLink host after a burst of
+  re-checks, add that host to the device's `PerSourcePenaltyExemptList`.
