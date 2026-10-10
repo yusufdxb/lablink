@@ -270,11 +270,20 @@ pass "support bundle" "$(ls "$out/bundle"/*/ | paste -sd ' ' -); no IPs, MACs, f
 
 # ---- two sites ---------------------------------------------------------------------------
 # Leave Site Alpha's network and arrive at another place (network B).
-logA0=$(docker logs "$robotA" 2>&1 | grep -c "Connection from\|Accepted\|Connection closed" || true)
 docker network disconnect "$netA" "$desk"
 docker network connect --ip "$preB.10" "$netB" "$desk"
 as_tester "ping -c 1 -W 1 $preB.1 >/dev/null 2>&1 || true"
 wait_for 30 'lablink sites --json | grep -q "\"state\": \"away\""' || fail "AWAY semantics" "Site Alpha never AWAY"
+# Baseline for "AWAY not probed": robot-a's sshd log once Site Alpha is AWAY
+# and connections begun while it was still ACTIVE have been logged (quiet
+# for 2 s), so an in-flight check is not mistaken for a probe of an AWAY site.
+logA0=-1
+for _ in $(seq 1 15); do
+    n=$(docker logs "$robotA" 2>&1 | grep -c "Connection from\|Accepted\|Connection closed" || true)
+    [ "$n" = "$logA0" ] && break
+    logA0=$n
+    sleep 2
+done
 st=$(status_json site-alpha/robot); echo "$st" > "$out/status-away.json"
 grep -q '"site_state": "away"' <<<"$st" && grep -q '"color": "gray"' <<<"$st" || fail "AWAY semantics" "robot not GRAY/away (status-away.json)"
 [ "$(code_of 'lablink status site-alpha/robot')" -eq 12 ] || fail "AWAY semantics" "exit code not 12"
