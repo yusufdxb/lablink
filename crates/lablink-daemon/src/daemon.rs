@@ -64,6 +64,21 @@ fn lock_state_dir(dir: &std::path::Path) -> Result<LockFile, String> {
     Ok(LockFile { _file: f })
 }
 
+/// `dir` when it is a directory of ours that nobody else can write or
+/// rearrange (the socket directory, for ssh master connections).
+fn private_dir(dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = dir?;
+    let m = std::fs::symlink_metadata(dir).ok()?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    (m.is_dir()
+        && m.uid() == me
+        && m.mode() & 0o077 == 0
+        && lablink_core::paths::writable_by_others(dir).is_none())
+    .then(|| dir.to_path_buf())
+}
+
 pub async fn run(opts: RunOptions) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = opts.config;
@@ -195,6 +210,7 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
     let _ = state.reg().refresh_sites(now_ms());
 
     let listener = ipc::bind(&paths.socket)?;
+    state.reg().control_dir = private_dir(paths.socket.parent());
     let tracker = state.tracker.clone();
     tracker.spawn(ipc::serve(state.clone(), listener));
     tracker.spawn(crate::discovery::run_coordinator(state.clone(), rx));

@@ -184,6 +184,19 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
         // With VerifyHostKeyDNS=yes in a config file, a DNS answer
         // marked secure would be accepted in place of the pin.
         opt(&mut a, "VerifyHostKeyDNS", "no");
+        // Distribution builds can trust a Kerberos exchange instead of the
+        // host key (the proof sets this below, with its other options).
+        if *mode != Mode::KeyProof && supports_option(&t.binary, "GSSAPIKeyExchange=no") {
+            opt(&mut a, "GSSAPIKeyExchange", "no");
+        }
+    }
+    // A master connection is reused by user, address and port alone: one
+    // the user's config opened to another machine at this address would
+    // carry the session past the pin. The daemon names a master path of
+    // LabLink's own (see [`control_path`]) or `none`; a resolve result
+    // without one (an older daemon) gets `none`.
+    if *mode != Mode::KeyProof && !t.options.contains_key("ControlPath") {
+        opt(&mut a, "ControlPath", "none");
     }
     match mode {
         Mode::Interactive => {}
@@ -260,6 +273,44 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
     a
 }
 
+/// The master connection path for a pinned device: a socket in `dir` (a
+/// private directory of LabLink's) named after the device's alias and pins,
+/// then ssh's `%C` (local host, address, port, user). Only ssh started by
+/// LabLink with this device's pinned options can open a master there, so a
+/// reused master was itself checked against the same pins. `None` (use
+/// `ControlPath=none`) when the path would be too long for a socket or
+/// cannot be written as one ssh option word.
+pub fn control_path(dir: &std::path::Path, alias: &str, pins: &[&str]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let dir = dir.to_str()?;
+    if !dir.starts_with('/')
+        || !dir
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+@%".contains(c))
+    {
+        return None;
+    }
+    let mut h = Sha256::new();
+    h.update(alias.as_bytes());
+    let mut pins = pins.to_vec();
+    pins.sort_unstable();
+    for p in pins {
+        h.update([0]);
+        h.update(p.as_bytes());
+    }
+    let name: String = h.finalize()[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    // sun_path is 108 bytes with the NUL; %C expands to 40 characters and
+    // a starting master appends a 17-character temporary suffix.
+    let expanded = dir.len() + 1 + name.len() + 1 + 40;
+    if expanded + 17 >= 108 {
+        return None;
+    }
+    Some(format!("{}/{name}-%C", dir.replace('%', "%%")))
+}
+
 /// Arguments for `ssh-copy-id` that install `pubkey` on the device through
 /// exactly the same addressing and pinned host-key options as `lablink ssh`.
 /// Refuses unverified targets: the password typed for ssh-copy-id must only
@@ -329,6 +380,113 @@ mod tests {
             connect_timeout_s: 5,
             options: [("ServerAliveInterval".to_string(), "10".to_string())].into(),
             proxy_command: None,
+        }
+    }
+
+    fn values<'a>(a: &'a [String], key: &str) -> Vec<&'a str> {
+        a.iter()
+            .filter_map(|x| x.strip_prefix(key)?.strip_prefix('='))
+            .collect()
+    }
+
+    #[test]
+    fn no_session_rides_a_master_the_daemon_did_not_name() {
+        // No ControlPath from the daemon (an older one): never reuse.
+        for verified in [true, false] {
+            for mode in [
+                Mode::Interactive,
+                Mode::Exec {
+                    command: "id".into(),
+                    batch: true,
+                },
+                Mode::AuthProbe,
+                Mode::KeyProof,
+            ] {
+                let a = build_args(&target(verified), &mode, &[]);
+                assert_eq!(values(&a, "ControlPath"), ["none"], "{mode:?}: {a:?}");
+            }
+        }
+        // The daemon's private path is the only one on the command line.
+        let mut t = target(true);
+        t.options
+            .insert("ControlPath".into(), "/run/user/7/lablink/ab-%C".into());
+        for mode in [
+            Mode::Interactive,
+            Mode::Exec {
+                command: "id".into(),
+                batch: true,
+            },
+            Mode::AuthProbe,
+        ] {
+            let a = build_args(&t, &mode, &[]);
+            assert_eq!(
+                values(&a, "ControlPath"),
+                ["/run/user/7/lablink/ab-%C"],
+                "{a:?}"
+            );
+        }
+        assert_eq!(
+            values(
+                &copy_id_args(&t, std::path::Path::new("/k.pub")).unwrap(),
+                "ControlPath"
+            ),
+            ["/run/user/7/lablink/ab-%C"]
+        );
+        // The proof is always a fresh connection, first value wins.
+        let a = build_args(&t, &Mode::KeyProof, &[]);
+        assert_eq!(values(&a, "ControlPath")[0], "none", "{a:?}");
+    }
+
+    #[test]
+    fn master_path_is_per_device_and_pins_and_fits_a_socket() {
+        let dir = std::path::Path::new("/run/user/1000/lablink");
+        let p = control_path(dir, "lablink.home.dev1", &["SHA256:a", "SHA256:b"]).unwrap();
+        assert!(
+            p.starts_with("/run/user/1000/lablink/") && p.ends_with("-%C"),
+            "{p}"
+        );
+        // Pin order does not matter; alias and pins do.
+        assert_eq!(
+            Some(&p),
+            control_path(dir, "lablink.home.dev1", &["SHA256:b", "SHA256:a"]).as_ref()
+        );
+        assert_ne!(
+            Some(&p),
+            control_path(dir, "lablink.cares.dev1", &["SHA256:a", "SHA256:b"]).as_ref()
+        );
+        assert_ne!(
+            Some(&p),
+            control_path(dir, "lablink.home.dev1", &["SHA256:a"]).as_ref()
+        );
+        // %C is 40 characters; a starting master appends 17 more.
+        let long = std::path::PathBuf::from(format!("/{}", "d".repeat(35)));
+        assert!(control_path(&long, "a", &[]).is_some());
+        let too_long = std::path::PathBuf::from(format!("/{}", "d".repeat(36)));
+        assert_eq!(control_path(&too_long, "a", &[]), None);
+        // One ssh option word, absolute, '%' literal.
+        assert_eq!(control_path(std::path::Path::new("/a b"), "a", &[]), None);
+        assert_eq!(control_path(std::path::Path::new("rel"), "a", &[]), None);
+        assert!(control_path(std::path::Path::new("/a%b"), "a", &[])
+            .unwrap()
+            .starts_with("/a%%b/"));
+    }
+
+    #[test]
+    fn pinned_sessions_refuse_a_kerberos_key_exchange() {
+        // Only meaningful where this ssh has the option (Debian/Ubuntu).
+        if !supports_option("ssh", "GSSAPIKeyExchange=no") {
+            return;
+        }
+        for mode in [
+            Mode::Interactive,
+            Mode::Exec {
+                command: "id".into(),
+                batch: true,
+            },
+            Mode::AuthProbe,
+        ] {
+            let a = build_args(&target(true), &mode, &[]);
+            assert_eq!(values(&a, "GSSAPIKeyExchange"), ["no"], "{mode:?}");
         }
     }
 
@@ -529,7 +687,10 @@ pub fn shell_quote(s: &str) -> String {
 /// A ProxyCommand that tunnels through `gateway` (`ssh <gateway args> -W %h:%p`),
 /// with the gateway's own pinned host-key options. `batch` forbids prompts.
 pub fn proxy_command_through(gateway: &Target, batch: bool) -> String {
-    let mut extra = vec!["-W".to_string(), "%h:%p".to_string()];
+    // The hop is a session LabLink starts on its own, whether or not the
+    // user's terminal waits on it.
+    let mut extra = automated_session_args();
+    extra.extend(["-W".to_string(), "%h:%p".to_string()]);
     if batch {
         extra.splice(
             0..0,
@@ -614,6 +775,14 @@ mod proxy_tests {
         assert!(p.contains("'UserKnownHostsFile=/s/known hosts'"));
         assert!(p.contains("BatchMode=yes"));
         assert!(p.ends_with("-W %h:%p -- jetson-a"), "{p}");
+        // The hop never forwards, listens or runs a LocalCommand, prompted or not.
+        for batch in [true, false] {
+            let h = proxy_command_through(&gw, batch);
+            for o in AUTOMATED_SESSION_OPTIONS {
+                assert!(h.contains(&format!(" -o {o} ")), "{o}: {h}");
+            }
+            assert!(h.contains(" -o ControlPath=none "), "{h}");
+        }
         let dev = Target {
             ip: "192.168.50.161".into(),
             ssh_host: "robot-a".into(),

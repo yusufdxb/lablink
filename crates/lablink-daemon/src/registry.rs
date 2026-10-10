@@ -495,6 +495,9 @@ pub struct Registry {
     pub sites_dirty: bool,
     /// Something site detection depends on changed: re-evaluate.
     pub sites_stale: bool,
+    /// LabLink's private directory for ssh master connections; `None`
+    /// means no reuse (`ControlPath=none`).
+    pub control_dir: Option<PathBuf>,
 }
 
 fn ms(d: Duration) -> u64 {
@@ -557,6 +560,7 @@ impl Registry {
             urgent: false,
             known_hosts_dirty: true,
             snapshot: None,
+            control_dir: None,
             neighbors: HashMap::new(),
             noted_ambiguity: BTreeSet::new(),
             removed_devices: BTreeSet::new(),
@@ -2587,6 +2591,25 @@ impl Registry {
         } else {
             (None, None)
         };
+        // Only a master LabLink opened with this device's pins may carry a
+        // session; never one the user's config named (ssh.options cannot
+        // set ControlPath, so this is the only one on the command line).
+        let mut ssh_options = self.ssh_cfg().options.clone();
+        let control_path = match (&alias, &self.control_dir) {
+            (Some(a), Some(dir)) if self.cfg.ssh.reuse_control_master => {
+                let pins: Vec<&str> = d
+                    .usable_pins()
+                    .iter()
+                    .map(|p| p.fingerprint.as_str())
+                    .collect();
+                lablink_ssh::control_path(dir, a, &pins)
+            }
+            _ => None,
+        };
+        ssh_options.insert(
+            "ControlPath".into(),
+            control_path.unwrap_or_else(|| "none".into()),
+        );
         Ok(ResolveResult {
             schema_version: SCHEMA_VERSION,
             name: d.cfg.name.clone(),
@@ -2608,7 +2631,7 @@ impl Registry {
             known_hosts_file: kh,
             ssh_binary: self.ssh_cfg().binary.clone(),
             connect_timeout_s: self.ssh_cfg().connect_timeout_s,
-            ssh_options: self.ssh_cfg().options.clone(),
+            ssh_options,
             proxy_command,
         })
     }
@@ -3852,6 +3875,44 @@ mod security_tests {
                 && pc.contains("StrictHostKeyChecking=yes"),
             "{pc}"
         );
+    }
+
+    #[test]
+    fn resolve_names_a_master_path_of_its_own_or_none() {
+        let k = fake_key("dev");
+        let cp = |r: &Registry, n: &str| r.resolve(n).unwrap().ssh_options["ControlPath"].clone();
+        let mut r = reg("devices:\n  - name: dev\n  - name: other\n");
+        for n in ["default/dev", "default/other"] {
+            let d = r.device_mut(n).unwrap();
+            d.rec.current_ip = Some("10.9.0.40".parse().unwrap());
+            d.identity = IdentityState::Unverified;
+        }
+        // Unpinned, or no private directory: never reuse a master.
+        assert_eq!(cp(&r, "dev"), "none");
+        r.control_dir = Some(PathBuf::from("/run/user/7/lablink"));
+        assert_eq!(cp(&r, "dev"), "none");
+        for n in ["default/dev", "default/other"] {
+            let d = r.device_mut(n).unwrap();
+            d.identity = IdentityState::Verified;
+            d.rec.pinned.push(PinnedKey {
+                key_type: k.key_type.clone(),
+                fingerprint: k.fingerprint.clone(),
+                public_key: k.public_key.clone(),
+                source: "trust".into(),
+                pinned_at_ms: 1,
+            });
+        }
+        // Pinned: a path in LabLink's directory, one per device even at
+        // the same address, user and port.
+        let dev = cp(&r, "dev");
+        assert!(
+            dev.starts_with("/run/user/7/lablink/") && dev.ends_with("-%C"),
+            "{dev}"
+        );
+        assert_ne!(dev, cp(&r, "other"));
+        // reuse_control_master: false
+        r.cfg.ssh.reuse_control_master = false;
+        assert_eq!(cp(&r, "dev"), "none");
     }
 
     #[test]
