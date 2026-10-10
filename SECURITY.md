@@ -118,10 +118,16 @@ LabLink is a policy layer over OpenSSH and the operating system:
   the absolute directories of your `PATH` (never the current directory) with
   your environment, and reads its configuration and pins under your home
   directory (from `HOME`, else the password database; never /tmp). It
-  refuses a configuration or state directory that another user could have
-  changed: one owned by someone other than you or root, writable by everyone
-  or by a group other than your own private group, or reached through a
-  directory or symbolic link of that kind. On shared or network homes, the
+  refuses a configuration, state directory or `~/.ssh/known_hosts` that
+  another user could have changed. The path is resolved from `/` one
+  component at a time, following symbolic links as the kernel does
+  (including links inside the targets of other links), and every directory,
+  link and file met on the way must belong to you or root, and no directory
+  or file may be writable by everyone (sticky directories such as /tmp
+  excepted) or by a group other than your private group (see Known
+  limitations). A path that cannot be resolved to a file, such as
+  `--config /dev/stdin` on a pipe, is refused, and the configuration is
+  read from the very file that was checked. On shared or network homes, the
   directories above yours must belong to root or to you.
 - **The operating system** separates users. Root, and anyone who can act as
   your user, can read LabLink's state, edit its pins and talk to its socket.
@@ -131,6 +137,22 @@ LabLink is a policy layer over OpenSSH and the operating system:
 
 ## Known limitations
 
+- **Group-writable files (umask 002).** A group may write LabLink's files
+  only if it is your *private group*: your primary group in the password
+  database (not the group a process runs as after `newgrp` or `sg`, or
+  under a service's `Group=`), named like your user, with no members other
+  than you, and not the primary group of any other account in
+  `/etc/passwd`. Accounts in a directory service (LDAP, Active Directory,
+  NIS) are not enumerated, so another directory account whose primary group
+  is your group is not seen; if your directory has such accounts, keep
+  LabLink's files and directories unwritable by group (`chmod g-w`). Where
+  the primary group is shared (such as AD's "Domain Users") or named
+  differently from the user, a umask of 002 makes LabLink refuse its
+  configuration and state directory: use a umask of 022, or `chmod g-w` the
+  files and directories it names. SSSD's `auto_private_groups` provides
+  private groups that LabLink accepts. The answer is looked up at most once
+  a minute, so a group change is noticed within a minute without a restart;
+  a failed lookup counts as no private group.
 - `ssh.reuse_control_master: true` (the default) lets background checks ride
   an OpenSSH ControlMaster connection you opened yourself; such a connection
   was verified by OpenSSH when it was opened, not by LabLink. Set it to

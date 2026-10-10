@@ -571,22 +571,48 @@ impl Config {
             path: path.display().to_string(),
             source,
         };
-        let len = std::fs::metadata(path).map_err(io)?.len();
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let refuse = |message: String| ConfigError::Parse {
+            path: path.display().to_string(),
+            message,
+        };
+        // A missing file stays an I/O error (NotFound), which callers handle.
+        std::fs::metadata(path).map_err(io)?;
         // The configuration names the programs LabLink runs and the keys it
-        // trusts, so a file another user could have written is refused.
-        if let Some(why) = crate::paths::writable_by_others(path) {
-            return Err(ConfigError::Parse {
-                path: path.display().to_string(),
-                message: format!("refusing a configuration other users can change: {why}"),
-            });
+        // trusts, so a file another user could have written is refused, and
+        // so is anything that cannot be resolved to a file (`/dev/stdin` on
+        // a pipe, `<(...)`).
+        let checked = crate::paths::trusted_metadata(path).map_err(|why| {
+            refuse(if why.starts_with("cannot check") {
+                format!("refusing the configuration: {why}")
+            } else {
+                format!("refusing a configuration other users can change: {why}")
+            })
+        })?;
+        if !checked.is_file() {
+            return Err(refuse("not a regular file".into()));
         }
+        // Read the very file that was checked, not whatever the path names by
+        // the time it is opened.
+        let mut file = std::fs::File::open(path).map_err(io)?;
+        let opened = file.metadata().map_err(io)?;
+        if (opened.dev(), opened.ino()) != (checked.dev(), checked.ino()) {
+            return Err(refuse(
+                "the file was replaced while it was being checked".into(),
+            ));
+        }
+        let len = opened.len();
         if len > MAX_CONFIG_BYTES {
-            return Err(ConfigError::Parse {
-                path: path.display().to_string(),
-                message: format!("file is {len} bytes; the limit is {MAX_CONFIG_BYTES}"),
-            });
+            return Err(refuse(format!(
+                "file is {len} bytes; the limit is {MAX_CONFIG_BYTES}"
+            )));
         }
-        let text = std::fs::read_to_string(path).map_err(io)?;
+        let mut text = String::new();
+        file.by_ref()
+            .take(MAX_CONFIG_BYTES + 1)
+            .read_to_string(&mut text)
+            .map_err(io)?;
         Self::parse(&text, &path.display().to_string())
     }
 

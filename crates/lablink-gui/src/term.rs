@@ -70,14 +70,34 @@ pub fn installed_terminals() -> Vec<&'static str> {
     CANDIDATES.into_iter().filter(|c| runnable(c)).collect()
 }
 
-/// `lablink` next to the current executable, else resolved on `$PATH`.
-pub fn lablink_binary() -> PathBuf {
-    std::env::current_exe()
+/// The `lablink` the terminal runs: the one next to the current executable,
+/// else the first in an absolute `$PATH` directory. Always an absolute path
+/// to an executable file no other user could have replaced; never a bare
+/// name, which the terminal would look up on its own `PATH` and from its own
+/// current directory.
+pub fn lablink_binary() -> Result<PathBuf, String> {
+    let beside = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join("lablink")))
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_file());
+    let found = beside
         .or_else(|| lablink_core::program::find("lablink").ok())
-        .unwrap_or_else(|| PathBuf::from("lablink"))
+        .ok_or_else(|| "cannot find the lablink program next to the app or in $PATH".to_string())?;
+    trusted_executable(&found)
+}
+
+/// `p` if it is an absolute path to an executable regular file that no other
+/// user could have written or replaced.
+fn trusted_executable(p: &Path) -> Result<PathBuf, String> {
+    if !p.is_absolute() {
+        return Err(format!("{} is not an absolute path", p.display()));
+    }
+    let m = lablink_core::paths::trusted_metadata(p)
+        .map_err(|why| format!("not running {}: {why}", p.display()))?;
+    if !m.is_file() || m.permissions().mode() & 0o111 == 0 {
+        return Err(format!("{} is not an executable file", p.display()));
+    }
+    Ok(p.to_path_buf())
 }
 
 /// Spawn a detached terminal running `lablink <args...>`, for commands that
@@ -96,7 +116,7 @@ pub fn open_lablink_in_terminal(
         "no terminal emulator found (choose one in Settings, set $TERMINAL, or install gnome-terminal, konsole or xterm)"
             .to_string()
     })?;
-    let (program, args) = terminal_command(&found, &lablink_binary(), lablink_args);
+    let (program, args) = terminal_command(&found, &lablink_binary()?, lablink_args);
     let mut child = lablink_core::program::command(&program)
         .map_err(|e| format!("failed to start {program}: {e}"))?
         .args(&args)
@@ -156,6 +176,31 @@ mod tests {
     fn other_lablink_commands() {
         let (_, a) = terminal_command("xterm", Path::new("/l"), &["copy-id", "robot"]);
         assert_eq!(a, ["-e", "/l", "copy-id", "robot"]);
+    }
+
+    /// The terminal is only ever handed an absolute, executable `lablink`
+    /// that no other user could have replaced, never a bare name it would
+    /// look up itself.
+    #[test]
+    fn only_a_trusted_absolute_lablink_is_run() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("lablink");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        let mode = |m: u32| std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(m));
+        mode(0o755).unwrap();
+        assert_eq!(trusted_executable(&exe).unwrap(), exe);
+        assert!(trusted_executable(Path::new("lablink")).is_err());
+        mode(0o644).unwrap();
+        assert!(trusted_executable(&exe).is_err(), "not executable");
+        mode(0o757).unwrap();
+        let why = trusted_executable(&exe).unwrap_err();
+        assert!(why.contains("writable by every user"), "{why}");
+        assert!(trusted_executable(&d.path().join("missing")).is_err());
+        assert!(trusted_executable(d.path()).is_err(), "a directory");
+        // Whatever is found, the result is absolute.
+        if let Ok(p) = lablink_binary() {
+            assert!(p.is_absolute(), "{}", p.display());
+        }
     }
 
     #[test]

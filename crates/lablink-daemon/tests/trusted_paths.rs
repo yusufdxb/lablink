@@ -102,3 +102,35 @@ fn a_configuration_others_can_change_is_refused() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A configuration that cannot be resolved to a file, here `/dev/stdin` on a
+/// pipe, is refused rather than read unchecked.
+#[test]
+fn a_configuration_on_a_pipe_is_refused() {
+    use std::io::Write;
+    let t = tempfile::tempdir().unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_lablinkd"))
+        .args(["--no-netlink", "--no-mdns", "--no-startup-discovery"])
+        .arg("--socket")
+        .arg(t.path().join("run/lablinkd.sock"))
+        .args(["--config", "/dev/stdin", "--check-config"])
+        .env("LABLINK_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A valid configuration, so only the path decides.
+    let _ = c
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"ssh:\n  binary: /bin/true\n");
+    let out = c.wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("refusing the configuration: cannot check /dev/stdin"),
+        "{err}"
+    );
+}
