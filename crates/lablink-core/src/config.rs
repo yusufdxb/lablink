@@ -239,8 +239,9 @@ pub struct SshConfig {
     /// key (the master checked it when it connected); set false to force every
     /// background check onto a fresh, LabLink-verified connection.
     pub reuse_control_master: bool,
-    /// Extra `-o Key=Value` options appended to every invocation. Options that
-    /// would weaken host-key checking are rejected at validation time.
+    /// Extra `-o Key=Value` options appended to every invocation. Only
+    /// allowlisted options are accepted (see `ALLOWED_SSH_OPTIONS`); they are
+    /// never taken from an imported file.
     pub options: BTreeMap<String, String>,
 }
 
@@ -404,26 +405,69 @@ pub enum ConfigError {
     Invalid(Vec<String>),
 }
 
-/// SSH options that would weaken host authentication and are never accepted
-/// through `ssh.options`.
-const FORBIDDEN_SSH_OPTIONS: &[&str] = &[
-    "stricthostkeychecking",
-    "userknownhostsfile",
-    "globalknownhostsfile",
-    "hostkeyalias",
-    "checkhostip",
-    "updatehostkeys",
-    "hostname",
-    "proxycommand",
-    "proxyjump",
-    "localcommand",
-    "permitlocalcommand",
-    "knownhostscommand",
-    "verifyhostkeydns",
-    "controlpath",
-    "controlmaster",
-    "remotecommand",
+/// The only OpenSSH options accepted in `ssh.options` (lower case). This is an
+/// allowlist: anything else could weaken host-key checking or addressing
+/// (`StrictHostKeyChecking`, `HostName`, `ProxyCommand`, ...), run or load
+/// code (`LocalCommand`, `PKCS11Provider`, `SecurityKeyProvider`, ...), hand
+/// the device the user's agent or display (`ForwardAgent`, `ForwardX11*`),
+/// open listeners (`*Forward`, `Tunnel`) or send local environment
+/// (`SetEnv`, `SendEnv`). LabLink sets addressing, host-key and batch options
+/// itself.
+const ALLOWED_SSH_OPTIONS: &[&str] = &[
+    "addkeystoagent",
+    "addressfamily",
+    "certificatefile",
+    "ciphers",
+    "compression",
+    "connectionattempts",
+    "fingerprinthash",
+    "gssapiauthentication",
+    "hostkeyalgorithms",
+    "identitiesonly",
+    "identityfile",
+    "ipqos",
+    "kbdinteractiveauthentication",
+    "kexalgorithms",
+    "loglevel",
+    "macs",
+    "numberofpasswordprompts",
+    "passwordauthentication",
+    "preferredauthentications",
+    "pubkeyacceptedalgorithms",
+    "pubkeyauthentication",
+    "rekeylimit",
+    "serveralivecountmax",
+    "serveraliveinterval",
+    "tcpkeepalive",
 ];
+
+/// Options accepted only to switch a feature OFF (value `no`).
+const OFF_ONLY_SSH_OPTIONS: &[&str] = &["forwardagent", "forwardx11", "forwardx11trusted"];
+
+/// Why `ssh.options.<k>` is refused, or None when it is acceptable.
+fn ssh_option_problem(k: &str, v: &str) -> Option<String> {
+    let lk = k.to_ascii_lowercase();
+    if OFF_ONLY_SSH_OPTIONS.contains(&lk.as_str()) {
+        if v.trim().eq_ignore_ascii_case("no") {
+            return None;
+        }
+        return Some(format!(
+            "ssh.options.{k} may only be 'no': LabLink never forwards your agent or display to a device"
+        ));
+    }
+    if !ALLOWED_SSH_OPTIONS.contains(&lk.as_str()) {
+        return Some(format!(
+            "ssh.options.{k} is not allowed: LabLink controls host-key verification, addressing and forwarding itself (allowed: {})",
+            ALLOWED_SSH_OPTIONS.join(", ")
+        ));
+    }
+    if !valid_ssh_option(k, v) {
+        return Some(format!(
+            "ssh.options.{k}: option names are letters only and values must be one line without '=' tricks"
+        ));
+    }
+    None
+}
 
 /// Largest configuration file LabLink reads (import files too).
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -524,14 +568,8 @@ impl Config {
             errs.push("ssh.connect_timeout_s must be between 1 and 120".into());
         }
         for (k, v) in &self.ssh.options {
-            if FORBIDDEN_SSH_OPTIONS.contains(&k.to_ascii_lowercase().as_str()) {
-                errs.push(format!(
-                    "ssh.options.{k} is not allowed: LabLink controls host-key verification and addressing itself"
-                ));
-            } else if !valid_ssh_option(k, v) {
-                errs.push(format!(
-                    "ssh.options.{k}: option names are letters only and values must be one line without '=' tricks"
-                ));
+            if let Some(e) = ssh_option_problem(k, v) {
+                errs.push(e);
             }
         }
         for (what, bin) in [
@@ -1329,6 +1367,46 @@ devices:
             let e = errors(&format!("ssh:\n  options:\n    {opt}: x\n"));
             assert_eq!(e.len(), 1, "{opt}: {e:?}");
         }
+    }
+
+    #[test]
+    fn code_loading_forwarding_and_env_options_rejected() {
+        // Options that load code into ssh, hand the remote host the user's
+        // agent or display, open listeners, or send local environment are not
+        // on the allowlist (a denylist missed them before 0.3.1).
+        for opt in [
+            "PKCS11Provider",
+            "SecurityKeyProvider",
+            "ForwardAgent",
+            "ForwardX11Trusted",
+            "RemoteForward",
+            "LocalForward",
+            "DynamicForward",
+            "SetEnv",
+            "SendEnv",
+            "IdentityAgent",
+            "NoHostAuthenticationForLocalhost",
+            "Tunnel",
+            "Include",
+            "Match",
+        ] {
+            let e = errors(&format!("ssh:\n  options:\n    {opt}: 'yes'\n"));
+            assert_eq!(e.len(), 1, "{opt} must be refused: {e:?}");
+            assert!(e[0].contains(opt), "{e:?}");
+        }
+        // Turning forwarding OFF is allowed; turning it on is not.
+        assert!(
+            errors("ssh:\n  options:\n    ForwardAgent: 'no'\n    ForwardX11: 'no'\n").is_empty()
+        );
+        assert_eq!(
+            errors("ssh:\n  options:\n    forwardagent: 'yes'\n").len(),
+            1
+        );
+        // Ordinary tuning keeps working, in any case.
+        assert!(errors(
+            "ssh:\n  options:\n    ServerAliveInterval: '10'\n    identitiesonly: 'yes'\n    IdentityFile: '~/.ssh/id_lab'\n    HostKeyAlgorithms: '+ssh-rsa'\n"
+        )
+        .is_empty());
     }
 
     #[test]

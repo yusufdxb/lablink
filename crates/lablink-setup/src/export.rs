@@ -364,17 +364,33 @@ pub fn plan(current: &Config, doc: &ExportDoc, opts: ImportOptions) -> Result<Im
         }
     }
 
-    // OpenSSH binary paths are local facts and decide what LabLink executes:
-    // they are never taken from a file.
+    // OpenSSH binary paths and options are local facts that decide what
+    // LabLink executes and what OpenSSH sends to devices: they are never
+    // taken from a file.
     let mut file_ssh = doc.config.ssh.clone();
     file_ssh.binary = cfg.ssh.binary.clone();
     file_ssh.keyscan_binary = cfg.ssh.keyscan_binary.clone();
     file_ssh.keygen_binary = cfg.ssh.keygen_binary.clone();
+    if doc.config.ssh.options != cfg.ssh.options && !doc.config.ssh.options.is_empty() {
+        skipped.push(format!(
+            "ssh.options: never imported (the file has {}); set them yourself if you want them",
+            doc.config
+                .ssh
+                .options
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    file_ssh.options = cfg.ssh.options.clone();
     if doc.config.daemon != cfg.daemon || file_ssh != cfg.ssh {
         if opts.replace {
             cfg.daemon = doc.config.daemon.clone();
             cfg.ssh = file_ssh;
-            changes.push("daemon and ssh settings: replaced (OpenSSH program paths kept)".into());
+            changes.push(
+                "daemon and ssh settings: replaced (OpenSSH program paths and options kept)".into(),
+            );
         } else {
             skipped.push(
                 "daemon and ssh settings: kept yours (use --replace to take the file's)".into(),
@@ -652,6 +668,38 @@ mod tests {
         assert_eq!(p.config.ssh.binary, "ssh");
         assert_eq!(p.config.ssh.connect_timeout_s, 9);
         assert_eq!(p.config.preferences.terminal, None);
+    }
+
+    #[test]
+    fn import_never_takes_ssh_options_even_with_replace() {
+        // A crafted file must not be able to forward the user's agent to the
+        // lab devices (or load a PKCS#11 library) through `--replace`.
+        let file = "lablink_export: 1\nconfig:\n  ssh:\n    connect_timeout_s: 9\n    options:\n      ServerAliveInterval: '7'\n      ForwardAgent: 'no'\n";
+        let doc = parse(file).unwrap();
+        let mine = Config::parse("ssh:\n  options:\n    ServerAliveInterval: '30'\n", "t").unwrap();
+        let p = plan(
+            &mine,
+            &doc,
+            ImportOptions {
+                replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(p.config.ssh.options, mine.ssh.options, "{p:?}");
+        assert_eq!(p.config.ssh.connect_timeout_s, 9);
+        assert!(
+            p.skipped
+                .iter()
+                .any(|s| s.contains("ssh.options") && s.contains("ForwardAgent")),
+            "{:?}",
+            p.skipped
+        );
+        // Files carrying options LabLink never accepts are refused outright.
+        assert!(parse(
+            "lablink_export: 1\nconfig:\n  ssh:\n    options:\n      PKCS11Provider: /tmp/x.so\n"
+        )
+        .is_err());
     }
 
     #[test]
