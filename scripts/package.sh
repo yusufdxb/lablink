@@ -10,8 +10,8 @@
 #
 # Environment:
 #   LABLINK_GIT_SHA      commit embedded in the binaries (default: git HEAD)
-#   LABLINK_MAINTAINER   Debian Maintainer field (default: a placeholder)
-#   LABLINK_HOMEPAGE     Debian Homepage field (default: none)
+#   LABLINK_MAINTAINER   Debian Maintainer field (default: the project maintainer)
+#   LABLINK_HOMEPAGE     Debian Homepage field (default: the project repository)
 #   LABLINK_MAX_GLIBC    refuse binaries needing a newer glibc (default 2.31)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,7 +22,8 @@ sha=${LABLINK_GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
 if [ -z "${LABLINK_GIT_SHA:-}" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     sha="$sha-dirty"
 fi
-maintainer=${LABLINK_MAINTAINER:-"LabLink maintainers <maintainers@lablink.invalid>"}
+maintainer=${LABLINK_MAINTAINER:-"Yusuf Guenena <253617803+yusufdxb@users.noreply.github.com>"}
+homepage=${LABLINK_HOMEPAGE:-https://github.com/yusufdxb/lablink}
 # Reproducible archives: every timestamp is the commit time (scripts/release.sh
 # passes it), so rebuilding a commit gives byte-identical artifacts.
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct HEAD 2>/dev/null || echo 0)}
@@ -94,6 +95,7 @@ install -m 644 $doc_files "$d/usr/share/doc/lablink/"
 cat > "$d/usr/share/doc/lablink/copyright" <<COPYRIGHT
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: LabLink
+Source: https://github.com/yusufdxb/lablink
 
 Files: *
 Copyright: The LabLink Authors (see NOTICE)
@@ -115,7 +117,7 @@ size=$(du -sk "$d/usr" | cut -f1)
     echo "Recommends: bash-completion"
     echo "Section: net"
     echo "Priority: optional"
-    if [ -n "${LABLINK_HOMEPAGE:-}" ]; then echo "Homepage: $LABLINK_HOMEPAGE"; fi
+    echo "Homepage: $homepage"
     cat <<'DESC'
 Description: find lab machines and robots and SSH to them by name
  LabLink is a small per-user daemon (lablinkd), CLI (lablink) and desktop

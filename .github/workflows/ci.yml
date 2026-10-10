@@ -89,7 +89,7 @@ jobs:
     # container (glibc 2.31 baseline) from a clean `git archive` of HEAD,
     # with a CycloneDX SBOM (scripts/sbom.sh) and SHA256SUMS. Tagged builds
     # also get a signed SLSA build-provenance attestation (Sigstore, keyless),
-    # verifiable with `gh attestation verify <file> --repo <owner>/<repo>`.
+    # verifiable with `gh attestation verify <file> --repo yusufdxb/lablink`.
     timeout-minutes: 60
     runs-on: ubuntu-24.04
     needs: [lint, test, dependencies, secrets]

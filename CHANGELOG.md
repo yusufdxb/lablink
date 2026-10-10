@@ -4,7 +4,9 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] - Unreleased
+## [Unreleased]
+
+## [0.3.0] - 2026-10-10
 
 First public release.
 
@@ -97,3 +99,5 @@ Earlier in the 0.3.0 cycle:
 - `ssh.options` values and the OpenSSH program paths are validated.
 - LabLink no longer starts, restarts or stops a systemd user service whose
   manager runs with a different home or config directory.
+
+[0.3.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.0

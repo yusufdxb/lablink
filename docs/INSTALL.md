@@ -15,7 +15,7 @@ build image, minimum glibc, build timestamp), a CycloneDX SBOM
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify lablink_<version>_amd64.deb --repo <owner>/<repo>
+gh attestation verify lablink_<version>_amd64.deb --repo yusufdxb/lablink
 ```
 
 The attestation shows the file was built by the project's CI from the tagged
@@ -104,5 +104,5 @@ Release artifacts are built with `scripts/release.sh`: it takes a clean
 `git archive` of the committed HEAD, builds it in the pinned Ubuntu 20.04
 container (`packaging/build.Dockerfile`) with the toolchain from
 `rust-toolchain.toml`, refuses binaries that need a glibc newer than 2.31,
-and writes `dist/`. Set `LABLINK_MAINTAINER` and `LABLINK_HOMEPAGE` to fill
-the Debian package's fields.
+and writes `dist/`. `LABLINK_MAINTAINER` and `LABLINK_HOMEPAGE` override the
+Debian package's Maintainer and Homepage fields.

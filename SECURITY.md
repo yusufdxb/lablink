@@ -2,13 +2,14 @@
 
 ## Reporting a vulnerability
 
-Please report security problems privately, not in public issues: use the
-repository's **Security -> Report a vulnerability** form (GitHub private
-vulnerability reporting). If that form is not available, open a public issue
-that only asks for a private contact, without details. Include the LabLink
-version (`lablink version`), what you did, what happened, and what you
-expected. A sanitized `lablink support-bundle` is welcome; review it before
-attaching.
+Please report security problems privately, not in public issues, through
+GitHub private vulnerability reporting:
+<https://github.com/yusufdxb/lablink/security/advisories/new> (**Security ->
+Report a vulnerability** on the repository page). If that form is not
+available, open a public issue that only asks for a private contact, without
+details. Include the LabLink version (`lablink version`), what you did, what
+happened, and what you expected. A sanitized `lablink support-bundle` is
+welcome; review it before attaching.
 
 What to expect:
 

@@ -70,8 +70,8 @@ In CI, a `v*` tag also gets a Sigstore build-provenance attestation for the
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify lablink_<version>_amd64.deb --repo <owner>/<repo> \
-    --signer-workflow <owner>/<repo>/.github/workflows/ci.yml \
+gh attestation verify lablink_<version>_amd64.deb --repo yusufdxb/lablink \
+    --signer-workflow yusufdxb/lablink/.github/workflows/ci.yml \
     --source-ref refs/tags/v<version> --deny-self-hosted-runners
 ```
 

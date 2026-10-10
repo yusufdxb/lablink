@@ -7,8 +7,8 @@
 # Output: dist/ (.deb, tarball, CycloneDX SBOM, SHA256SUMS, BUILDINFO).
 #
 # Usage: scripts/release.sh
-#   LABLINK_MAINTAINER="Name <email>"   Debian Maintainer field (optional)
-#   LABLINK_HOMEPAGE=https://...        Debian Homepage field (optional)
+#   LABLINK_MAINTAINER="Name <email>"   override the Debian Maintainer field
+#   LABLINK_HOMEPAGE=https://...        override the Debian Homepage field
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
