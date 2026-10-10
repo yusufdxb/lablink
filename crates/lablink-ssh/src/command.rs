@@ -31,6 +31,16 @@ impl Target {
                 r.name
             ));
         }
+        if let Some(kh) = &r.known_hosts_file {
+            if ssh_path_word(std::path::Path::new(kh)).is_none() {
+                return Err(format!(
+                    "refusing to connect to '{}': LabLink's known_hosts path {kh} contains a character \
+                     OpenSSH would not read literally (\", \\, %, $ or a control character); \
+                     set LABLINK_STATE_DIR to a plain path",
+                    r.name
+                ));
+            }
+        }
         Ok(Self {
             binary: r.ssh_binary.clone(),
             ip: r.ip.clone(),
@@ -144,6 +154,19 @@ fn supports_known_hosts_command(binary: &str) -> bool {
     supports_option(binary, "KnownHostsCommand=none")
 }
 
+/// `p` as one OpenSSH option word. OpenSSH parses a `-o` value like a
+/// config line, so the path goes in double quotes: a space, `'` or `#` then
+/// stays part of it. `None` for characters that quoting does not make
+/// literal on every supported OpenSSH: `"` and `\` (quoting), `%` and `$`
+/// (expanded by 8.4 and later, not by 8.2), and control characters.
+pub fn ssh_path_word(p: &std::path::Path) -> Option<String> {
+    let s = p.to_str()?;
+    if s.chars().any(|c| c.is_control() || "\"\\%$".contains(c)) {
+        return None;
+    }
+    Some(format!("\"{s}\""))
+}
+
 fn opt(args: &mut Vec<String>, k: &str, v: impl AsRef<str>) {
     args.push("-o".into());
     args.push(format!("{k}={}", v.as_ref()));
@@ -171,7 +194,10 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
     // Host-key policy for verified devices.
     if let (Some(alias), Some(kh)) = (&t.host_key_alias, &t.known_hosts_file) {
         opt(&mut a, "HostKeyAlias", alias);
-        opt(&mut a, "UserKnownHostsFile", kh.display().to_string());
+        // A path ssh cannot be given literally is refused by `from_resolve`;
+        // here it fails closed: no key matches an empty file.
+        let kh = ssh_path_word(kh).unwrap_or_else(|| "/dev/null".into());
+        opt(&mut a, "UserKnownHostsFile", kh);
         opt(&mut a, "GlobalKnownHostsFile", "/dev/null");
         opt(&mut a, "StrictHostKeyChecking", "yes");
         opt(&mut a, "UpdateHostKeys", "no");
@@ -353,7 +379,7 @@ mod tests {
         for o in [
             "HostName=192.168.10.71",
             "HostKeyAlias=lablink.jetson-a",
-            "UserKnownHostsFile=/s/known_hosts",
+            "UserKnownHostsFile=\"/s/known_hosts\"",
             "StrictHostKeyChecking=yes",
             "GlobalKnownHostsFile=/dev/null",
         ] {
@@ -670,6 +696,83 @@ mod tests {
         };
         assert!(Target::from_resolve(&r).is_err());
     }
+
+    fn resolved() -> ResolveResult {
+        ResolveResult {
+            schema_version: 1,
+            name: "jetson-a".into(),
+            id: "site-alpha/jetson-a".into(),
+            site_name: "Site Alpha".into(),
+            shared_name: false,
+            site_away: false,
+            ip: "192.0.2.4".into(),
+            port: 22,
+            ssh_host: "jetson-a".into(),
+            username: None,
+            identity: IdentityState::Verified,
+            color: lablink_core::model::Color::Green,
+            network: lablink_core::model::NetworkState::Online,
+            host_key_alias: Some("lablink.site-alpha.jetson-a".into()),
+            known_hosts_file: Some("/s/known_hosts".into()),
+            ssh_binary: "ssh".into(),
+            connect_timeout_s: 5,
+            ssh_options: Default::default(),
+            proxy_command: None,
+        }
+    }
+
+    #[test]
+    fn the_known_hosts_path_is_one_literal_word_for_openssh() {
+        // OpenSSH splits an unquoted value at spaces (the pin file would be
+        // two other files, one relative to the working directory) and
+        // rejects a bare `'`. Quoted, both are literal on 8.2 to 9.x.
+        for (path, word) in [
+            ("/s/known_hosts", "\"/s/known_hosts\""),
+            (
+                "/home/a b/state/known_hosts",
+                "\"/home/a b/state/known_hosts\"",
+            ),
+            ("/home/it's/#x/known_hosts", "\"/home/it's/#x/known_hosts\""),
+        ] {
+            assert_eq!(
+                ssh_path_word(std::path::Path::new(path)).as_deref(),
+                Some(word)
+            );
+            let mut t = target(true);
+            t.known_hosts_file = Some(PathBuf::from(path));
+            let a = build_args(&t, &Mode::Interactive, &[]);
+            assert_eq!(values(&a, "UserKnownHostsFile"), [word], "{a:?}");
+            let p = proxy_command_through(&t, true);
+            assert!(
+                p.contains(&shell_quote(&format!("UserKnownHostsFile={word}"))),
+                "{p}"
+            );
+        }
+        // `%` and `$` are expanded by some OpenSSH versions and not others;
+        // quotes and backslashes change the quoting. Such a path is refused,
+        // and a Target built anyway gets a file that matches no key.
+        for path in [
+            "/s/100%/known_hosts",
+            "/s/%h/known_hosts",
+            "/s/${HOME}/known_hosts",
+            "/s/a\"b/known_hosts",
+            "/s/a\\b/known_hosts",
+            "/s/a\nb/known_hosts",
+        ] {
+            assert_eq!(ssh_path_word(std::path::Path::new(path)), None, "{path}");
+            let mut t = target(true);
+            t.known_hosts_file = Some(PathBuf::from(path));
+            let a = build_args(&t, &Mode::Interactive, &[]);
+            assert_eq!(values(&a, "UserKnownHostsFile"), ["/dev/null"], "{a:?}");
+            let r = ResolveResult {
+                known_hosts_file: Some(path.into()),
+                ..resolved()
+            };
+            let e = Target::from_resolve(&r).unwrap_err();
+            assert!(e.contains("LABLINK_STATE_DIR"), "{e}");
+        }
+        assert!(Target::from_resolve(&resolved()).is_ok());
+    }
 }
 
 /// Quote one argument for a POSIX shell (OpenSSH runs ProxyCommand via `sh -c`).
@@ -742,15 +845,15 @@ mod proxy_tests {
             ip: "10.0.0.1".into(),
             port: 22,
             ssh_host: "gw".into(),
-            username: None,
+            username: Some("op%r".into()),
             host_key_alias: Some("lablink.s.gw".into()),
-            known_hosts_file: Some(PathBuf::from("/s/100%/known_hosts")),
+            known_hosts_file: Some(PathBuf::from("/s/known_hosts")),
             connect_timeout_s: 5,
             options: Default::default(),
             proxy_command: None,
         };
         let p = proxy_command_through(&gw, true);
-        assert!(p.contains("UserKnownHostsFile=/s/100%%/known_hosts"), "{p}");
+        assert!(p.contains(" -l op%%r "), "{p}");
         assert!(p.contains(" -W %h:%p "), "{p}");
     }
 
@@ -772,7 +875,7 @@ mod proxy_tests {
         assert!(p.starts_with("ssh -o HostName=192.168.10.70"), "{p}");
         assert!(p.contains("HostKeyAlias=lablink.jetson-a"));
         assert!(p.contains("StrictHostKeyChecking=yes"));
-        assert!(p.contains("'UserKnownHostsFile=/s/known hosts'"));
+        assert!(p.contains("'UserKnownHostsFile=\"/s/known hosts\"'"), "{p}");
         assert!(p.contains("BatchMode=yes"));
         assert!(p.ends_with("-W %h:%p -- jetson-a"), "{p}");
         // The hop never forwards, listens or runs a LocalCommand, prompted or not.
@@ -861,7 +964,7 @@ mod probe_parity_tests {
         for must in [
             "HostKeyAlias=lablink.jetson-a",
             "StrictHostKeyChecking=yes",
-            "UserKnownHostsFile=/s/known_hosts",
+            "UserKnownHostsFile=\"/s/known_hosts\"",
             "BatchMode=yes",
         ] {
             assert!(

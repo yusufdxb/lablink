@@ -2,8 +2,8 @@
 
 Run everything with `cargo test --workspace --locked` (including an opt-in soak test). The ordinary suite needs no robot, lab network or running LabLink.
 Additional foreign-user and kernel permission probes require root in a
-disposable container:
-tests isolate state and socket directories. The hostile SSH configuration
+disposable container (see below). All tests isolate state and socket
+directories. The hostile SSH configuration
 tests are opt-in and rewrite the test user's SSH config, so run them only in
 disposable containers. Root-only foreign-user tests drop a child UID inside
 the container; ordinary runs explicitly skip those probes. No test changes

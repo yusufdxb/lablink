@@ -54,6 +54,12 @@ whether its identity is verified, and whether SSH login works.
    `stdout`, `stderr`, `status` (`ok` | `remote_error` | `ssh_error` |
    `timeout`), `duration_ms`, and `identity_pinned`.
 
+   `--timeout`, Ctrl-C and SIGTERM stop LabLink's local ssh. `exec` runs
+   the command without a terminal, so the device does not signal it when
+   the connection closes: a command that does not write output may keep
+   running there. Bound long commands on the device itself, for example
+   `lablink exec jetson-a "timeout 25 ./job.sh" --timeout 30`.
+
 3. **Need an address for scp/rsync?**
 
    ```bash
@@ -105,7 +111,7 @@ are not fallback triggers either: report them.
 | 7 | Refused by policy: scan outside limits, trust or forget not confirmed, device has no pinned host key (`ssh`/`exec`; `--unpinned` to let OpenSSH decide), address not identity-verified (`resolve`; `--force` prints it anyway) | `discover --scan-cidr`, `trust`, `forget`, `adopt`, `ssh`, `exec`, `resolve` |
 | 8 | Ambiguous device name: it exists at several sites; use `site/name` | device commands |
 | 10 / 11 / 12 | `status <device>` is YELLOW / RED / GRAY (GRAY includes AWAY) | `status <device>`, `doctor` |
-| 124 | `exec --timeout` expired; the remote command was killed | `exec` |
+| 124 | `exec --timeout` expired; the local ssh was stopped (the remote command may still be running, see below) | `exec` |
 | 255 | The OpenSSH client failed (connection, authentication, host key) | `exec`, `ssh` |
 | anything else | For `exec` and `ssh`: the remote command's own exit code, passed through unchanged | `exec`, `ssh` |
 

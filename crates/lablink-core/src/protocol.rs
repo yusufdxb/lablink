@@ -55,8 +55,14 @@ pub enum Request {
         #[serde(default)]
         scan_cidr: Option<String>,
     },
-    /// Resolve a device to everything needed to launch OpenSSH.
-    Resolve { device: String },
+    /// Resolve a device to everything needed to launch OpenSSH. `batch`: the
+    /// caller runs ssh without prompts (`exec`, doctor, the app), so a
+    /// gateway hop gets `BatchMode=yes` too instead of stopping on a prompt.
+    Resolve {
+        device: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        batch: bool,
+    },
     /// Scan the device's host keys. Without `confirm` this is a preview; with
     /// `confirm` set to the exact fingerprints the user approved, they are
     /// pinned if a fresh scan still returns exactly those keys.

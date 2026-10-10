@@ -93,6 +93,7 @@ fn device_located_verified_and_green() {
         .client()
         .call_typed(&Request::Resolve {
             device: "jetson-a".into(),
+            batch: false,
         })
         .unwrap();
     assert_eq!(r.ip, "10.9.0.31");
@@ -148,6 +149,7 @@ fn ip_change_is_followed_by_fingerprint() {
         .client()
         .call_typed(&Request::Resolve {
             device: "jetson-a".into(),
+            batch: false,
         })
         .unwrap();
     assert_eq!(r.ip, "10.9.0.44");
@@ -206,6 +208,7 @@ fn host_key_mismatch_is_red_and_never_accepted() {
         .client()
         .call(&Request::Resolve {
             device: "jetson-a".into(),
+            batch: false,
         })
         .unwrap_err();
     match err {
@@ -287,7 +290,8 @@ fn mismatch_survives_restart_and_clears_when_the_pin_is_proven_again() {
     assert!(d
         .client()
         .call(&Request::Resolve {
-            device: "jetson-a".into()
+            device: "jetson-a".into(),
+            batch: false,
         })
         .is_err());
     // The genuine machine returns with the pinned key.
@@ -886,6 +890,7 @@ fn unpinned_device_trusted_from_user_known_hosts_or_explicit_trust() {
         .client()
         .call_typed(&Request::Resolve {
             device: "fresh".into(),
+            batch: false,
         })
         .unwrap();
     assert!(r.host_key_alias.is_none());
@@ -932,6 +937,7 @@ fn unpinned_device_trusted_from_user_known_hosts_or_explicit_trust() {
         .client()
         .call_typed(&Request::Resolve {
             device: "fresh".into(),
+            batch: false,
         })
         .unwrap();
     assert_eq!(r.host_key_alias.as_deref(), Some("lablink.default.fresh"));
@@ -1315,6 +1321,7 @@ fn device_behind_gateway_is_checked_through_it_never_directly() {
         .client()
         .call_typed(&Request::Resolve {
             device: "payload".into(),
+            batch: false,
         })
         .unwrap();
     assert_eq!(r.host_key_alias.as_deref(), Some("lablink.default.payload"));
@@ -1750,6 +1757,7 @@ fn removed_devices_are_forgotten_and_forget_clears_trust() {
         .client()
         .call_typed(&Request::Resolve {
             device: "dev1".into(),
+            batch: false,
         })
         .unwrap();
     assert!(r.host_key_alias.is_none(), "{r:?}");

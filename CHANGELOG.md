@@ -18,6 +18,14 @@ All notable changes are listed here. The format follows
 - Write pinned keys through exclusive no-follow temporary files.
 - Remove arbitrary remote output from support bundles, redact additional
   address and secret forms, and omit local archive owner names.
+- Pass LabLink's known_hosts path to OpenSSH as one quoted word, and refuse
+  a state directory whose path OpenSSH would expand or re-quote (`%`, `$`,
+  `"`, `\`, control characters). Before, a space in the path made OpenSSH
+  read two other files, one relative to the working directory.
+- Refuse a state file or journal with more than one link.
+- A gateway hop of a batch `exec`, `doctor` or app action never prompts.
+- Installers refuse a prefix containing `=`; `uninstall --purge` leaves a
+  custom `LABLINK_STATE_DIR` in place.
 
 ### Fixed
 
@@ -34,6 +42,12 @@ All notable changes are listed here. The format follows
 - Version diagnostics include the daemon build and warn about stale builds.
 - Removed devices are forgotten; `lablink forget` clears runtime trust.
 - Adopted devices at different sites use distinct default SSH Host names.
+- The login check of a device with a username override checks only that
+  user, the one `ssh` and `exec` use.
+- `exec --timeout` says that the local ssh was stopped and the remote command
+  may still be running, instead of claiming it was killed.
+- Concurrent known_hosts writes land in order; at most 20 configuration
+  backups are kept per file.
 
 ## [0.3.0] - 2026-10-10
 

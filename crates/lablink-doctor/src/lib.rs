@@ -600,6 +600,7 @@ fn session(
     };
     let r: ResolveResult = match client.call_typed(&Request::Resolve {
         device: host.to_string(),
+        batch: true,
     }) {
         Ok(r) => r,
         Err(ClientError::Api(a)) => {

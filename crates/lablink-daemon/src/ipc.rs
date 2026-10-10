@@ -325,8 +325,8 @@ async fn dispatch(state: &Arc<State>, req: Request) -> Result<serde_json::Value,
                 )),
             }
         }
-        Request::Resolve { device } => {
-            let r = state.reg().resolve(&device)?;
+        Request::Resolve { device, batch } => {
+            let r = state.reg().resolve(&device, batch)?;
             if r.host_key_alias.is_some() {
                 ensure_known_hosts(state).await;
             }

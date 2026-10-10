@@ -791,7 +791,10 @@ fn run(cli: Cli, client: &Client) -> R {
             json,
             force,
         } => {
-            let r: ResolveResult = client.call_typed(&Request::Resolve { device })?;
+            let r: ResolveResult = client.call_typed(&Request::Resolve {
+                device,
+                batch: false,
+            })?;
             if r.site_away && !force {
                 return Err(Fail::new(
                     exit::DEVICE_UNREACHABLE,
@@ -1239,9 +1242,11 @@ fn resolve_target(
     device: &str,
     user: Option<String>,
     (force, unpinned): (bool, bool),
+    batch: bool,
 ) -> Result<(ResolveResult, Target), Fail> {
     let r: ResolveResult = client.call_typed(&Request::Resolve {
         device: device.into(),
+        batch,
     })?;
     if r.host_key_alias.is_none() && !unpinned {
         return Err(Fail::new(
@@ -1317,7 +1322,7 @@ fn cmd_ssh(
     extra: &[String],
 ) -> R {
     use std::os::unix::process::CommandExt;
-    let (r, t) = resolve_target(client, device, user, force)?;
+    let (r, t) = resolve_target(client, device, user, force, false)?;
     let args = build_args(&t, &Mode::Interactive, extra);
     if !quiet {
         let who = t
@@ -1369,7 +1374,7 @@ fn cmd_exec(
             "--interactive-auth cannot be combined with --json",
         ));
     }
-    let (r, t) = resolve_target(client, device, user, force)?;
+    let (r, t) = resolve_target(client, device, user, force, !interactive)?;
     let args = build_args(
         &t,
         &Mode::Exec {
@@ -1484,7 +1489,8 @@ fn cmd_exec(
         }));
     } else if out.timed_out {
         eprintln!(
-            "lablink: command timed out after {timeout}s on {} and was killed",
+            "lablink: command timed out after {timeout}s on {}: the local ssh was stopped, \
+             but the remote command may still be running (bound it on the device, e.g. `timeout {timeout} <cmd>`)",
             shown(&r)
         );
     } else if r.shared_name {

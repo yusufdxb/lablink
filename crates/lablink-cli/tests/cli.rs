@@ -278,7 +278,11 @@ fn exec_preserves_exit_code_output_and_pins_host_key() {
         .find(|x| x.starts_with("UserKnownHostsFile="))
         .unwrap();
     assert!(
-        Path::new(kh.trim_start_matches("UserKnownHostsFile=")).exists(),
+        Path::new(
+            kh.trim_start_matches("UserKnownHostsFile=")
+                .trim_matches('"')
+        )
+        .exists(),
         "known_hosts must exist before ssh runs"
     );
     let l = a.iter().position(|x| x == "-l").unwrap();

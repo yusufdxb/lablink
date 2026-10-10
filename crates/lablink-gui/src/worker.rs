@@ -381,6 +381,7 @@ fn execute(socket: &PathBuf, cmd: Cmd) -> Event {
 fn run_remote(client: &Client, device: &str, command: &str) -> Result<RunResult, Fail> {
     let resolved: ResolveResult = client.call_typed(&Request::Resolve {
         device: device.to_string(),
+        batch: true,
     })?;
     let target = Target::from_resolve(&resolved).map_err(Fail::msg)?;
     // Like the doctor: actions only run on a machine whose key is pinned.

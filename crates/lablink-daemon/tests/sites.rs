@@ -46,6 +46,7 @@ fn wait<T>(what: &str, secs: u64, mut f: impl FnMut() -> Option<T>) -> T {
 fn resolve(d: &TestDaemon, name: &str) -> Result<ResolveResult, ClientError> {
     d.client().call_typed(&Request::Resolve {
         device: name.into(),
+        batch: false,
     })
 }
 

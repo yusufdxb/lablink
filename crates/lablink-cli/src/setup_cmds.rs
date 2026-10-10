@@ -382,6 +382,7 @@ pub fn cmd_copy_id(
 ) -> R {
     let r: ResolveResult = client.call_typed(&Request::Resolve {
         device: device.into(),
+        batch: false,
     })?;
     let id = if r.id.is_empty() {
         r.name.clone()

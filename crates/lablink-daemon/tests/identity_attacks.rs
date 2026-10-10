@@ -141,7 +141,7 @@ fn forged_mdns_cannot_move_a_verified_pinned_device() {
     now += 5_000;
     r.apply_probe("lab/jetson", &down(REAL), now);
     r.observe(&mdns(EVIL), "mdns", None, now + 1);
-    assert_eq!(r.resolve("jetson").unwrap().ip, REAL);
+    assert_eq!(r.resolve("jetson", false).unwrap().ip, REAL);
     assert_eq!(
         r.device("lab/jetson").unwrap().identity,
         IdentityState::Verified
@@ -180,7 +180,10 @@ fn contradicting_key_at_a_name_claimed_address_is_a_mismatch() {
         IdentityState::Mismatch
     );
     assert!(has_event(&r, "identity_mismatch"));
-    assert!(r.resolve("jetson").is_err(), "a MISMATCH is never resolved");
+    assert!(
+        r.resolve("jetson", false).is_err(),
+        "a MISMATCH is never resolved"
+    );
     // The real device presenting its pinned key heals it.
     let real = Observation {
         ip: Some(ip(REAL)),
@@ -194,7 +197,7 @@ fn contradicting_key_at_a_name_claimed_address_is_a_mismatch() {
         Some(ip(REAL))
     );
     check_identity(&mut r, REAL, vec![k], KeyProof::Proven, now + 11);
-    let res = r.resolve("jetson").unwrap();
+    let res = r.resolve("jetson", false).unwrap();
     assert_eq!(
         (res.ip.as_str(), res.identity),
         (REAL, IdentityState::Verified)
@@ -241,7 +244,7 @@ fn key_verified_sighting_displaces_a_squatter() {
         Some(ip(REAL))
     );
     check_identity(&mut r, REAL, vec![k], KeyProof::Proven, now + 1);
-    let res = r.resolve("jetson").unwrap();
+    let res = r.resolve("jetson", false).unwrap();
     assert_eq!(
         (res.ip.as_str(), res.identity),
         (REAL, IdentityState::Verified)
@@ -289,7 +292,7 @@ fn replayed_public_key_is_never_verified() {
         assert_eq!(d.identity, want);
         assert!(!d.rec.learned_macs.contains(evil_mac));
         if want == IdentityState::Mismatch {
-            assert!(r.resolve("jetson").is_err());
+            assert!(r.resolve("jetson", false).is_err());
         } else {
             // No retry storm: the next key check waits for the periodic one.
             assert!(r.follow_up("lab/jetson", now + 3).keyscan.is_none());

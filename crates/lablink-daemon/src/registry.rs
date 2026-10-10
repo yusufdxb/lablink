@@ -326,8 +326,13 @@ impl Device {
             .or_else(|| self.cfg.usernames.first().cloned())
     }
 
-    /// Usernames for the auth check, in order, deduplicated.
+    /// Usernames for the auth check, in order, deduplicated. An override is
+    /// what `ssh`/`exec` will use, so it is the only one checked: another
+    /// user that works would report a login that `exec` then cannot make.
     pub fn auth_usernames(&self) -> Vec<Option<String>> {
+        if let Some(u) = &self.rec.overrides.username {
+            return vec![Some(u.clone())];
+        }
         let mut v: Vec<String> = Vec::new();
         for u in self
             .rec
@@ -2644,15 +2649,16 @@ impl Registry {
         Target::from_resolve(&r).map_err(|e| ApiError::new(ErrorCode::IdentityMismatch, e))
     }
 
-    /// Resolve for `lablink ssh/exec`.
-    pub fn resolve(&self, name: &str) -> Result<ResolveResult, ApiError> {
+    /// Resolve for `lablink ssh/exec`; `batch` as in `resolve_inner`.
+    pub fn resolve(&self, name: &str, batch: bool) -> Result<ResolveResult, ApiError> {
         let name = self.require(name)?;
         let d = &self.devices[&name];
-        self.resolve_inner(&name, d.username(), false, false)
+        self.resolve_inner(&name, d.username(), batch, false)
     }
 
     /// `batch_jump`: a ProxyCommand through a gateway must not prompt
-    /// (daemon checks); the CLI allows prompts on the user's terminal.
+    /// (daemon checks, batch `exec`, doctor, the app); `lablink ssh` and
+    /// `exec --interactive-auth` allow prompts on the user's terminal.
     /// `for_proof`: only for the credential-free possession proof, which
     /// may address a device in MISMATCH.
     fn resolve_inner(
@@ -4105,6 +4111,19 @@ mod security_tests {
     }
 
     #[test]
+    fn the_login_check_tries_only_an_overridden_user() {
+        let mut r = reg("devices:\n  - name: dev1\n    usernames: [ops, tech]\n");
+        let d = r.device_mut("default/dev1").unwrap();
+        assert_eq!(
+            d.auth_usernames(),
+            [Some("ops".to_string()), Some("tech".to_string())]
+        );
+        d.rec.overrides.username = Some("tech".into());
+        assert_eq!(d.username().as_deref(), Some("tech"));
+        assert_eq!(d.auth_usernames(), [Some("tech".to_string())]);
+    }
+
+    #[test]
     fn adopted_ssh_hosts_are_distinct_at_different_sites() {
         let cfg = Config::parse("devices:\n  - name: robot\n", "test")
             .unwrap()
@@ -4239,7 +4258,7 @@ mod security_tests {
             let p = r.device_mut("default/payload").unwrap();
             p.rec.current_ip = Some("192.168.50.20".parse().unwrap());
         }
-        let e = r.resolve("payload").unwrap_err();
+        let e = r.resolve("payload", false).unwrap_err();
         assert_eq!(e.code, ErrorCode::Refused, "{}", e.message);
         assert!(e.message.contains("not verified"), "{}", e.message);
         // Once the gateway is verified against a pin, the tunnel is allowed and
@@ -4255,19 +4274,26 @@ mod security_tests {
                 pinned_at_ms: 1,
             });
         }
-        let ok = r.resolve("payload").unwrap();
+        let ok = r.resolve("payload", false).unwrap();
         let pc = ok.proxy_command.unwrap();
         assert!(
             pc.contains("HostKeyAlias=lablink.default.jetson-a")
                 && pc.contains("StrictHostKeyChecking=yes"),
             "{pc}"
         );
+        // `lablink ssh` may prompt for the hop on the user's terminal; a
+        // batch exec must not, or the hop stops waiting on a prompt in the
+        // background until the timeout.
+        assert!(!pc.contains("BatchMode=yes"), "{pc}");
+        let pc = r.resolve("payload", true).unwrap().proxy_command.unwrap();
+        assert!(pc.contains("BatchMode=yes"), "{pc}");
     }
 
     #[test]
     fn resolve_names_a_master_path_of_its_own_or_none() {
         let k = fake_key("dev");
-        let cp = |r: &Registry, n: &str| r.resolve(n).unwrap().ssh_options["ControlPath"].clone();
+        let cp =
+            |r: &Registry, n: &str| r.resolve(n, false).unwrap().ssh_options["ControlPath"].clone();
         let mut r = reg("devices:\n  - name: dev\n  - name: other\n");
         for n in ["default/dev", "default/other"] {
             let d = r.device_mut(n).unwrap();
