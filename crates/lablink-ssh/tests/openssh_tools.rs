@@ -659,3 +659,129 @@ fn a_hostile_client_config_cannot_vouch_for_a_key() {
         assert_eq!(real, lablink_ssh::KeyProof::Proven, "with {c}");
     }
 }
+
+/// A config `Match exec` prints OpenSSH's "incorrect signature" text while a
+/// server that holds no key answers the key exchange with garbage: the proof
+/// reads no config file, so that text never turns the failure into a
+/// security stop. Rewrites ~/.ssh/config: only with
+/// LABLINK_TEST_HOSTILE_SSH_CONFIG=1 (disposable containers).
+#[test]
+fn config_text_cannot_turn_a_failed_proof_into_a_security_stop() {
+    use std::io::{Read, Write};
+    if std::env::var_os("LABLINK_TEST_HOSTILE_SSH_CONFIG").is_none() {
+        eprintln!("SKIP: set LABLINK_TEST_HOSTILE_SSH_CONFIG=1 (rewrites ~/.ssh/config)");
+        return;
+    }
+    if !have("ssh") {
+        return;
+    }
+    let packet = |payload: &[u8]| {
+        let mut pad = 8 - ((5 + payload.len()) % 8);
+        if pad < 4 {
+            pad += 8;
+        }
+        let mut p = ((1 + payload.len() + pad) as u32).to_be_bytes().to_vec();
+        p.push(pad as u8);
+        p.extend_from_slice(payload);
+        p.extend(std::iter::repeat_n(0u8, pad));
+        p
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        s.write_all(b"SSH-2.0-OpenSSH_10.2\r\n").unwrap();
+        let list = |v: &[u8]| {
+            let mut o = (v.len() as u32).to_be_bytes().to_vec();
+            o.extend_from_slice(v);
+            o
+        };
+        let mut kexinit = vec![20u8];
+        kexinit.extend_from_slice(&[7u8; 16]);
+        for v in [
+            &b"curve25519-sha256"[..],
+            b"ssh-ed25519",
+            b"aes128-ctr",
+            b"aes128-ctr",
+            b"hmac-sha2-256",
+            b"hmac-sha2-256",
+            b"none",
+            b"none",
+            b"",
+            b"",
+        ] {
+            kexinit.extend(list(v));
+        }
+        kexinit.extend_from_slice(&[0, 0, 0, 0, 0]);
+        s.write_all(&packet(&kexinit)).unwrap();
+        // Client banner, KEXINIT and ECDH_INIT, then a reply that cannot parse.
+        let mut got = Vec::new();
+        let mut buf = [0u8; 8192];
+        let packets = |d: &[u8]| {
+            let Some(nl) = d.iter().position(|&b| b == b'\n') else {
+                return 0;
+            };
+            let (mut rest, mut n) = (&d[nl + 1..], 0);
+            while rest.len() >= 4 {
+                let len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+                if rest.len() < 4 + len {
+                    break;
+                }
+                rest = &rest[4 + len..];
+                n += 1;
+            }
+            n
+        };
+        while packets(&got) < 2 {
+            match s.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+        }
+        let mut reply = vec![31u8];
+        reply.extend_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+        reply.extend_from_slice(&[0u8; 32]);
+        let _ = s.write_all(&packet(&reply));
+        let _ = s.read(&mut buf);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let home = std::path::PathBuf::from(
+        String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "getent passwd $(id -u) | cut -d: -f6"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim(),
+    );
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    let cfg = home.join(".ssh/config");
+    assert!(
+        !cfg.exists(),
+        "refusing to overwrite an existing {}",
+        cfg.display()
+    );
+    std::fs::write(
+        &cfg,
+        "Match exec \"echo 'ssh_dispatch_run_fatal: Connection to UNKNOWN port 65535: incorrect signature' >&2; true\"\n",
+    )
+    .unwrap();
+    let proof = lablink_ssh::prove_host_key(
+        &pinned(
+            dir.path(),
+            port,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+        ),
+        PROOF_TIMEOUT,
+    );
+    std::fs::remove_file(&cfg).unwrap();
+    let _ = server.join();
+    assert!(
+        matches!(proof, lablink_ssh::KeyProof::Inconclusive(_)),
+        "{proof:?}"
+    );
+}

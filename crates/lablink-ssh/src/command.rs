@@ -100,16 +100,33 @@ fn supports_option(binary: &str, setting: &str) -> bool {
     // -F /dev/null: no config file is read, so a `Match` block that only
     // breaks this probe cannot make LabLink leave the option out.
     let args: Vec<String> = option_probe_args(setting).map(String::from).into();
-    let v = crate::run::run_captured(
+    let out = crate::run::run_captured(
         binary,
         &args,
         std::time::Duration::from_secs(5),
         crate::run::OutputMode::Capture,
         true,
-    )
-    .is_ok_and(|o| o.exit_code == Some(0));
-    cache.lock().unwrap().insert(key, v);
-    v
+    );
+    match out.ok().as_ref().and_then(probe_verdict) {
+        Some(v) => {
+            cache.lock().unwrap().insert(key, v);
+            v
+        }
+        // Any other failure (timeout, no fork): pass the option and ask
+        // again next time. An ssh that really lacks it then fails closed.
+        None => true,
+    }
+}
+
+/// What an option probe proved: supported (exit 0), unsupported (OpenSSH's
+/// own "Bad configuration option"), or nothing.
+fn probe_verdict(o: &crate::run::ExecOutput) -> Option<bool> {
+    if o.exit_code == Some(0) && !o.timed_out {
+        return Some(true);
+    }
+    String::from_utf8_lossy(&o.stderr)
+        .contains("Bad configuration option")
+        .then_some(false)
 }
 
 fn option_probe_args(setting: &str) -> [&str; 6] {
@@ -138,6 +155,11 @@ fn opt(args: &mut Vec<String>, k: &str, v: impl AsRef<str>) {
 pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
     let mut a = Vec::new();
     if *mode == Mode::KeyProof {
+        // No config file: the proof needs nothing from one (everything is on
+        // this command line), and a config could otherwise vouch for a key
+        // or print text into stderr (`Match exec`).
+        a.push("-F".into());
+        a.push("/dev/null".into());
         // The caller carries the connection (direct or through the gateway).
         opt(&mut a, "ProxyCommand", "-");
     } else if let Some(p) = &t.proxy_command {
@@ -389,7 +411,7 @@ mod tests {
         let mut via = target(true);
         via.proxy_command = Some("ssh -W %h:%p gw".into());
         let a = build_args(&via, &Mode::KeyProof, &[]);
-        assert_eq!(&a[..2], ["-o", "ProxyCommand=-"]);
+        assert_eq!(&a[..4], ["-F", "/dev/null", "-o", "ProxyCommand=-"]);
         assert_eq!(
             a.iter().filter(|x| x.starts_with("ProxyCommand=")).count(),
             1
@@ -404,6 +426,52 @@ mod tests {
     #[test]
     fn option_probes_ignore_every_config_file() {
         assert_eq!(&option_probe_args("X=y")[..2], ["-F", "/dev/null"]);
+    }
+
+    #[test]
+    fn only_openssh_s_own_answer_leaves_an_option_out() {
+        let o = |code: Option<i32>, err: &str, timed_out: bool| crate::run::ExecOutput {
+            exit_code: code,
+            signal: None,
+            stdout: Vec::new(),
+            stderr: err.as_bytes().to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            timed_out,
+            duration: std::time::Duration::ZERO,
+        };
+        assert_eq!(probe_verdict(&o(Some(0), "", false)), Some(true));
+        assert_eq!(
+            probe_verdict(&o(
+                Some(255),
+                "command-line: line 0: Bad configuration option: knownhostscommand\n",
+                false
+            )),
+            Some(false)
+        );
+        for (code, err, t) in [
+            (Some(255), "ssh: Could not resolve hostname x\n", false),
+            (None, "", true),
+            (Some(1), "", false),
+        ] {
+            assert_eq!(probe_verdict(&o(code, err, t)), None, "{err:?}");
+        }
+        // A probe that fails for any other reason still passes the option.
+        let dir = std::env::temp_dir().join(format!("lablink-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("ssh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'ssh: connect: Resource temporarily unavailable' >&2\nexit 255\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let mut t = target(true);
+        t.binary = fake.display().to_string();
+        let a = build_args(&t, &Mode::Interactive, &[]);
+        assert!(a.contains(&"KnownHostsCommand=none".to_string()), "{a:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
