@@ -83,17 +83,29 @@ pub struct KnownHostsEntry {
     pub public_key: String,
 }
 
-/// Atomically rewrite LabLink's known_hosts file (mode 0600).
+/// Atomically rewrite LabLink's known_hosts file (mode 0600). The directory
+/// is judged again before every write (it was checked when the daemon
+/// started, but a path can change since), and the new file is created
+/// exclusively under a fresh name without following a link, so nothing
+/// planted in the directory can redirect the write.
 pub fn write_known_hosts(path: &Path, entries: &[KnownHostsEntry]) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("tmp");
-    {
+    if let Some(why) = lablink_core::paths::writable_by_others(dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("refusing to write {}: {why}", path.display()),
+        ));
+    }
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{}.{n}", std::process::id()));
+    let write = || -> std::io::Result<()> {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .mode(0o600)
             .open(&tmp)?;
         writeln!(
@@ -104,8 +116,13 @@ pub fn write_known_hosts(path: &Path, entries: &[KnownHostsEntry]) -> std::io::R
             writeln!(f, "{} {} {}", e.alias, e.key_type, e.public_key)?;
         }
         f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    };
+    let r = write();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
+    r
 }
 
 #[cfg(test)]
@@ -211,5 +228,35 @@ mod tests {
             0o600
         );
         assert!(!p.with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn a_planted_link_never_redirects_the_pin_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("state");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let victim = d.path().join("victim");
+        std::fs::write(&victim, "keep\n").unwrap();
+        let kh = dir.join("known_hosts");
+        // The old fixed temporary name, planted as a link: never followed.
+        std::os::unix::fs::symlink(&victim, kh.with_extension("tmp")).unwrap();
+        let e = KnownHostsEntry {
+            alias: "lablink.a".into(),
+            key_type: "ssh-ed25519".into(),
+            public_key: BLOB.into(),
+        };
+        write_known_hosts(&kh, std::slice::from_ref(&e)).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert!(std::fs::read_to_string(&kh).unwrap().contains("lablink.a"));
+        assert!(!std::fs::symlink_metadata(&kh).unwrap().file_type().is_symlink());
+        // A directory others can write is refused before anything is written.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = write_known_hosts(&kh, &[]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(std::fs::read_to_string(&kh).unwrap().contains("lablink.a"));
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left.len(), 2, "{left:?}");
     }
 }
