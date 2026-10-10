@@ -1759,6 +1759,17 @@ impl Registry {
         if !usable_address(ip) || self.is_local_address(ip) {
             return wake; // link-local v6 needs a scope id; our own addresses are not peers
         }
+        // An mDNS/DNS answer (anyone on the network can send one) must not
+        // point LabLink's probes at the Internet: a public address is
+        // followed only when it is inside a configured network or attached.
+        if matches!(source, "mdns" | "dns")
+            && !private_address(ip)
+            && self.allowlist.network_for(ip).is_none()
+            && !self.is_attached_ip(ip)
+        {
+            tracing::debug!(%ip, source, "ignoring a name answer pointing outside the lab networks");
+            return wake;
+        }
         // Same address, different link-layer address: possibly a different
         // machine now answers there. Re-verify the host key before trusting it.
         if let Some(mac) = &obs.mac {
@@ -2088,7 +2099,10 @@ impl Registry {
             r.mac = obs.mac.clone();
         }
         if let Some(n) = obs.names.first() {
-            r.hostname = Some(n.trim_end_matches('.').to_string());
+            let n = n.trim_end_matches('.');
+            if lablink_core::config::valid_hostname(n) {
+                r.hostname = Some(n.to_string());
+            }
         }
         if !obs.host_keys.is_empty() {
             r.keys = obs.host_keys.clone();
@@ -2888,7 +2902,11 @@ impl Registry {
         if let Some(m) = &rec.mac {
             d.rec.learned_macs.insert(m.clone());
         }
-        if let Some(h) = &rec.hostname {
+        if let Some(h) = rec
+            .hostname
+            .as_ref()
+            .filter(|h| lablink_core::config::valid_hostname(h))
+        {
             d.rec.learned_hostnames.insert(normalize_hostname(h));
         }
         touch_address(
@@ -3109,6 +3127,20 @@ pub fn validate_changes(
 /// The HostKeyAlias LabLink uses for a pinned device.
 pub fn host_key_alias(site: &str, name: &str) -> String {
     format!("{ALIAS_PREFIX}{site}.{name}")
+}
+
+/// RFC 1918 / link-local / CGNAT IPv4, or unique-local / link-local IPv6.
+fn private_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_link_local()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 pub fn usable_address(ip: IpAddr) -> bool {

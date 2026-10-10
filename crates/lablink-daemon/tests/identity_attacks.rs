@@ -356,3 +356,25 @@ fn a_foreign_device_mac_cannot_flip_the_site() {
     );
     assert_ne!(r.resolve_ref("jetson").ok().as_deref(), Some("beta/jetson"));
 }
+
+/// A forged mDNS answer cannot send LabLink's probes to the Internet, and a
+/// host name with control characters is never learned.
+#[test]
+fn name_answers_cannot_point_outside_the_lab_or_inject_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = 1_000;
+    let mut r = registry(&dir, now);
+    r.observe(&mdns("198.51.100.7"), "mdns", None, now);
+    assert_eq!(r.device("lab/jetson").unwrap().rec.current_ip, None);
+    let hostile = Observation {
+        ip: Some(ip("192.168.1.77")),
+        mac: None,
+        names: vec!["evil\u{1b}[2J.local".into()],
+        host_keys: vec![],
+    };
+    r.observe(&hostile, "neighbor", None, now);
+    let shown = r.discovered_view(now);
+    assert!(shown
+        .iter()
+        .all(|h| h.hostname.as_deref().is_none_or(|n| !n.contains('\u{1b}'))));
+}

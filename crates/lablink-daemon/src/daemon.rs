@@ -202,6 +202,12 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
                     s = srx.recv() => match s { Some(s) => s, None => break },
                 };
                 inc(&st.metrics.mdns_sightings);
+                // Names from the network are untrusted input.
+                let name = s.hostname.trim_end_matches('.');
+                if !lablink_core::config::valid_hostname(name) {
+                    tracing::debug!(ip = %s.ip, "ignoring mDNS answer with an invalid host name");
+                    continue;
+                }
                 let obs = lablink_core::identity::Observation {
                     ip: Some(s.ip),
                     mac: None,

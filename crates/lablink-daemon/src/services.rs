@@ -62,10 +62,15 @@ impl ServiceCheck for CommandCheck {
             let out = prober
                 .exec(target, self.command.clone(), self.timeout)
                 .await;
+            // Device output is untrusted: one line, no control characters
+            // (it is stored, shown in `lablink status` and in the GUI).
             let first_line = |s: &str| {
-                s.lines()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|l| l.chars().take(200).collect::<String>())
+                s.lines().find(|l| !l.trim().is_empty()).map(|l| {
+                    l.chars()
+                        .filter(|c| !c.is_control())
+                        .take(200)
+                        .collect::<String>()
+                })
             };
             if out.timed_out {
                 return ServiceResult {

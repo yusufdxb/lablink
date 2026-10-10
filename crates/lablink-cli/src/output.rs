@@ -382,12 +382,15 @@ pub fn discovered_table(hosts: &[DiscoveredHost]) -> String {
             vec![
                 h.ip.clone(),
                 h.mac.clone().unwrap_or_else(|| "--".into()),
-                h.hostname.clone().unwrap_or_else(|| "--".into()),
+                h.hostname
+                    .as_deref()
+                    .map(printable)
+                    .unwrap_or_else(|| "--".into()),
                 format!("{:?}", h.ssh_port).to_uppercase(),
                 h.network_name.clone().unwrap_or_else(|| "-".into()),
                 h.sources.join(","),
                 format_age(h.last_seen_ms_ago),
-                h.note.clone().unwrap_or_default(),
+                printable(h.note.as_deref().unwrap_or_default()),
             ]
         })
         .collect();
