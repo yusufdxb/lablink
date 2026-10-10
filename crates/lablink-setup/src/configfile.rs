@@ -75,8 +75,34 @@ pub fn write(path: &Path, cfg: &Config) -> Result<Option<PathBuf>, String> {
                 .unwrap_or("config.yaml"),
             utc_stamp(lablink_core::time::now_ms())
         );
-        let b = dir.join(name);
-        std::fs::copy(path, &b).map_err(|e| format!("cannot back up {}: {e}", path.display()))?;
+        // A fresh private file (never follow or reuse whatever is at that
+        // name, never inherit a looser mode from the original).
+        let current =
+            std::fs::read(path).map_err(|e| format!("cannot back up {}: {e}", path.display()))?;
+        let mut n = 0;
+        let b = loop {
+            use std::os::unix::fs::OpenOptionsExt;
+            let b = dir.join(if n == 0 {
+                name.clone()
+            } else {
+                format!("{name}-{n}")
+            });
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&b)
+            {
+                Ok(mut f) => {
+                    f.write_all(&current)
+                        .and_then(|_| f.sync_all())
+                        .map_err(|e| format!("cannot write {}: {e}", b.display()))?;
+                    break b;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,
+                Err(e) => return Err(format!("cannot write {}: {e}", b.display())),
+            }
+        };
         Some(b)
     } else {
         None
@@ -182,5 +208,12 @@ mod tests {
         std::os::unix::fs::symlink(&victim, &tmp).unwrap();
         write(&path, &Config::default()).unwrap();
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        // Backups are fresh 0600 files even when the config was loosened by
+        // hand, and a second backup in the same second gets its own name.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let b1 = write(&path, &Config::default()).unwrap().unwrap();
+        let b2 = write(&path, &Config::default()).unwrap().unwrap();
+        assert_ne!(b1, b2);
+        assert_eq!((mode(&b1), mode(&b2)), (0o600, 0o600));
     }
 }

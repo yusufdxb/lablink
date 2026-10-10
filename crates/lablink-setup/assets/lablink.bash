@@ -6,9 +6,10 @@ _lablink() {
     out=$(command lablink __complete --cword "$COMP_CWORD" -- "${COMP_WORDS[@]}" 2>/dev/null) || out=
     if [[ "$out" == "__lablink_files__" ]]; then
         compopt -o filenames 2>/dev/null
-        COMPREPLY=($(compgen -f -- "$cur"))
+        mapfile -t COMPREPLY < <(compgen -f -- "$cur")
     elif [[ -n "$out" ]]; then
-        COMPREPLY=($out)
+        # One candidate per line, taken literally (no globbing or splitting).
+        mapfile -t COMPREPLY <<< "$out"
     fi
 }
 complete -o nosort -F _lablink lablink
