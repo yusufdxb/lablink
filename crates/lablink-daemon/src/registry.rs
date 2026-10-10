@@ -1778,6 +1778,7 @@ impl Registry {
     /// Apply a host-key possession proof (see [`Device::key_proof_due`]).
     pub fn apply_key_proof(&mut self, name: &str, ip: IpAddr, proof: &KeyProof, now: u64) {
         let mac = self.neighbor_mac(ip);
+        let engaged = self.engaged(name);
         let Some(d) = self.devices.get_mut(name) else {
             return;
         };
@@ -1785,6 +1786,13 @@ impl Registry {
             return;
         }
         d.key_proof_due = None;
+        if !engaged {
+            // The site went AWAY while the proof ran (suspend, a move): the
+            // address may be another site's machine now, so the answer says
+            // nothing about this device. It is checked again once its site
+            // is engaged.
+            return;
+        }
         d.last_identity_check_ms = now;
         let pins = d
             .pinned_fingerprints()
@@ -2319,8 +2327,14 @@ impl Registry {
 
     /// Whether `ip` (an unmatched host) is due a TCP/22 check during a scan.
     pub fn scan_tcp_due(&self, ip: IpAddr, now: u64, recheck_ms: u64) -> bool {
-        if self.devices.values().any(|d| d.rec.current_ip == Some(ip)) {
-            return false; // the device's monitor owns it
+        // The device's monitor owns its address, but only while it runs: an
+        // AWAY site's last address may now be another site's machine.
+        if self
+            .devices
+            .values()
+            .any(|d| d.rec.current_ip == Some(ip) && self.engaged(&d.id))
+        {
+            return false;
         }
         self.discovered
             .get(&ip)
@@ -4173,6 +4187,25 @@ mod security_tests {
     }
 
     #[test]
+    fn an_away_sites_last_address_does_not_hide_a_host_from_scans() {
+        // wsF-F4: the lab robot last seen at .22 must not stop the club's
+        // robot, now at .22, from being checked once the lab is AWAY.
+        let mut r = reg("sites:\n  - id: lab\n    name: Lab\n    networks:\n      - name: lan\n        cidr: 10.9.0.0/24\n        active_scan: true\n    devices:\n      - name: robot\n  - id: club\n    name: Club\n    networks:\n      - name: lan\n        cidr: 10.9.0.0/24\n        active_scan: true\n");
+        let ip: IpAddr = "10.9.0.22".parse().unwrap();
+        r.set_mode(Some("lab"), 1).unwrap();
+        r.refresh_sites(2);
+        r.device_mut("lab/robot").unwrap().rec.current_ip = Some(ip);
+        assert!(
+            !r.scan_tcp_due(ip, 3, 600_000),
+            "the lab robot's monitor owns .22"
+        );
+        r.set_mode(Some("club"), 4).unwrap();
+        r.refresh_sites(5);
+        assert!(!r.site_engaged("lab"));
+        assert!(r.scan_tcp_due(ip, 6, 600_000));
+    }
+
+    #[test]
     fn scan_memos_expire_when_gateway_identity_changes_even_with_the_same_site() {
         let mut r = reg("devices: []\n");
         let ip: IpAddr = "10.9.0.22".parse().unwrap();
@@ -4413,6 +4446,25 @@ mod security_tests {
             r.device("default/dev").unwrap().identity,
             IdentityState::Verified
         );
+    }
+
+    #[test]
+    fn a_proof_that_finishes_after_its_site_went_away_is_dropped() {
+        // RR-R3: a lab proof started before a suspend reached the club's
+        // machine at the same address and left a false MISMATCH.
+        let mut r = reg("sites:\n  - id: lab\n    name: Lab\n    networks:\n      - name: lan\n        cidr: 10.9.0.0/24\n    devices:\n      - name: robot\n  - id: club\n    name: Club\n    networks:\n      - name: lan\n        cidr: 10.9.0.0/24\n");
+        let ip: IpAddr = "10.9.0.22".parse().unwrap();
+        r.set_mode(Some("lab"), 1).unwrap();
+        r.refresh_sites(2);
+        let d = r.device_mut("lab/robot").unwrap();
+        d.rec.current_ip = Some(ip);
+        d.key_proof_due = Some(ip);
+        r.set_mode(Some("club"), 3).unwrap();
+        r.refresh_sites(4);
+        r.apply_key_proof("lab/robot", ip, &KeyProof::Refused("another key".into()), 5);
+        let d = r.device("lab/robot").unwrap();
+        assert_ne!(d.identity, IdentityState::Mismatch);
+        assert_eq!(d.key_proof_due, None);
     }
 
     #[test]

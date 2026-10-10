@@ -41,11 +41,17 @@ pub fn bind(path: &Path) -> Result<UnixListener, String> {
         ));
     }
     if std::fs::symlink_metadata(dir).is_err() {
+        use std::os::unix::fs::DirBuilderExt;
+        // Without XDG_RUNTIME_DIR the parent is the default state dir, which
+        // the next start refuses unless it is private: never create it from
+        // the umask.
         if let Some(parent) = dir.parent() {
-            std::fs::create_dir_all(parent)
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
         }
-        use std::os::unix::fs::DirBuilderExt;
         match std::fs::DirBuilder::new().mode(0o700).create(dir) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -530,12 +536,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fresh = dir.path().join("run").join("lablink-1000");
         assert!(super::bind(&fresh.join("lablinkd.sock")).is_ok());
-        let mode = std::fs::symlink_metadata(&fresh)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o700);
+        let mode = |p: &std::path::Path| {
+            std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&fresh), 0o700);
+        // Missing parents (the default state dir when XDG_RUNTIME_DIR is
+        // unset) are private too, whatever the umask.
+        assert_eq!(mode(&dir.path().join("run")), 0o700);
         let file = dir.path().join("lablink-file");
         std::fs::write(&file, "x").unwrap();
         let e = super::bind(&file.join("lablinkd.sock")).unwrap_err();
