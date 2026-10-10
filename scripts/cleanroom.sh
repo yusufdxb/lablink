@@ -51,6 +51,10 @@ echo "| # | step | result | evidence |" >> "$results"
 echo "|---|---|---|---|" >> "$results"
 n=0
 cur=$desk
+# Files cross the container boundary through /var/tmp (literal in
+# single-quoted commands): on newer images systemd mounts a fresh tmpfs over
+# /tmp, which `docker cp` cannot see.
+xfer=/var/tmp
 
 cleanup() {
     local rc=$?
@@ -94,8 +98,8 @@ wait_for() { # wait_for SECONDS CMD
     done
 }
 shot() { # shot NAME: screenshot the GUI
-    as_tester "DISPLAY=:99 xwd -root -silent > /tmp/$1.xwd"
-    docker cp "$cur:/tmp/$1.xwd" "$out/$1.xwd" >/dev/null
+    as_tester "DISPLAY=:99 xwd -root -silent > $xfer/$1.xwd"
+    docker cp "$cur:$xfer/$1.xwd" "$out/$1.xwd" >/dev/null
     if command -v ffmpeg >/dev/null; then
         ffmpeg -loglevel error -y -i "$out/$1.xwd" "$out/$1.png" && rm -f "$out/$1.xwd"
     fi
@@ -133,8 +137,8 @@ as_tester 'for t in cargo rustc ssh lablink; do command -v $t && exit 1; done; e
 pass "no Rust, no ssh, no LabLink" "cargo, rustc, ssh, lablink all absent"
 
 # ---- install -----------------------------------------------------------------
-docker cp "$deb" "$desk:/tmp/lablink.deb"
-docker exec "$desk" bash -c 'apt-get update -qq && apt-get install -y -qq /tmp/lablink.deb' > "$out/apt-install.log" 2>&1 \
+docker cp "$deb" "$desk:$xfer/lablink.deb"
+docker exec "$desk" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/lablink.deb" > "$out/apt-install.log" 2>&1 \
     || fail "install .deb" "apt-get install failed, see apt-install.log"
 v=$(out_of 'lablink version'); echo "$v" > "$out/version.txt"
 [ "$(head -1 <<<"$v")" = "lablink $version (commit $sha)" ] || fail "install .deb" "version says '$(head -1 <<<"$v")'"
@@ -260,7 +264,7 @@ as_tester 'lablink import ~/lab.yaml --config /tmp/imported.yaml --yes' > "$out/
 grep -q "device site-alpha/robot: added" "$out/import.txt" && grep -q "NOT imported" "$out/import.txt" || fail "import" "see import.txt"
 as_tester 'lablink check-config /tmp/imported.yaml' >> "$out/import.txt" || fail "import" "imported config invalid"
 pass "export / import" "export (0600, no secrets) imported into a fresh config: site and robot added, pins dropped by default"
-b=$(as_tester 'lablink support-bundle --no-doctor -o /tmp' 2>/dev/null | tail -1)
+b=$(as_tester 'lablink support-bundle --no-doctor -o /var/tmp' 2>/dev/null | tail -1)
 docker cp "$desk:$b" "$out/support-bundle.tar.gz" >/dev/null
 mkdir -p "$out/bundle" && tar -xzf "$out/support-bundle.tar.gz" -C "$out/bundle"
 macA=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$netA\").MacAddress}}" "$robotA")
@@ -427,8 +431,8 @@ pass "remove .deb" "apt remove: binaries gone, daemon stopped; configuration and
 docker rm -f "$robotA" "$desk" >/dev/null
 docker run -d --name "$robotA" --hostname robot-bench --network "$netA" --ip "$preA.20" lablink-cr-robot >/dev/null
 start_desktop "$desk2" lab-desktop-2 "$netA" "$preA.11"
-docker cp "$deb" "$desk2:/tmp/lablink.deb"
-docker exec "$desk2" bash -c 'apt-get update -qq && apt-get install -y -qq /tmp/lablink.deb xterm' > "$out/apt-install-2.log" 2>&1 \
+docker cp "$deb" "$desk2:$xfer/lablink.deb"
+docker exec "$desk2" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/lablink.deb xterm" > "$out/apt-install-2.log" 2>&1 \
     || fail "GUI-only: install" "apt failed"
 pass "GUI-only: fresh user" "second container, .deb + xterm installed, no config"
 typein() { x "xdotool type --delay 40 '$1'"; }
@@ -486,13 +490,13 @@ x 'pkill -x lablink-gui' || true
 # ---- tarball: a third fresh user, no root ----------------------------------------------
 start_desktop "$desk3" lab-desktop-3 "$netA" "$preA.12"
 tgzname=$(basename "$tgz")
-docker cp "$tgz" "$desk3:/tmp/$tgzname"
-docker cp dist/SHA256SUMS "$desk3:/tmp/SHA256SUMS"
+docker cp "$tgz" "$desk3:$xfer/$tgzname"
+docker cp dist/SHA256SUMS "$desk3:$xfer/SHA256SUMS"
 docker exec "$desk3" bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-client libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libwayland-client0 libwayland-egl1' > "$out/apt-tarball-deps.log" 2>&1 \
     || fail "tarball install" "runtime libraries failed to install"
-as_tester "cd /tmp && sha256sum -c --ignore-missing SHA256SUMS" > "$out/tarball.txt" 2>&1 || fail "tarball install" "checksum"
+as_tester "cd $xfer && sha256sum -c --ignore-missing SHA256SUMS" > "$out/tarball.txt" 2>&1 || fail "tarball install" "checksum"
 grep -q "$tgzname: OK" "$out/tarball.txt" || fail "tarball install" "tarball not verified"
-as_tester "cd /tmp && tar xzf $tgzname && cd lablink-*-x86_64-linux && ./install.sh" >> "$out/tarball.txt" 2>&1 || fail "tarball install" "install.sh failed"
+as_tester "cd $xfer && tar xzf $tgzname && cd lablink-*-x86_64-linux && ./install.sh" >> "$out/tarball.txt" 2>&1 || fail "tarball install" "install.sh failed"
 tv=$(out_of '$HOME/.local/bin/lablink version' | head -1)
 [ "$tv" = "lablink $version (commit $sha)" ] || fail "tarball install" "version says '$tv'"
 as_tester "ping -c 1 -W 1 $preA.1 >/dev/null 2>&1 || true"
@@ -502,9 +506,9 @@ wait_for 20 '$HOME/.local/bin/lablink ping' || fail "tarball install" "daemon di
 as_tester '$HOME/.local/bin/lablink discover --json' > "$out/tarball-discover.json" || fail "tarball install" "discover failed"
 grep -q "\"$preA.20\"" "$out/tarball-discover.json" || fail "tarball install" "robot not discovered"
 as_tester 'test -f ~/.local/share/bash-completion/completions/lablink && test -f ~/.local/share/applications/lablink-gui.desktop' || fail "tarball install" "completion or desktop entry missing"
-as_tester 'cd /tmp/lablink-*-x86_64-linux && ./uninstall.sh' >> "$out/tarball.txt" 2>&1 || fail "tarball uninstall" "uninstall.sh failed"
+as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./uninstall.sh' >> "$out/tarball.txt" 2>&1 || fail "tarball uninstall" "uninstall.sh failed"
 as_tester 'test ! -e ~/.local/bin/lablink && test -f ~/.config/lablink/config.yaml && ! pgrep -x lablinkd' || fail "tarball uninstall" "binaries left, daemon running, or config deleted"
-as_tester 'cd /tmp/lablink-*-x86_64-linux && ./uninstall.sh --purge' >> "$out/tarball.txt" 2>&1 || fail "tarball uninstall" "--purge failed"
+as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./uninstall.sh --purge' >> "$out/tarball.txt" 2>&1 || fail "tarball uninstall" "--purge failed"
 as_tester 'test ! -e ~/.config/lablink && test ! -e ~/.local/state/lablink' || fail "tarball uninstall" "--purge kept data"
 pass "tarball install / uninstall" "checksum, install.sh into ~/.local, '$tv', init + user unit, daemon, discover; uninstall kept config, --purge removed it"
 
