@@ -57,10 +57,9 @@ pub enum Mode {
     AuthProbe,
     /// Proof that the host holds the pinned host key, with no credentials:
     /// a fresh connection (never a ControlMaster, which would skip the key
-    /// exchange) with every authentication method off. OpenSSH checks the
-    /// server's signature with the pinned key before authentication, so
-    /// reaching "Permission denied" proves possession; a host replaying a
-    /// public key it does not hold cannot get there.
+    /// exchange) with every authentication method off, carried over ssh's
+    /// stdin/stdout (`ProxyCommand=-`) by [`crate::prove_host_key`], which
+    /// decides from the bytes ssh itself sends, never from printed text.
     KeyProof,
 }
 
@@ -83,26 +82,34 @@ pub fn automated_session_args() -> Vec<String> {
         .collect()
 }
 
-/// Does this ssh accept `KnownHostsCommand` (OpenSSH 8.5+)? Asked once per
-/// binary with `ssh -G`, which parses options without connecting. Older
-/// clients reject the option, but their config files cannot use it either.
-fn supports_known_hosts_command(binary: &str) -> bool {
+/// Does this ssh accept the option `setting` (for example
+/// `KnownHostsCommand=none`, OpenSSH 8.5+, or `GSSAPIKeyExchange=no`, only
+/// in distribution builds with the GSSAPI key-exchange patch)? Asked once
+/// per binary and option with `ssh -G`, which parses options without
+/// connecting. A client that rejects an option cannot read it from its
+/// config files either.
+fn supports_option(binary: &str, setting: &str) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), bool>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(v) = cache.lock().unwrap().get(binary) {
+    let key = (binary.to_string(), setting.to_string());
+    if let Some(v) = cache.lock().unwrap().get(&key) {
         return *v;
     }
     let v = std::process::Command::new(binary)
-        .args(["-G", "-o", "KnownHostsCommand=none", "lablink-option-check"])
+        .args(["-G", "-o", setting, "lablink-option-check"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success());
-    cache.lock().unwrap().insert(binary.to_string(), v);
+    cache.lock().unwrap().insert(key, v);
     v
+}
+
+fn supports_known_hosts_command(binary: &str) -> bool {
+    supports_option(binary, "KnownHostsCommand=none")
 }
 
 fn opt(args: &mut Vec<String>, k: &str, v: impl AsRef<str>) {
@@ -115,7 +122,10 @@ fn opt(args: &mut Vec<String>, k: &str, v: impl AsRef<str>) {
 /// cannot override them.
 pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
     let mut a = Vec::new();
-    if let Some(p) = &t.proxy_command {
+    if *mode == Mode::KeyProof {
+        // The caller carries the connection (direct or through the gateway).
+        opt(&mut a, "ProxyCommand", "-");
+    } else if let Some(p) = &t.proxy_command {
         opt(&mut a, "ProxyCommand", p);
     }
     // Addressing: always the daemon-resolved address, never DNS at connect time.
@@ -134,6 +144,9 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
         if supports_known_hosts_command(&t.binary) {
             opt(&mut a, "KnownHostsCommand", "none");
         }
+        // With VerifyHostKeyDNS=yes in a config file, a DNS answer
+        // marked secure would be accepted in place of the pin.
+        opt(&mut a, "VerifyHostKeyDNS", "no");
     }
     match mode {
         Mode::Interactive => {}
@@ -160,18 +173,20 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
                 opt(&mut a, k, "no");
             }
             opt(&mut a, "IdentityAgent", "none");
-            // FATAL, not ERROR: OpenSSH logs a server's disconnect reason at
-            // ERROR level, and before 9.0 it does not escape newlines in it,
-            // so a server holding no key could print a forged "Permission
-            // denied" line. At FATAL only the client's own fatal messages
-            // (including its "Permission denied") reach stderr.
-            opt(&mut a, "LogLevel", "FATAL");
+            // Distribution builds can trust a Kerberos exchange instead of
+            // the host key; the proof must only ever rest on the pin.
+            if supports_option(&t.binary, "GSSAPIKeyExchange=no") {
+                opt(&mut a, "GSSAPIKeyExchange", "no");
+            }
+            // stderr only explains a proof that failed (it never proves
+            // anything). OpenSSH reports a bad host signature at INFO.
+            opt(&mut a, "LogLevel", "INFO");
             for o in AUTOMATED_SESSION_OPTIONS {
                 a.push("-o".into());
                 a.push(o.into());
             }
+            // No -n: stdin carries the connection.
             a.push("-T".into());
-            a.push("-n".into());
         }
         Mode::AuthProbe => {
             opt(&mut a, "BatchMode", "yes");
@@ -348,10 +363,24 @@ mod tests {
             "HostbasedAuthentication=no",
             "IdentityAgent=none",
             "ForwardAgent=no",
+            "VerifyHostKeyDNS=no",
         ] {
             assert_eq!(a[pos(&a, o) - 1], "-o", "{o}");
         }
         assert_eq!(a.last().unwrap(), "true");
+        // The connection is LabLink's, whatever the target's route.
+        let mut via = target(true);
+        via.proxy_command = Some("ssh -W %h:%p gw".into());
+        let a = build_args(&via, &Mode::KeyProof, &[]);
+        assert_eq!(&a[..2], ["-o", "ProxyCommand=-"]);
+        assert_eq!(
+            a.iter().filter(|x| x.starts_with("ProxyCommand=")).count(),
+            1
+        );
+        assert!(
+            !a.contains(&"-n".to_string()),
+            "stdin is the transport: {a:?}"
+        );
     }
 
     #[test]

@@ -92,94 +92,319 @@ fn known_hosts_lookup_via_ssh_keygen() {
     }
 }
 
-/// The possession proof against a real, throwaway sshd on 127.0.0.1: the
-/// server holding the pinned key gets to "Permission denied" (no credential
-/// was offered), a pin of another key is refused. Skipped without sshd.
-#[test]
-fn key_proof_against_a_real_sshd() {
-    let sshd = "/usr/sbin/sshd";
-    if !std::path::Path::new(sshd).exists() || !have("ssh") || !have("ssh-keygen") {
-        eprintln!("SKIP: sshd, ssh or ssh-keygen not installed");
-        return;
+/// Generate an ed25519 key `name` (and `name.pub`) in `d`.
+fn keygen(d: &std::path::Path, name: &str) {
+    assert!(Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", ""])
+        .arg("-f")
+        .arg(d.join(name))
+        .status()
+        .unwrap()
+        .success());
+}
+
+/// The `type base64` part of a public key file.
+fn pubkey(d: &std::path::Path, name: &str) -> String {
+    let line = std::fs::read_to_string(d.join(format!("{name}.pub"))).unwrap();
+    line.split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().port()
+}
+
+/// A throwaway sshd on 127.0.0.1 with host key `hostkey` (in `d`), logging
+/// to `<tag>.log`. Killed when dropped.
+struct Sshd(std::process::Child);
+impl Drop for Sshd {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
-    for k in ["hk", "other"] {
-        assert!(Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", ""])
-            .arg("-f")
-            .arg(d.join(k))
-            .status()
-            .unwrap()
-            .success());
-    }
-    let port = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
-    };
-    let cfg = d.join("sshd_config");
+}
+fn sshd(d: &std::path::Path, tag: &str, hostkey: &str, extra: &str) -> (Sshd, u16) {
+    let port = free_port();
+    let cfg = d.join(format!("{tag}.conf"));
     std::fs::write(
         &cfg,
         format!(
-            "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile {}\nUsePAM no\nStrictModes no\n",
-            d.join("hk").display(),
-            d.join("sshd.pid").display()
+            "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile {}\nUsePAM no\nStrictModes no\nLogLevel VERBOSE\n{extra}",
+            d.join(hostkey).display(),
+            d.join(format!("{tag}.pid")).display()
         ),
     )
     .unwrap();
-    let mut server = Command::new(sshd)
+    let child = Command::new(SSHD)
         .arg("-D")
         .arg("-f")
         .arg(&cfg)
         .arg("-E")
-        .arg(d.join("sshd.log"))
+        .arg(d.join(format!("{tag}.log")))
         .spawn()
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    let proof = |pubkey: &str| {
-        let line = std::fs::read_to_string(d.join(pubkey)).unwrap();
-        let f: Vec<&str> = line.split_whitespace().collect();
-        let kh = d.join(format!("kh_{pubkey}"));
-        std::fs::write(&kh, format!("lablink.t.dev {} {}\n", f[0], f[1])).unwrap();
-        let t = lablink_ssh::Target {
-            binary: "ssh".into(),
-            ip: "127.0.0.1".into(),
-            port,
-            ssh_host: "dev".into(),
-            username: None,
-            host_key_alias: Some("lablink.t.dev".into()),
-            known_hosts_file: Some(kh),
-            connect_timeout_s: 5,
-            options: Default::default(),
-            proxy_command: None,
-        };
-        let args = lablink_ssh::build_args(&t, &lablink_ssh::Mode::KeyProof, &[]);
-        let o = lablink_ssh::run_captured(
-            "ssh",
-            &args,
-            std::time::Duration::from_secs(15),
-            lablink_ssh::OutputMode::Capture,
-            true,
-        )
-        .unwrap();
-        lablink_ssh::classify_key_proof(
-            o.exit_code,
-            &String::from_utf8_lossy(&o.stderr),
-            o.timed_out,
-            "127.0.0.1",
-        )
-    };
-    let held = proof("hk.pub");
-    let other = proof("other.pub");
-    let _ = server.kill();
-    let _ = server.wait();
+    // Wait until it listens.
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    (Sshd(child), port)
+}
+
+const SSHD: &str = "/usr/sbin/sshd";
+
+fn have_openssh_server() -> bool {
+    let ok = std::path::Path::new(SSHD).exists() && have("ssh") && have("ssh-keygen");
+    if !ok {
+        eprintln!("SKIP: sshd, ssh or ssh-keygen not installed");
+    }
+    ok
+}
+
+/// A target pinned to `key` (a `type base64` string) under `lablink.t.dev`.
+fn pinned(d: &std::path::Path, port: u16, key: &str) -> lablink_ssh::Target {
+    let kh = d.join(format!("kh_{}", key.len() + port as usize + rand_suffix()));
+    std::fs::write(&kh, format!("lablink.t.dev {key}\n")).unwrap();
+    lablink_ssh::Target {
+        binary: "ssh".into(),
+        ip: "127.0.0.1".into(),
+        port,
+        ssh_host: "dev".into(),
+        username: Some("ops".into()),
+        host_key_alias: Some("lablink.t.dev".into()),
+        known_hosts_file: Some(kh),
+        connect_timeout_s: 5,
+        options: Default::default(),
+        proxy_command: None,
+    }
+}
+
+fn rand_suffix() -> usize {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    N.fetch_add(1, Ordering::SeqCst) * 100_000
+}
+
+const PROOF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// No authentication of any kind reached the server.
+fn assert_no_auth(d: &std::path::Path, tag: &str) {
+    let log = std::fs::read_to_string(d.join(format!("{tag}.log"))).unwrap_or_default();
+    for bad in ["Failed ", "Accepted ", "Invalid user", "userauth"] {
+        assert!(!log.contains(bad), "{bad:?} in {tag}.log: {log}");
+    }
+}
+
+/// The possession proof against a real, throwaway sshd on 127.0.0.1: the
+/// server holding the pinned key proves it before any authentication (the
+/// connection is closed at NEWKEYS); a pin of another key is refused.
+#[test]
+fn key_proof_against_a_real_sshd() {
+    if !have_openssh_server() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    keygen(d, "hk");
+    keygen(d, "other");
+    let (_server, port) = sshd(d, "dev", "hk", "");
+    let held = lablink_ssh::prove_host_key(&pinned(d, port, &pubkey(d, "hk")), PROOF_TIMEOUT);
+    let other = lablink_ssh::prove_host_key(&pinned(d, port, &pubkey(d, "other")), PROOF_TIMEOUT);
     assert_eq!(held, lablink_ssh::KeyProof::Proven);
     assert!(
         matches!(other, lablink_ssh::KeyProof::Refused(_)),
         "{other:?}"
     );
-    let log = std::fs::read_to_string(d.join("sshd.log")).unwrap_or_default();
-    assert!(!log.contains("Failed "), "no authentication attempt: {log}");
+    assert_no_auth(d, "dev");
+}
+
+/// A machine in the middle that presents the pinned public key but does not
+/// hold its private key: it relays to a real sshd with another key and puts
+/// the pinned key's blob in the server's key-exchange reply. ssh accepts the
+/// key against the pin, then the signature fails: never proven, refused.
+#[test]
+fn replayed_public_key_over_a_real_key_exchange_is_refused() {
+    use std::io::{Read, Write};
+    if !have_openssh_server() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    keygen(d, "pinned"); // the victim's key: only its public half is used
+    keygen(d, "attacker");
+    let (_server, real) = sshd(d, "mitm", "attacker", "HostKeyAlgorithms ssh-ed25519\n");
+    let blob = |name: &str| {
+        use base64::Engine as _;
+        let k = pubkey(d, name);
+        base64::engine::general_purpose::STANDARD
+            .decode(k.split_whitespace().nth(1).unwrap())
+            .unwrap()
+    };
+    let (from, to) = (blob("attacker"), blob("pinned"));
+    assert_eq!(from.len(), to.len());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let swapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = swapped.clone();
+    let mitm = std::thread::spawn(move || {
+        let (client, _) = listener.accept().unwrap();
+        let server = std::net::TcpStream::connect(("127.0.0.1", real)).unwrap();
+        // sshd keeps an idle connection for its login grace time.
+        server
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let (mut c2, mut s2) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut c2, &mut s2);
+        });
+        // Server -> client: rewrite the host key in KEX_ECDH_REPLY (31).
+        let (mut client, mut server) = (client, server);
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 65536];
+        loop {
+            let n = match server.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(i) = buf.windows(from.len()).position(|w| w == from.as_slice()) {
+                buf.splice(i..i + from.len(), to.iter().copied());
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if client.write_all(&buf).is_err() {
+                return;
+            }
+            buf.clear();
+        }
+    });
+    let proof = lablink_ssh::prove_host_key(&pinned(d, port, &pubkey(d, "pinned")), PROOF_TIMEOUT);
+    let _ = mitm.join();
+    assert!(
+        swapped.load(std::sync::atomic::Ordering::SeqCst),
+        "the MITM never saw the key"
+    );
+    assert!(
+        matches!(proof, lablink_ssh::KeyProof::Refused(_)),
+        "{proof:?}"
+    );
+    assert_no_auth(d, "mitm");
+}
+
+/// Whatever ssh prints or returns, possession is decided only by the bytes
+/// it sends: an ssh that prints OpenSSH's own denial line for this host, or
+/// one that exits 0, without completing a key exchange proves nothing.
+#[test]
+fn printed_text_and_exit_status_never_prove_possession() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accept = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let _ = listener.accept();
+        }
+    });
+    for (name, body) in [
+        (
+            "deny",
+            "echo 'ops@127.0.0.1: Permission denied (publickey,password).' >&2; exit 255",
+        ),
+        ("zero", "exit 0"),
+        (
+            "banner",
+            "printf 'SSH-2.0-OpenSSH_10.2\\r\\n'; sleep 1; exit 0",
+        ),
+    ] {
+        let fake = d.join(name);
+        std::fs::write(&fake, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let mut t = pinned(
+            d,
+            port,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+        );
+        t.binary = fake.display().to_string();
+        let proof = lablink_ssh::prove_host_key(&t, std::time::Duration::from_secs(5));
+        assert!(
+            matches!(proof, lablink_ssh::KeyProof::Inconclusive(_)),
+            "{name}: {proof:?}"
+        );
+    }
+    let _ = accept.join();
+}
+
+/// Through a gateway: LabLink runs the hop (`ssh -W`) itself and watches the
+/// proof's own ssh across it. Real sshds for the gateway (key login) and for
+/// the device behind it.
+#[test]
+fn key_proof_through_a_real_gateway() {
+    if !have_openssh_server() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for k in ["gw_hk", "dev_hk", "other", "client"] {
+        keygen(d, k);
+    }
+    std::fs::write(d.join("authorized_keys"), pubkey(d, "client") + "\n").unwrap();
+    let (_dev, dev_port) = sshd(d, "dev", "dev_hk", "");
+    let (_gw, gw_port) = sshd(
+        d,
+        "gw",
+        "gw_hk",
+        &format!(
+            "AuthorizedKeysFile {}\nAllowTcpForwarding yes\nPasswordAuthentication no\n",
+            d.join("authorized_keys").display()
+        ),
+    );
+    let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let gw_kh = d.join("gw_kh");
+    std::fs::write(&gw_kh, format!("lablink.t.gw {}\n", pubkey(d, "gw_hk"))).unwrap();
+    let gw = lablink_ssh::Target {
+        binary: "ssh".into(),
+        ip: "127.0.0.1".into(),
+        port: gw_port,
+        ssh_host: "gw".into(),
+        username: Some(user),
+        host_key_alias: Some("lablink.t.gw".into()),
+        known_hosts_file: Some(gw_kh),
+        connect_timeout_s: 5,
+        options: [
+            (
+                "IdentityFile".to_string(),
+                d.join("client").display().to_string(),
+            ),
+            ("IdentitiesOnly".to_string(), "yes".to_string()),
+            ("IdentityAgent".to_string(), "none".to_string()),
+            ("ControlPath".to_string(), "none".to_string()),
+        ]
+        .into(),
+        proxy_command: None,
+    };
+    let via = |key: &str| {
+        let mut t = pinned(d, dev_port, key);
+        t.proxy_command = Some(lablink_ssh::proxy_command_through(&gw, true));
+        lablink_ssh::prove_host_key(&t, PROOF_TIMEOUT)
+    };
+    let held = via(&pubkey(d, "dev_hk"));
+    let other = via(&pubkey(d, "other"));
+    let gwlog = std::fs::read_to_string(d.join("gw.log")).unwrap_or_default();
+    assert_eq!(held, lablink_ssh::KeyProof::Proven, "gateway log: {gwlog}");
+    assert!(
+        matches!(other, lablink_ssh::KeyProof::Refused(_)),
+        "{other:?}"
+    );
+    assert!(gwlog.contains("Accepted publickey"), "{gwlog}");
+    assert_no_auth(d, "dev");
 }
 
 /// A server that holds no key sends, before any key exchange, a disconnect
@@ -236,22 +461,11 @@ fn forged_pre_kex_disconnect_is_never_a_key_proof() {
         options: Default::default(),
         proxy_command: None,
     };
-    let args = lablink_ssh::build_args(&t, &lablink_ssh::Mode::KeyProof, &[]);
-    let o = lablink_ssh::run_captured(
-        "ssh",
-        &args,
-        std::time::Duration::from_secs(15),
-        lablink_ssh::OutputMode::Capture,
-        true,
-    )
-    .unwrap();
+    let proof = lablink_ssh::prove_host_key(&t, PROOF_TIMEOUT);
     let _ = server.join();
-    let stderr = String::from_utf8_lossy(&o.stderr);
-    let proof = lablink_ssh::classify_key_proof(o.exit_code, &stderr, o.timed_out, "127.0.0.1");
-    assert_ne!(
-        proof,
-        lablink_ssh::KeyProof::Proven,
-        "stderr was: {stderr:?}"
+    assert!(
+        matches!(proof, lablink_ssh::KeyProof::Inconclusive(_)),
+        "{proof:?}"
     );
 }
 
@@ -323,21 +537,10 @@ fn forged_kexinit_offer_is_never_a_key_proof() {
         options: Default::default(),
         proxy_command: None,
     };
-    let args = lablink_ssh::build_args(&t, &lablink_ssh::Mode::KeyProof, &[]);
-    let o = lablink_ssh::run_captured(
-        "ssh",
-        &args,
-        std::time::Duration::from_secs(15),
-        lablink_ssh::OutputMode::Capture,
-        true,
-    )
-    .unwrap();
+    let proof = lablink_ssh::prove_host_key(&t, PROOF_TIMEOUT);
     let _ = server.join();
-    let stderr = String::from_utf8_lossy(&o.stderr);
-    let proof = lablink_ssh::classify_key_proof(o.exit_code, &stderr, o.timed_out, "127.0.0.1");
-    assert_ne!(
-        proof,
-        lablink_ssh::KeyProof::Proven,
-        "stderr was: {stderr:?}"
+    assert!(
+        matches!(proof, lablink_ssh::KeyProof::Inconclusive(_)),
+        "{proof:?}"
     );
 }

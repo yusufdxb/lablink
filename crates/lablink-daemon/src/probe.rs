@@ -168,20 +168,10 @@ impl Prober for RealProber {
             let Ok(_slot) = self.ssh_slots.acquire().await else {
                 return KeyProof::Inconclusive("shutting down".into());
             };
-            let args = lablink_ssh::build_args(&target, &Mode::KeyProof, &[]);
-            let bin = target.binary.clone();
-            match tokio::task::spawn_blocking(move || {
-                lablink_ssh::run_captured(&bin, &args, timeout, OutputMode::Capture, true)
-            })
-            .await
+            match tokio::task::spawn_blocking(move || lablink_ssh::prove_host_key(&target, timeout))
+                .await
             {
-                Ok(Ok(o)) => lablink_ssh::classify_key_proof(
-                    o.exit_code,
-                    &String::from_utf8_lossy(&o.stderr),
-                    o.timed_out,
-                    &target.ip,
-                ),
-                Ok(Err(e)) => KeyProof::Inconclusive(format!("cannot run ssh: {e}")),
+                Ok(p) => p,
                 Err(e) => KeyProof::Inconclusive(e.to_string()),
             }
         })
