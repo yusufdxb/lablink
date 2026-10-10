@@ -45,10 +45,11 @@ any of them is a vulnerability.
   configured name (or under its address, when that address is a configured
   static IP or where you adopted the device). A device is reported
   *verified* at an address only after the host there proved it holds the
-  pinned private key (a credential-free OpenSSH handshake); presenting the
-  public key, which anyone can copy, is not enough. The proof never trusts
-  text the server can send: it runs at `LogLevel=FATAL` and is refused if
-  any server message or early disconnect shows up.
+  pinned private key (a credential-free OpenSSH key exchange); presenting the
+  public key, which anyone can copy, is not enough. The proof never reads
+  text: LabLink carries the connection and counts it only when its own ssh
+  sends `NEWKEYS`, which OpenSSH does only after the pinned key's signature
+  verified. The connection ends there, before any authentication.
 - **No silent trust on first use.** `lablink ssh` and `lablink exec` refuse a
   device without a pin (exit 7) unless you pass `--unpinned`, which hands the
   decision to OpenSSH's own known_hosts prompt. The doctor, the app's

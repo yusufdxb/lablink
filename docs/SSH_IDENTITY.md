@@ -56,37 +56,43 @@ lets OpenSSH ask you as it normally would (the answer is stored in your own
 
 `ssh-keyscan` returns public keys, which anyone can copy and replay. So a key
 that matches a pin at a new address (or right after pinning) only makes the
-check due: LabLink then runs
+check due: LabLink then opens a TCP connection to that address itself (or
+starts the gateway hop) and runs OpenSSH over it:
 
 ```
-ssh -o HostKeyAlias=lablink.<site>.<name> -o UserKnownHostsFile=<LabLink's file>
-    -o StrictHostKeyChecking=yes -o ControlPath=none -o BatchMode=yes
+ssh -o ProxyCommand=-            # ssh speaks over stdin/stdout, LabLink carries the bytes
+    -o HostKeyAlias=lablink.<site>.<name> -o UserKnownHostsFile=<LabLink's file>
+    -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes
+    -o KnownHostsCommand=none -o VerifyHostKeyDNS=no -o UpdateHostKeys=no
+    -o ControlPath=none -o BatchMode=yes -o IdentityAgent=none
     -o PubkeyAuthentication=no -o PasswordAuthentication=no
     -o KbdInteractiveAuthentication=no -o GSSAPIAuthentication=no
-    -o HostbasedAuthentication=no -o IdentityAgent=none -o LogLevel=FATAL
-    ... <device> true
+    -o HostbasedAuthentication=no -o GSSAPIKeyExchange=no ... <device> true
 ```
 
-OpenSSH verifies the server's signature with the pinned key during the key
-exchange, before any authentication. Reaching `Permission denied` therefore
-proves the server holds the private key, while LabLink offered no key, no
-password and no agent. The device becomes *verified*; only then does LabLink
+(`KnownHostsCommand` and `GSSAPIKeyExchange` only where the installed ssh
+knows them.)
+
+The decision is made from the bytes **LabLink's own ssh process sends**, not
+from anything printed. OpenSSH sends its `SSH_MSG_NEWKEYS` message only after
+the host key the server presented matched the pinned entry and the server's
+signature over the key exchange, which covers ssh's fresh random key, verified
+with it. Only the private key can produce that signature, so a host that
+replays a public key can never make ssh send `NEWKEYS`. LabLink reads the
+unencrypted packet framing of ssh's side of the first key exchange, and closes
+the connection the moment `NEWKEYS` appears: no authentication is attempted
+and no key, password or agent is ever offered. The server's bytes are passed
+to ssh but never parsed. The device becomes *verified*; only then does LabLink
 learn its MAC address and run login and service checks.
 
-Text the server can send must never count as that proof: before the key
-exchange a server can send a disconnect reason, and OpenSSH before 9.0 prints
-it with newlines unescaped, so a fake server could print a line that looks
-like the client's own "Permission denied". The proof therefore runs at
-`LogLevel=FATAL` (OpenSSH logs disconnect reasons at ERROR level and
-negotiation errors at INFO level, so they are not printed), counts only when
-stderr is exactly the one line `user@<device address>: Permission denied
-(...)`, and is refused whenever stderr shows a disconnect or any other
-server-originated message.
+What ssh prints (stderr, `LogLevel=INFO`) is only used to explain a proof that
+did not succeed, and never when it shows any sign of server text (a
+disconnect, a closed connection, a negotiation error).
 
 | Result of the proof | Device |
 |---|---|
-| OpenSSH reached authentication | verified |
-| a different key, or the pinned key could not sign | **mismatch** (security stop) |
+| ssh sent `NEWKEYS` | verified |
+| ssh rejected the key: a different key, or a bad signature with the pinned one | **mismatch** (security stop) |
 | timeout, refused, connection closed | unverified, retried at the next identity check |
 
 Once verified at an address, periodic re-checks compare keys only; a new

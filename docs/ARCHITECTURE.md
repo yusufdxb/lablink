@@ -125,8 +125,9 @@ One check round:
    identity is unknown, or `identity_check_interval_s` (600 s) elapsed. A
    pinned key seen at a new address (or just pinned) is followed by a
    **possession proof**: one OpenSSH connection with the pinned options and
-   every authentication method off, which reaches "Permission denied" only
-   if the server signed the key exchange with the pinned key (see
+   every authentication method off, carried by LabLink (`ProxyCommand=-`),
+   which counts when ssh sends `NEWKEYS`, i.e. after the server signed the
+   key exchange with the pinned key, and is closed there (see
    [SSH_IDENTITY.md](SSH_IDENTITY.md)). Only then is the device verified and
    its MAC learned.
 6. **Login check** (`ssh -o BatchMode=yes ... hostname`) only once the host key
