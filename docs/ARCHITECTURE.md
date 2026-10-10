@@ -122,7 +122,13 @@ One check round:
 4. The result feeds the hysteresis state machines ([STATUS_MODEL.md](STATUS_MODEL.md)).
 5. **Identity check** (`ssh-keyscan`) when the SSH port has just opened, the
    address changed, the link-layer address at the current IP changed, the
-   identity is unknown, or `identity_check_interval_s` (600 s) elapsed.
+   identity is unknown, or `identity_check_interval_s` (600 s) elapsed. A
+   pinned key seen at a new address (or just pinned) is followed by a
+   **possession proof**: one OpenSSH connection with the pinned options and
+   every authentication method off, which reaches "Permission denied" only
+   if the server signed the key exchange with the pinned key (see
+   [SSH_IDENTITY.md](SSH_IDENTITY.md)). Only then is the device verified and
+   its MAC learned.
 6. **Login check** (`ssh -o BatchMode=yes ... hostname`) only once the host key
    is verified, then on port-open/address-change transitions and every
    `auth_check_interval_s` (300 s). Configured usernames are tried in order;
@@ -280,12 +286,16 @@ ssh -o HostName=<current ip> -o Port=<port>
   ControlMaster and ProxyJump settings apply, while LabLink supplies the
   current address with `HostName`.
 - When the device has pinned keys, the connection succeeds only if the server
-  presents a pinned key, whatever its IP is. When it has none, LabLink adds no
-  host-key options and OpenSSH's own policy applies unchanged.
+  presents a pinned key, whatever its IP is. When it has none, `ssh`/`exec`
+  refuse (exit 7) unless `--unpinned`, which adds no host-key options so that
+  OpenSSH's own policy applies; background checks, doctor and app actions
+  never connect to it.
 - OpenSSH uses the first value it sees for an option, and LabLink's options
   come first, so neither `ssh.options` nor extra arguments can weaken them.
-  `ssh.options` additionally rejects host-key and addressing options at
-  config-validation time.
+  `ssh.options` is additionally an allowlist checked at config-validation
+  time (no host-key, addressing, code-loading, forwarding or environment
+  options), and sessions LabLink starts itself pass `ForwardAgent=no`,
+  `ForwardX11=no`, `ClearAllForwardings=yes` and `PermitLocalCommand=no`.
 - `exec` preserves the remote exit status, kills the whole process group on
   `--timeout` (exit 124), and in `--json` mode captures stdout/stderr
   (16 MiB cap per stream).

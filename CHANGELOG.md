@@ -46,6 +46,39 @@ First public release.
 
 ### Security
 
+Hardening from an adversarial security review before the first public
+release (details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T26-T35).
+
+- A device is *verified* only after the host proves it holds the pinned
+  private key (credential-free OpenSSH handshake); a replayed public key is a
+  security stop. Scan sightings never verify by themselves.
+- Forged mDNS/DNS answers or MAC sightings can no longer move a verified
+  device on one missed probe, select `~/.ssh/known_hosts` entries to pin, or
+  point probes at public addresses; a key contradicting the pin at an
+  address claimed by name is a mismatch.
+- A device sighting cannot make another site ACTIVE unless one of its
+  networks is attached.
+- `lablink ssh`/`exec` refuse devices without a pin (`--unpinned` to let
+  OpenSSH decide); `lablink resolve` prints only verified addresses
+  (`--force`); doctor and app actions never run on unpinned devices.
+- `ssh.options` is an allowlist (no code-loading, forwarding or environment
+  options) and is never imported; automated sessions never forward the
+  agent, X11 or ports; pinned connections disable `KnownHostsCommand`.
+- Imports refuse deeply nested YAML and list doctor checks with their
+  parameters; notes reject terminal escape sequences and the CLI escapes
+  text from devices; keys revoked in `~/.ssh/known_hosts` are never pinned.
+- Support bundles also redact unknown login names before addresses and
+  `ssh.options` values.
+- Systemd unit `ExecStart` is quoted and validated; config backups are
+  private; the socket directory is created 0700 and checked with `lstat`;
+  bash completion takes candidates literally.
+- Supply chain: CI actions pinned by SHA, pinned audit tools, gitleaks job,
+  dependabot, job timeouts; reproducible `.deb`/tarball; CycloneDX SBOM;
+  build provenance attestations on tags; checksum-verified toolchain
+  installer.
+
+Earlier in the 0.3.0 cycle:
+
 - The CLI and the app refuse a daemon socket served by another user.
 - `lablink import` drops service-check commands unless `--allow-commands`,
   never imports client preferences or OpenSSH program paths, lists every

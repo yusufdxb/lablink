@@ -80,7 +80,8 @@ package and by `lablink init`.
 - **An IP address is a location, not an identity.** LabLink records
   addresses, MACs and hostnames, but only the SSH host key proves which
   machine answers. When a device moves, LabLink verifies the host key before
-  using the new address.
+  using the new address, and the host must prove it holds the private key
+  (a credential-free OpenSSH handshake): a copied public key is not enough.
 - **SSH host keys establish the server's identity.** Pinned keys are written
   to a LabLink-owned `known_hosts` file and every `ssh`, `exec`, `copy-id`,
   login check and health check runs with `StrictHostKeyChecking=yes` against
@@ -94,7 +95,9 @@ package and by `lablink init`.
   never pins its key. A key is pinned only by `lablink trust` (or the GUI's
   **Pin** button) after you saw the fingerprint, by a fingerprint you wrote
   in the config, or by a matching entry already in your own
-  `~/.ssh/known_hosts` for that device's name.
+  `~/.ssh/known_hosts` for that device's name. `lablink ssh`/`exec` refuse a
+  device without a pin unless you pass `--unpinned`, and `lablink resolve`
+  prints only verified addresses.
 - **A changed host key stops access.** A mismatch is a RED security stop:
   `ssh`, `exec`, `copy-id` and checks refuse (exit 6) until you verify the
   new key on the device and replace the pin yourself
@@ -111,8 +114,9 @@ package and by `lablink init`.
   checks that every client runs as the same user, and refuses everyone else.
   Clients in turn refuse a socket served by another user.
 
-Details: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
-[SECURITY.md](SECURITY.md).
+Details: [SECURITY.md](SECURITY.md), [docs/SSH_IDENTITY.md](docs/SSH_IDENTITY.md),
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## Multi-site use
 

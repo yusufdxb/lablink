@@ -10,11 +10,16 @@ needed.
 
 Each release has `lablink_<version>_amd64.deb`,
 `lablink-<version>-x86_64-linux.tar.gz`, `BUILDINFO` (commit, compiler,
-build image, minimum glibc) and `SHA256SUMS`:
+build image, minimum glibc, build timestamp), a CycloneDX SBOM
+`lablink-<version>.cdx.json` and `SHA256SUMS`:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify lablink_<version>_amd64.deb --repo <owner>/<repo>
 ```
+
+The attestation shows the file was built by the project's CI from the tagged
+commit; builds are reproducible (see [RELEASING.md](RELEASING.md)).
 
 `lablink version` prints the version and the commit it was built from;
 they match the release's Git tag and `BUILDINFO`.

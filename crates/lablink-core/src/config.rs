@@ -1454,7 +1454,7 @@ devices:
     fn code_loading_forwarding_and_env_options_rejected() {
         // Options that load code into ssh, hand the remote host the user's
         // agent or display, open listeners, or send local environment are not
-        // on the allowlist (a denylist missed them before 0.3.1).
+        // on the allowlist (a denylist missed them before the 2026-10 security review).
         for opt in [
             "PKCS11Provider",
             "SecurityKeyProvider",

@@ -3,93 +3,123 @@
 Scope: `lablinkd`, `lablink`, `lablink-gui` running as an unprivileged user on
 a Linux workstation or laptop that moves between sites (labs, offices,
 workshops), managing SSH access to robots and edge computers on their
-networks.
+networks; and how LabLink is built and packaged.
+
+Method: STRIDE over the trust boundaries below, for the attacker models A-G.
+Every mitigation names the regression test that guards it; the security
+regression tests are listed in [TESTING.md](TESTING.md#security-regression-tests).
 
 ## Assets
 
 | Asset | Why it matters |
 |---|---|
-| SSH credentials (keys, agent, ControlMaster sockets) | Access to robots that can move. LabLink never reads or stores them; OpenSSH uses them. |
+| SSH credentials (keys, agent, passwords typed into OpenSSH, ControlMaster sockets) | Access to robots that can move. LabLink never reads or stores them; OpenSSH uses them. |
 | Correct device identity | Sending commands or credentials to the wrong machine (or an impostor) is the main risk LabLink introduces or removes. |
-| Pinned host keys (`known_hosts` in the state dir) | Integrity decides whether `ssh`/`exec` connect. |
+| Pinned host keys (`known_hosts` in the state dir, config fingerprints) | Integrity decides whether `ssh`/`exec` connect. |
 | The lab networks themselves | Indiscriminate scanning disrupts other users and can look like an attack. |
 | The cache and history | Integrity matters for diagnosis; contains IPs, MACs, hostnames, no secrets. |
+| Release artifacts | A tampered package runs as every user who installs it. |
+
+## Attacker models
+
+| | Attacker | Can | LabLink's answer |
+|---|---|---|---|
+| A | Malicious device on the same LAN/Wi-Fi | answer ARP, ICMP, TCP/22, mDNS, DNS (rogue DHCP), present any host key, replay public keys | identity = pinned key **proven** by a signature (T1, T26, T27); network claims never pin or verify (T4, T28); scans and probes stay inside approved, attached, private networks (T9, T32) |
+| B | Impersonation of a trusted device | take its IP/MAC/name | contradicting key = security stop (T1, T27); a replayed key fails the possession proof (T26) |
+| C | Malicious config / export file | anything in a YAML file the user imports | nothing runs or weakens silently (T16, T21, T29, T30) |
+| D | Another local user | connect to sockets, plant files/symlinks in /tmp | peer-UID checks, private dirs, lstat, O_EXCL (T20, T24) |
+| E | Compromised remote device | answer sessions, send output | no agent/X11/port forwarding in automated sessions (T31); output stored without control characters, shown escaped (T33); a device can never change its own pin |
+| F | Malicious contributor or dependency | change code, CI, dependencies | reviewed changes, locked and audited dependencies, SHA-pinned actions, least-privilege CI, reproducible builds, SBOM, provenance (T35) |
+| G | Accidental misuse | wrong site, wrong device, "yes" to a prompt | no silent TOFU (T34), ambiguous names refused (T23), AWAY devices refused (T23), `resolve` only for verified addresses (T34) |
 
 ## Trust boundaries
 
 1. **Local user boundary.** The daemon, CLI and GUI run as the same user. The
-   IPC socket sits in a 0700 directory, is 0600, and every connection's peer
-   UID is checked with `SO_PEERCRED`; other local users cannot query or
-   control the daemon. The CLI and GUI check the daemon's UID the same way
-   before believing its answers (which choose the `ssh` binary and options
-   they run). Root can, by design.
+   IPC socket sits in a 0700 directory (created 0700 and checked with
+   `lstat`), is 0600, and every connection's peer UID is checked with
+   `SO_PEERCRED`; other local users cannot query or control the daemon. The
+   CLI and GUI check the daemon's UID the same way before believing its
+   answers (which choose the `ssh` binary and options they run). Root can, by
+   design.
 2. **Network boundary.** Everything learned from the network (neighbor
-   entries, mDNS answers, scan results, host keys, `hostname` output) is
-   untrusted input. It is parsed defensively (length-checked netlink parser,
-   key blobs validated against their declared type, mDNS and hostnames
-   validated before being learned) and never executed or interpolated into a
-   shell, with one exception noted below.
+   entries, mDNS answers, scan results, host keys, `hostname` output, service
+   output) is untrusted input. It is parsed defensively (length-checked
+   netlink parser, key blobs validated against their declared type, host
+   names validated, control characters removed or escaped) and never
+   executed or interpolated into a shell. Public keys are not proof of
+   identity: possession of the private key is checked through OpenSSH.
 3. **Gateway boundary.** For devices behind a gateway (`via:`), LabLink runs a
-   fixed command on the gateway over SSH. Only an `IpAddr` and a `u16` port
-   (both typed, never strings from the network or config) are interpolated.
-4. **Config boundary.** The config file is trusted (it is the user's own
-   file), but validated strictly (and import files are not trusted: T21): unknown keys are rejected so a typo cannot
-   silently disable a safety setting, and options that weaken host-key
-   checking (`StrictHostKeyChecking`, `UserKnownHostsFile`, `HostKeyAlias`,
-   `ProxyCommand`, ...) are refused in `ssh.options`. Usernames and `ssh_host`
-   are validated so they cannot inject ssh options (no leading `-`), and ssh is
-   invoked with `--` before the host argument.
+   fixed command on the gateway over SSH, only through a gateway whose
+   identity is verified. Only an `IpAddr` and a `u16` port (both typed, never
+   strings from the network or config) are interpolated.
+4. **Config boundary.** The config file is the user's own and trusted, but
+   validated strictly; import files are not trusted (T21). Unknown keys are
+   rejected so a typo cannot silently disable a safety setting; `ssh.options`
+   is an allowlist (T29); usernames, names and `ssh_host` cannot start with
+   `-` and ssh is invoked with `--` before the host argument.
+5. **Build and release boundary.** Source, dependencies, CI and the release
+   machine (T35).
+
+## Who enforces what
+
+| Property | Enforced by |
+|---|---|
+| Key exchange, host-key signature, authentication, encryption | OpenSSH |
+| Which keys are acceptable for a device, when to connect at all, which options OpenSSH gets | LabLink |
+| Separation from other local users | the OS (file modes, `SO_PEERCRED`), LabLink sets the modes and checks the UID |
+| Precedence of command-line options over `~/.ssh/config` | OpenSSH; LabLink depends on it |
+| First fingerprint comparison | you, on a trusted channel (the device's console) |
 
 ## Threats and mitigations
 
 | # | Threat | Mitigation | Verified by |
 |---|---|---|---|
-| T1 | Impostor answers at a device's address (ARP spoofing, rogue DHCP, reinstalled machine) | Host-key pinning. A key that contradicts the pin while MAC/hostname/static IP match is a MISMATCH: RED, logged at warn, recorded once, `resolve`/`ssh`/`exec`/service checks/login checks refuse. Nothing is re-pinned automatically. Losing the address does not clear a MISMATCH; only a verified pinned key or `lablink trust --replace` does. | `host_key_mismatch_is_red_and_never_accepted`, `offline_and_mismatch_are_refused_before_ssh_runs`, `identity::tests::*` |
+| T1 | Impostor answers at a device's address (ARP spoofing, rogue DHCP, reinstalled machine) | Host-key pinning. A key that contradicts the pin while MAC, static IP, or a name that put the device at this address match is a MISMATCH: RED, logged at warn, recorded once, `resolve`/`ssh`/`exec`/service checks/login checks refuse. Nothing is re-pinned automatically. Losing the address does not clear a MISMATCH; only the pinned key proven again or `lablink trust --replace` does. | `host_key_mismatch_is_red_and_never_accepted`, `offline_and_mismatch_are_refused_before_ssh_runs`, `contradicting_key_at_a_name_claimed_address_is_a_mismatch`, `identity::tests::*` |
 | T2 | DHCP gives a device's old address to another host | Recognised as address reuse (only historical-IP evidence + different key), the address is released without a security alarm and without connecting to the newcomer. | `unknown_host_at_old_dhcp_address_releases_it`, `reassigned_ip_moves_to_the_device_whose_key_it_presents` |
 | T3 | IP change makes `ssh` hit known_hosts prompts and users learn to type "yes" | Pinned devices are connected with `HostKeyAlias=lablink.<site>.<name>` against LabLink's known_hosts and `StrictHostKeyChecking=yes`, so the pin follows the device across addresses and no prompt appears. | `exec_preserves_exit_code_output_and_pins_host_key` |
-| T4 | Trust-on-first-use pins an attacker's key | No silent TOFU. A key is pinned only if it is in the config, already trusted in the user's own `~/.ssh/known_hosts` (entries keyed by the bare IP count only when the address has current evidence beyond history: configured static IP, resolved from a configured hostname within the last 10 minutes, MAC or hostname match, adoption), or explicitly confirmed with `lablink trust` (preview first; the confirm call must list exactly the fingerprints shown, and a fresh scan must still return exactly those). | `unpinned_device_trusted_from_user_known_hosts_or_explicit_trust`, `trust_requires_confirmation_when_not_interactive`, `known_hosts_entry_keyed_by_ip_alone_is_not_enough_for_a_history_only_address` |
-| T5 | User extras or config weaken host-key checking | LabLink's host-key options are placed first (OpenSSH takes the first value). `ssh.options` refuses host-key and addressing options (`StrictHostKeyChecking`, `UserKnownHostsFile`, `GlobalKnownHostsFile`, `HostKeyAlias`, `CheckHostIP`, `UpdateHostKeys`, `HostName`, `KnownHostsCommand`, `VerifyHostKeyDNS`, `ProxyCommand`, `ProxyJump`, `ControlPath`, `ControlMaster`, `LocalCommand`, `PermitLocalCommand`, `RemoteCommand`). The user's own `~/.ssh/config` is outside LabLink's control; only options LabLink sets itself on the command line override it. | `verified_device_pins_host_key_first`, `ssh_uses_interactive_mode_with_pinned_identity`, `weakening_ssh_options_rejected`, `host_key_bypass_options_rejected` |
-| T6 | Credentials sent to an unidentified host by background checks | Login checks and service checks run only after the host key is verified. Unpinned hosts get no automated logins or commands. `lablink ssh`/`exec` to a device behind a gateway are refused unless the gateway's host key is verified against a pin, so the hop always runs with `StrictHostKeyChecking=yes`. | `service_checks_report_per_service_and_only_run_on_verified_hosts`, `resolve_refuses_tunnel_through_unverified_gateway`, `follow_up` logic |
-| T7 | Password capture or storage | LabLink never asks for, stores or logs passwords. Background SSH uses `BatchMode=yes`. Interactive prompts happen only in the user's terminal, handled by OpenSSH. | code review: no password field exists in config, protocol or cache |
-| T8 | Secrets in logs | Logs contain device names, IPs, MACs, fingerprints (public), state transitions and ssh error classifications. Remote command output is not logged; private keys are never read. | code review |
-| T9 | Scanning networks the user did not intend | Active scans only for `active_scan: true` networks of the ACTIVE site (never an AWAY or UNKNOWN site, nor one chosen only by a subnet another site shares) that are private (RFC 1918 or link-local), IPv4, at most `max_scan_hosts` (default 1024, hard ceiling 4096, so /8, /12, /16 are refused), and contained in a directly attached subnet (overlap is not enough). Addresses of configured devices (expected IPs, resolved configured hostnames, known history) are probed individually by their monitors, never as ranges. One-time scans (`discover --scan-cidr`) apply the same rules except the allowlist. Refusals are logged and recorded with the reason. Devices behind a gateway are never probed from this host. | `large_networks_rejected`, `hard_ceiling_cannot_be_raised`, `public_and_v6_rejected`, `active_scans_only_touch_allowlisted_attached_networks`, `device_behind_gateway_is_checked_through_it_never_directly` |
-| T10 | Probe traffic triggers remote defences (sshd log noise, fail2ban) | Liveness uses ICMP; TCP/22 at most every 30 s per device; host-key scans on transitions or every 10 min; login checks on transitions or every 5 min. Scans TCP-probe unmatched hosts at most once per 10 min. | `history_records_transitions_not_heartbeats`, soak counters in PERFORMANCE.md |
+| T4 | Trust-on-first-use, or a forged network answer, pins an attacker's key | No silent TOFU. A key is pinned only if it is in the config, already in the user's own `~/.ssh/known_hosts` under one of the device's configured names, or under its bare IP when that IP is a configured static IP or where the user adopted the device (within 10 minutes); or explicitly confirmed with `lablink trust` (preview first; the confirmation must list exactly the fingerprints shown, and a fresh scan must still return exactly those). mDNS/DNS answers, MAC matches and learned (network-announced) host names never select a known_hosts entry. | `unpinned_device_trusted_from_user_known_hosts_or_explicit_trust`, `trust_requires_confirmation_when_not_interactive`, `known_hosts_entry_keyed_by_ip_alone_is_not_enough_for_a_history_only_address`, `forged_mdns_cannot_import_an_ip_keyed_known_hosts_entry` |
+| T5 | User extras, config or `~/.ssh/config` weaken host-key checking | LabLink's host-key options are placed first (OpenSSH takes the first value) and include `KnownHostsCommand=none` where supported (OpenSSH 8.5+). `ssh.options` is an allowlist (T29). The user's own `~/.ssh/config` is otherwise outside LabLink's control; only options LabLink sets on the command line override it. | `verified_device_pins_host_key_first`, `ssh_uses_interactive_mode_with_pinned_identity`, `weakening_ssh_options_rejected`, `host_key_bypass_options_rejected` |
+| T6 | Credentials sent to an unidentified host by background checks | Login checks and service checks run only after the identity is verified (key proven, T26). Unpinned hosts get no automated logins or commands. `ssh`/`exec` to a device behind a gateway are refused unless the gateway's identity is verified, so the hop always runs with `StrictHostKeyChecking=yes`. | `service_checks_report_per_service_and_only_run_on_verified_hosts`, `resolve_refuses_tunnel_through_unverified_gateway` |
+| T7 | Password capture or storage | LabLink never asks for, stores or logs passwords. Background SSH uses `BatchMode=yes`. Interactive prompts happen only in the user's terminal, handled by OpenSSH. `copy-id` runs `ssh-copy-id` through the pinned identity. | no password field exists in config, protocol or cache; clean-room step "password isolation" (the copy-id password is absent from config, state, cache.db, cache dir and the daemon journal) |
+| T8 | Secrets in logs | Logs contain device names, IPs, MACs, fingerprints (public), state transitions and ssh error classifications. Remote command output is not logged, except the first line of a service check's output, stored without control characters. Private keys are never read. | code review, `control_characters_are_shown_not_executed` |
+| T9 | Scanning networks the user did not intend | Active scans only for `active_scan: true` networks of the ACTIVE site (never an AWAY or UNKNOWN site, nor one chosen only by a subnet another site shares) that are private (RFC 1918 or link-local), IPv4, at most `max_scan_hosts` (default 1024, hard ceiling 4096), and contained in a directly attached subnet. Addresses of configured devices are probed individually, never as ranges. One-time scans (`discover --scan-cidr`) apply the same rules except the allowlist. Devices behind a gateway are never probed from this host. | `large_networks_rejected`, `hard_ceiling_cannot_be_raised`, `public_and_v6_rejected`, `active_scans_only_touch_allowlisted_attached_networks`, `device_behind_gateway_is_checked_through_it_never_directly` |
+| T10 | Probe traffic triggers remote defences (sshd log noise, fail2ban) | Liveness uses ICMP; TCP/22 at most every 30 s per device; host-key scans on transitions or every 10 min; possession proofs only when a key is matched at a new address (one connection, no authentication attempt); login checks on transitions or every 5 min. Scans TCP-probe unmatched hosts at most once per 10 min. | `history_records_transitions_not_heartbeats`, `key_proof_against_a_real_sshd` (no "Failed" line in the sshd log), soak counters in PERFORMANCE.md |
 | T11 | Local DoS of the daemon via IPC | 64 KiB request limit, 32 connections, 30 s idle timeout, bounded discovery queue, bounded scan workers. | `malformed_and_oversized_requests_are_rejected`, `no_runaway_task_creation` |
 | T12 | Corrupt or tampered cache | Unreadable database moved aside, fresh cache created, event recorded. Individual records that fail to decode are skipped. Pins in the cache are only as trustworthy as the user's account; config pins always apply. | `corrupt_cache_is_recovered`, `corrupt_file_is_moved_aside`, `truncated_database_recovered` |
 | T13 | Two daemons fighting over one state dir | `flock` on `lablinkd.lock`; a second daemon refuses to start. | `second_daemon_on_same_state_dir_is_refused` |
-| T14 | First-run setup enables scanning the user did not choose | `lablink init` and the GUI wizard list attached networks with nothing selected; active scanning is a separate yes per network and is offered only where the daemon's own scan rule (T9) allows it. `init --yes` without `--scan`/`--network` allows no network. | `init_never_selects_networks_by_itself`, `nothing_is_selected_or_scanned_by_default`, `scanning_needs_both_ticks_and_an_allowed_range` |
-| T15 | Installing an SSH key sends the user's password to an impostor | `lablink copy-id` (and the GUI's SSH Setup, which runs it in a terminal) refuses devices without a pinned host key and passes LabLink's pinned host-key options to `ssh-copy-id`, so the password prompt can only be answered by the verified machine. The password is typed into OpenSSH; LabLink and the GUI never see it. | `copy_id_goes_through_the_pinned_identity_only`, `copy_id_uses_the_pinned_options_and_refuses_unpinned`, clean-room step "SSH setup" |
-| T16 | Imported configuration silently trusts keys | `lablink import` drops pinned fingerprints from the file unless `--trust-pins` is given, lists every key it would trust when it is, shows all changes and asks before writing; conflicting entries are skipped unless `--replace`. | `import_merges_drops_pins_by_default_and_respects_conflicts`, `adopt_export_import_round_trip_without_secrets` |
-| T17 | Diagnostics leak lab details | `lablink support-bundle` replaces IPv4/IPv6 and MAC addresses, fingerprints, `.local` names, usernames, hostnames, labels, device and site names, network names, Wi-Fi names, home directories (any `/home/<user>`), private-key blocks and `password=`/`token=`/`Bearer` values with placeholders; drops notes and service-check commands; never collects ssh-agent contents, shell history, known_hosts or other files; uploads nothing. | `redacts_addresses_fingerprints_and_registered_words`, `redacts_ipv6_local_names_secrets_and_other_homes`, `adversarial_bundle_leaks_nothing`, `support_bundle_is_redacted`, clean-room step "support bundle" |
-| T18 | Settings edits break or weaken the config | The GUI and `import` write only configs that pass the same validation as the daemon, atomically, keeping the previous file as a backup. The `ssh:` section is not editable in the GUI. | `write_validates_backs_up_and_round_trips`, `edits_are_validated_before_saving` |
-| T19 | A changed host key goes unnoticed between identity checks | A login check that fails because the server presented a different key triggers an immediate identity re-check, which turns the device RED (MISMATCH) within seconds instead of at the next periodic check. | `changed_key_seen_by_the_login_check_is_reverified_at_once`, clean-room step "security stop" |
-| T20 | Another local user serves a fake daemon at the socket path (possible with the `/tmp/lablink-<uid>` fallback when `$XDG_RUNTIME_DIR` is unset) and returns its own `ssh` binary or `ProxyCommand` | Clients refuse a socket whose peer UID (SO_PEERCRED) is not theirs. The daemon refuses a socket directory owned by another user or that is a symlink. | `only_a_daemon_of_this_user_is_believed`, `peer_uid_of_a_local_socket_is_ours`, `symlinked_socket_directory_is_refused` |
-| T21 | A malicious export file (`lablink import`) runs commands, swaps programs or adds scans | Service-check commands are dropped unless `--allow-commands` (and are listed either way); client preferences (the terminal the app launches) and OpenSSH program paths are never imported; pins are dropped unless `--trust-pins`; every network that would be scanned is listed; files over 1 MiB and YAML alias bombs are refused; nothing is written without confirmation. | `import_never_takes_commands_preferences_or_program_paths_silently`, `bad_files_are_rejected` |
-| T22 | Spoofed site signals (subnet, gateway MAC, Wi-Fi name) | Site detection only decides which devices are probed and which approved networks may be scanned; it never pins, unpins or accepts a host key, and adopts nothing. Scans still need an approved, private, attached, size-limited network. Gateway signatures are learned only while host keys confirm the site. | `site::tests::*`, `gateway_mac_and_host_keys_pick_the_right_same_subnet_site` |
-| T23 | A bare device name runs a command on the same-named device of another site | A bare name resolves only when unique, or when exactly one match is at a site LabLink is confident about (host key or gateway MAC evidence, or chosen by hand); otherwise `ambiguous` (exit 8) lists the `site/name` choices. When a shared name was resolved, the CLI says which device it used. `ssh`/`exec` to a device of an AWAY site are refused without `--force`. | `ambiguous_name_is_refused_until_one_site_is_confident`, `ambiguous_name_message_and_exit_code`, `sites_status_scopes_and_away_semantics` |
-| T24 | Symlink or race attacks on files LabLink writes | Config is written through a fresh `O_EXCL` temporary file (0600, directory 0700) and renamed; support bundles are assembled in a private random directory and never replace an existing file; the state directory is 0700. | `config_is_private_and_a_planted_temp_symlink_is_not_followed`, `bundle_without_daemon_is_private_and_never_clobbers` |
-| T25 | A sandboxed or test process (different `HOME`) installs, restarts or stops the real user's service | Service control only acts when the systemd user manager's `HOME`/`XDG_CONFIG_HOME` match the caller's. | `foreign_home_never_drives_the_real_user_manager` |
+| T14 | First-run setup enables scanning the user did not choose | `lablink init` and the GUI wizard list attached networks with nothing selected; active scanning is a separate yes per network and is offered only where T9 allows it. | `init_never_selects_networks_by_itself`, `nothing_is_selected_or_scanned_by_default`, `scanning_needs_both_ticks_and_an_allowed_range` |
+| T15 | Installing an SSH key sends the user's password to an impostor | `lablink copy-id` (and the GUI's SSH Setup) refuses devices without a pin and passes LabLink's pinned host-key options to `ssh-copy-id`, so the password prompt can only be answered by the machine holding the pinned key. The password is typed into OpenSSH; LabLink never sees it. | `copy_id_goes_through_the_pinned_identity_only`, `copy_id_uses_the_pinned_options_and_refuses_unpinned`, clean-room steps "SSH setup", "password isolation" |
+| T16 | Imported configuration silently trusts keys | `lablink import` drops pinned fingerprints unless `--trust-pins`, lists every key it would trust when it is, shows all changes and asks before writing; conflicting entries are skipped unless `--replace`. | `import_merges_drops_pins_by_default_and_respects_conflicts`, `adopt_export_import_round_trip_without_secrets` |
+| T17 | Diagnostics leak lab details | `lablink support-bundle` replaces IPv4/IPv6 and MAC addresses, fingerprints, `.local` names, usernames (including any `name@` directly before a redacted address), hostnames, labels, device, site and network names, Wi-Fi names, home directories, `ssh.options` values, private-key blocks and token-like values with placeholders; drops notes and service-check commands; never collects agent contents, history, known_hosts or other files; uploads nothing. | `adversarial_bundle_leaks_nothing`, `redacts_*`, clean-room step "support bundle" |
+| T18 | Settings edits break or weaken the config | The GUI and `import` write only configs that pass the same validation as the daemon, atomically, keeping the previous file as a fresh 0600 backup. The `ssh:` section is not editable in the GUI. | `write_validates_backs_up_and_round_trips`, `config_is_private_and_a_planted_temp_symlink_is_not_followed` |
+| T19 | A changed host key goes unnoticed between identity checks | A login check that fails because the server presented a different key triggers an immediate identity re-check (MISMATCH within seconds). | `changed_key_seen_by_the_login_check_is_reverified_at_once`, clean-room step "security stop" |
+| T20 | Another local user serves a fake daemon at the socket path (possible with the `/tmp/lablink-<uid>` fallback) | Clients refuse a socket whose peer UID is not theirs. The daemon creates the socket directory 0700 and refuses one that is a symlink, not a directory, or owned by another user (checked with `lstat`). | `only_a_daemon_of_this_user_is_believed`, `symlinked_socket_directory_is_refused`, `socket_directory_is_created_private_and_must_be_a_directory`, clean-room step "other local user" |
+| T21 | A malicious export file (`lablink import`) runs commands, swaps programs, weakens ssh or adds scans | Service-check commands are dropped unless `--allow-commands` (and are listed either way); client preferences, OpenSSH program paths and `ssh.options` are never imported; pins are dropped unless `--trust-pins`; every network that would be scanned and every doctor check with its parameters are listed; files over 1 MiB, YAML alias bombs and deep nesting (T30) are refused; nothing is written without confirmation. | `import_never_takes_commands_preferences_or_program_paths_silently`, `import_never_takes_ssh_options_even_with_replace`, `imported_checks_are_listed_with_their_parameters`, `bad_files_are_rejected`, `fuzz_import_parse_and_plan`, clean-room step "hostile import" |
+| T22 | Spoofed site signals (subnet, gateway MAC, Wi-Fi name, a device's MAC) | Site detection only decides which devices are probed and which approved networks may be scanned; it never pins, unpins or accepts a host key. Sightings of a site's devices (MAC, pinned key elsewhere) count only as hints unless one of the site's own networks is attached. | `site::tests::*`, `gateway_mac_and_host_keys_pick_the_right_same_subnet_site`, `a_foreign_device_mac_cannot_flip_the_site` |
+| T23 | A bare device name runs a command on the same-named device of another site | A bare name resolves only when unique, or when exactly one match is at a site LabLink is confident about; otherwise `ambiguous` (exit 8) lists the `site/name` choices. `ssh`/`exec`/`resolve` to a device of an AWAY site are refused (exit 5) without `--force`. | `ambiguous_name_is_refused_until_one_site_is_confident`, `sites_status_scopes_and_away_semantics` |
+| T24 | Symlink or race attacks on files LabLink writes | Config and backups are written through fresh `O_EXCL` files (0600, directory 0700) and renamed; support bundles are assembled in a private random directory and never replace an existing file; the state directory is 0700. | `config_is_private_and_a_planted_temp_symlink_is_not_followed`, `bundle_without_daemon_is_private_and_never_clobbers` |
+| T25 | A sandboxed or test process (different `HOME`) installs, restarts or stops the real user's service | Service control only acts when the systemd user manager's `HOME`/`XDG_CONFIG_HOME` match the caller's. The unit's `ExecStart` is one quoted, validated word. | `foreign_home_never_drives_the_real_user_manager`, `exec_start_is_one_quoted_word_and_never_a_new_directive` |
+| T26 | A host replays a device's public host key (ssh-keyscan returns public keys only) to be shown as that device, have its MAC learned, or displace the real device | A pinned key matched at a new address (or after pinning) only makes a **possession proof** due: a fresh OpenSSH connection with the pinned options and every authentication method off. OpenSSH checks the server's signature before authentication, so reaching "Permission denied" proves the private key without offering any credential. Proven: Verified, MAC learned. Other key or bad signature: MISMATCH. No answer: Unverified until the periodic check. Scan sightings never verify by themselves. | `replayed_public_key_is_never_verified`, `replayed_host_key_fails_the_possession_proof`, `key_proof_against_a_real_sshd`, `key_proof_needs_openssh_s_own_denial_line`, `key_proof_sends_no_credentials_and_never_multiplexes` |
+| T27 | A forged mDNS/DNS answer or MAC sighting moves a device to an attacker's address | A pinned device verified at its current address is never moved by an unverified name or MAC sighting on a single missed probe. When a name moves an offline device, that name is carried into the next key check, so a contradicting key is a MISMATCH. A key-verified sighting replaces an address whose identity is not verified (a stranger answering ping at an old address). | `forged_mdns_cannot_move_a_verified_pinned_device`, `contradicting_key_at_a_name_claimed_address_is_a_mismatch`, `key_verified_sighting_displaces_a_squatter` |
+| T28 | Forged names point probes at the Internet, or inject text | Name answers with a public address outside configured or attached networks are ignored. mDNS host names are validated before use; learned names are never used to pick known_hosts entries. | `name_answers_cannot_point_outside_the_lab_or_inject_names` |
+| T29 | `ssh.options` loads code into ssh, forwards the agent/display/ports to a device, sends environment, or weakens checking | `ssh.options` is an allowlist of tuning and authentication options; `ForwardAgent`/`ForwardX11*` only as `no`; never imported. | `code_loading_forwarding_and_env_options_rejected`, `import_never_takes_ssh_options_even_with_replace` |
+| T30 | A crafted YAML file burns CPU (deeply nested brackets) | Flow nesting deeper than 64 levels is refused before parsing (measured: a 32000-deep file is refused in 2 ms instead of 2-4 s). | `deeply_nested_yaml_is_refused_quickly` |
+| T31 | A compromised device uses the user's agent or display through LabLink's own sessions | Login checks, service checks, doctor and app actions pass `ForwardAgent=no`, `ForwardX11=no`, `ClearAllForwardings=yes`, `PermitLocalCommand=no`, which beat `~/.ssh/config`. | `auth_probe_never_creates_master`, `doctor_runs_read_only_checks_through_the_exec_path` |
+| T32 | Hostile output (ssh errors, notes, service output, discovered names) controls the terminal | Notes reject control characters; service output is stored without them; the CLI shows control characters escaped. | `notes_with_terminal_escapes_are_refused`, `control_characters_are_shown_not_executed` |
+| T33 | Hostile netlink, keyscan or known_hosts input crashes or hangs the daemon | Length-checked parsers; fuzzed. Netlink comes only from the kernel (unprivileged unicast/multicast to another socket is refused with EPERM, verified on Linux 6.8). | `fuzz_parse_datagram`, `fuzz_keyscan_and_known_hosts_parsers` |
+| T34 | The user (or a script) connects to an unverified host, or hands its address to scp/rsync | `ssh`/`exec` refuse devices without a pin (exit 7) unless `--unpinned`; `resolve` prints only addresses whose identity is verified (exit 7, or 5 for AWAY) unless `--force`; doctor and app actions never run on unpinned devices. | `unpinned_devices_need_trust_or_an_explicit_opt_in` |
+| T35 | Supply chain: tampered dependency, CI action or release | crates.io only, `Cargo.lock` with `--locked`, cargo-deny (advisories, licenses, sources) and cargo-audit in CI; actions pinned by SHA, `contents: read`, no `pull_request_target`, checkout without persisted credentials; gitleaks over history; builds from a clean `git archive` in a digest-pinned image with a checksum-verified toolchain installer; reproducible artifacts (`SOURCE_DATE_EPOCH`); SHA256SUMS, CycloneDX SBOM and (on tags) a Sigstore build-provenance attestation. See [RELEASING.md](RELEASING.md). | CI jobs `dependencies`, `secrets`, `release`; two release builds compared byte for byte |
 
-## Known limitations
+## Residual risks
 
-- **Existing ControlMaster connections.** When the user already has an open
-  OpenSSH master for the target address (e.g. `ControlMaster auto` in
-  `~/.ssh/config`), OpenSSH multiplexes over it and does not re-check the host
-  key; the guarantee then rests on the check made when the master connected.
-  Background checks reuse such masters by default (needed for password-only
-  servers); `ssh.reuse_control_master: false` forces them onto fresh
-  connections (`ControlPath=none`). Interactive `lablink ssh`/`exec` follow
-  the user's own ControlMaster settings.
-- **Password-only servers.** LabLink cannot verify login non-interactively on
-  a server that only accepts passwords; it reports `ssh_auth: failed` with the
-  reason "server only accepts password authentication". The fix is a key, or
-  an open ControlMaster session (`lablink ssh <device>` with `ControlPersist`).
-- **Cloned images** that share host keys are distinguishable only with other
-  signals (MAC, hostname, static IP); otherwise sightings are "ambiguous".
-- **MAC and hostname are spoofable.** They only associate addresses; they
-  never override a pinned host key.
-- **Root on this machine** can read the cache and talk to the socket.
-- **Site signals are not authenticated.** Anyone on a network can imitate a
-  subnet, a gateway MAC or a Wi-Fi name. This can make LabLink believe it is
-  at a site (and so probe that site's device addresses and scan its
-  approved ranges); it cannot make LabLink trust a host.
+| Risk | Severity | Why it remains | Mitigation |
+|---|---|---|---|
+| First fingerprint comparison | medium | Only the user can compare it with the device | `trust` shows fingerprints and pins nothing without confirmation |
+| Existing ControlMaster connections are reused without a key exchange | low | Needed for password-only servers | `ssh.reuse_control_master: false` |
+| `--unpinned` and `--force` hand decisions to OpenSSH/the user | low | Explicit opt-in | Documented; never used by background checks |
+| Site signals are unauthenticated | low | Subnet, gateway MAC, SSID can be imitated | Never affect identity; scans stay inside approved ranges |
+| `ssh: false` devices are identified by address/MAC only | low | They have no SSH host key | Status is reachability only |
+| A key revoked later in `~/.ssh/known_hosts` stays pinned | low | LabLink pins are separate | `lablink trust --replace` |
+| Possession proof inconclusive (device busy, MaxStartups) | low | Fails closed (unverified) | Retried at the next identity check |
+| Root or the same user can change pins | by design | OS trust boundary | none |
+| Release signing key management | process | Attestations are keyless (Sigstore via GitHub OIDC) | Verify with `gh attestation verify` |

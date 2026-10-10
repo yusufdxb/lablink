@@ -1,6 +1,6 @@
 # LabLink tests
 
-Run everything with `cargo test --workspace --locked` (280 tests, 1 ignored
+Run everything with `cargo test --workspace --locked` (305 tests, 1 ignored
 soak test). No test needs a robot, a lab network, root or a running LabLink:
 every test uses temporary HOME, XDG, state and socket directories, and none
 touches the machine's network configuration or its systemd user manager.
@@ -30,6 +30,42 @@ Kinds:
 | lablink-gui | unit | 29 | wizard selects nothing by default and scans only with both ticks on an allowed range, settings and site management validation, device-edit diffs, adopt form (site choice), lifecycle steps, terminal argument shapes, color/indicator mapping, worker JSON shapes against a fake socket |
 | lablink-doctor | unit | 17 | check planning, script generation and parsing, verdict and exit codes (AWAY devices ignored), network-only devices, profile check selection, site scope |
 | lablink-setup | unit + localhost | 23 | interface classification with the daemon scan rule, config writes (0700 directory, 0600 exclusive temp file, validate, backup, atomic), init with a site and merging a site into an existing config, export/import hardening, support-bundle redaction (adversarial: IPv4/IPv6, MACs, fingerprints, `.local` names, home paths, tokens, names inside dotted host-key aliases), the bundle never clobbers files, the packaged unit equals the generated one, service actions refused when the systemd user manager belongs to another configuration |
+
+## Security regression tests
+
+Every confirmed security issue has a deterministic test that failed before
+its fix. Run them all with the normal suite, or by area:
+
+```bash
+cargo test --workspace --locked                                  # everything
+cargo test -p lablink-daemon --test identity_attacks             # LAN identity attacks
+cargo test -p lablink-ssh --test openssh_tools                   # against real OpenSSH (sshd, ssh-keygen; skipped if absent)
+cargo test -p lablink-cli --test cli unpinned                    # no TOFU behind the user's back
+```
+
+| Area | Tests |
+|---|---|
+| Authentication and credentials | `key_proof_sends_no_credentials_and_never_multiplexes`, `key_proof_against_a_real_sshd` (throwaway sshd on 127.0.0.1; no auth attempt in its log), `auth_probe_never_creates_master` (no agent/X11/port forwarding), `copy_id_uses_the_pinned_options_and_refuses_unpinned`, clean-room "password isolation" |
+| Trust and identity | `replayed_public_key_is_never_verified`, `replayed_host_key_fails_the_possession_proof`, `key_proof_needs_openssh_s_own_denial_line`, `forged_mdns_cannot_move_a_verified_pinned_device`, `contradicting_key_at_a_name_claimed_address_is_a_mismatch`, `key_verified_sighting_displaces_a_squatter`, `forged_mdns_cannot_import_an_ip_keyed_known_hosts_entry`, `known_hosts_entry_keyed_by_ip_alone_is_not_enough_for_a_history_only_address`, `revoked_key_is_never_taken_from_another_line`, `host_key_mismatch_is_red_and_never_accepted`, `trust_requires_confirmation_when_not_interactive`, `unpinned_devices_need_trust_or_an_explicit_opt_in` |
+| Discovery and sites | `name_answers_cannot_point_outside_the_lab_or_inject_names`, `a_foreign_device_mac_cannot_flip_the_site`, `fuzz_parse_datagram` (50,000 netlink datagrams), `fuzz_keyscan_and_known_hosts_parsers` (20,000), `active_scans_only_touch_allowlisted_attached_networks`, `ambiguous_name_is_refused_until_one_site_is_confident` |
+| Configuration, import, filesystem | `code_loading_forwarding_and_env_options_rejected`, `import_never_takes_ssh_options_even_with_replace`, `imported_checks_are_listed_with_their_parameters`, `deeply_nested_yaml_is_refused_quickly`, `notes_with_terminal_escapes_are_refused`, `fuzz_import_parse_and_plan` (5,000 hostile files), `config_is_private_and_a_planted_temp_symlink_is_not_followed` (and private backups), `socket_directory_is_created_private_and_must_be_a_directory`, `symlinked_socket_directory_is_refused`, `adversarial_bundle_leaks_nothing` |
+| Commands | `exec_is_batch_and_command_is_single_argument`, `verified_device_pins_host_key_first`, `ssh_binaries_and_options_cannot_inject`, `exec_start_is_one_quoted_word_and_never_a_new_directive`, `proxy_command_escapes_percent_outside_the_tokens`, `control_characters_are_shown_not_executed` |
+| Release | clean-room steps "artifacts" (SHA256SUMS), "package privileges", "hostile import", "other local user", "remove .deb", tarball install/uninstall; CI jobs `dependencies` (cargo-deny, cargo-audit) and `secrets` (gitleaks); two `scripts/release.sh` runs with identical `SHA256SUMS` |
+
+Static and dependency scans used before a release (containers, nothing
+installed on the host):
+
+```bash
+cargo deny check && cargo audit --deny warnings
+docker run --rm -v "$PWD":/src:ro ghcr.io/google/osv-scanner:v1.9.2 --lockfile /src/Cargo.lock
+docker run --rm -v "$PWD":/src:ro -w /src semgrep/semgrep:1.99.0 semgrep scan --metrics=off \
+    --config p/rust --config p/secrets --config p/github-actions --config p/command-injection
+docker run --rm -v "$PWD":/repo:ro zricethezav/gitleaks:v8.21.2 git /repo --log-opts=--all --config /repo/.gitleaks.toml
+docker run --rm -v "$PWD":/repo:ro -w /repo rhysd/actionlint:1.7.7
+```
+
+A clean scan does not prove the absence of vulnerabilities; it only rules
+out the classes those tools know.
 
 Soak tests (not run by default):
 
