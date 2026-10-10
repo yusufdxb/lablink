@@ -365,7 +365,7 @@ fn run_remote(client: &Client, device: &str, command: &str) -> Result<RunResult,
         command: command.to_string(),
         batch: true,
     };
-    let args = build_args(&target, &mode, &[]);
+    let args = build_args(&target, &mode, &lablink_ssh::automated_session_args());
     let out = run_captured(
         &target.binary,
         &args,

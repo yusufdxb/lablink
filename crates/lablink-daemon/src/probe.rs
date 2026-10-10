@@ -257,7 +257,7 @@ impl RealProber {
                     command,
                     batch: true,
                 },
-                &[],
+                &lablink_ssh::automated_session_args(),
             );
             // Like the auth probe: reuse a user ControlMaster, never create one.
             args.splice(0..0, ["-o".to_string(), "ControlMaster=no".to_string()]);

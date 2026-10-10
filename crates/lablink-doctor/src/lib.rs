@@ -623,7 +623,7 @@ fn session(
             command: format!("sh -c {}", shell_quote(&script)),
             batch: true,
         },
-        &[],
+        &lablink_ssh::automated_session_args(),
     );
     let out = match run_captured(&t.binary, &args, timeout, OutputMode::Capture, true) {
         Ok(o) => o,

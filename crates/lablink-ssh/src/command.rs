@@ -57,6 +57,25 @@ pub enum Mode {
     AuthProbe,
 }
 
+/// Options for ssh sessions LabLink starts on its own (login checks, service
+/// checks, doctor, GUI actions): whatever the user's `~/.ssh/config` says,
+/// such a session never forwards the agent, X11 or ports to the device and
+/// never runs a `LocalCommand`. Command-line options beat the config file.
+pub const AUTOMATED_SESSION_OPTIONS: [&str; 4] = [
+    "ForwardAgent=no",
+    "ForwardX11=no",
+    "ClearAllForwardings=yes",
+    "PermitLocalCommand=no",
+];
+
+/// [`AUTOMATED_SESSION_OPTIONS`] as `-o` arguments, for `extra`.
+pub fn automated_session_args() -> Vec<String> {
+    AUTOMATED_SESSION_OPTIONS
+        .iter()
+        .flat_map(|o| ["-o".to_string(), (*o).to_string()])
+        .collect()
+}
+
 fn opt(args: &mut Vec<String>, k: &str, v: impl AsRef<str>) {
     args.push("-o".into());
     args.push(format!("{k}={}", v.as_ref()));
@@ -98,6 +117,10 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
             // Reuse an existing master if the user has one, never start one.
             opt(&mut a, "ControlMaster", "no");
             opt(&mut a, "LogLevel", "ERROR");
+            for o in AUTOMATED_SESSION_OPTIONS {
+                a.push("-o".into());
+                a.push(o.into());
+            }
             a.push("-T".into());
             a.push("-n".into());
         }
@@ -248,6 +271,11 @@ mod tests {
     fn auth_probe_never_creates_master() {
         let a = build_args(&target(true), &Mode::AuthProbe, &[]);
         assert!(a.contains(&"ControlMaster=no".to_string()));
+        for o in AUTOMATED_SESSION_OPTIONS {
+            let i = pos(&a, o);
+            assert_eq!(a[i - 1], "-o");
+            assert!(i < pos(&a, "--"), "{a:?}");
+        }
         assert!(a.contains(&"BatchMode=yes".to_string()));
         assert_eq!(a.last().unwrap(), "hostname");
     }
@@ -401,7 +429,12 @@ mod probe_parity_tests {
             &[],
         );
         let probe = build_args(&t, &Mode::AuthProbe, &[]);
-        let probe_only = ["ControlMaster=no", "LogLevel=ERROR"];
+        // Probe-only flags; the forwarding switches do not affect
+        // authentication.
+        let probe_only: Vec<&str> = ["ControlMaster=no", "LogLevel=ERROR"]
+            .into_iter()
+            .chain(AUTOMATED_SESSION_OPTIONS)
+            .collect();
         let strip = |a: &[String]| -> Vec<String> {
             let mut out = Vec::new();
             let mut i = 0;

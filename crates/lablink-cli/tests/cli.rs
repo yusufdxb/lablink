@@ -271,6 +271,8 @@ fn exec_preserves_exit_code_output_and_pins_host_key() {
     ] {
         assert!(a.contains(&want.to_string()), "{want} missing from {a:?}");
     }
+    // A command the user runs keeps the user's own forwarding settings.
+    assert!(!a.iter().any(|x| x == "ForwardAgent=no"), "{a:?}");
     let kh = a
         .iter()
         .find(|x| x.starts_with("UserKnownHostsFile="))
@@ -501,6 +503,11 @@ fn doctor_runs_read_only_checks_through_the_exec_path() {
     assert!(args.iter().any(|a| a == "BatchMode=yes"));
     assert!(args.iter().any(|a| a == "-T"));
     assert!(args.iter().any(|a| a.starts_with("sh -c ")), "{args:?}");
+    // An automated session never forwards the agent, X11 or ports, whatever
+    // the user's ~/.ssh/config says.
+    for o in lablink_ssh::AUTOMATED_SESSION_OPTIONS {
+        assert!(args.iter().any(|a| a == o), "{o} missing from {args:?}");
+    }
 
     std::fs::write(
         &cfg,
