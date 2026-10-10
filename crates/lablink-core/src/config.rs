@@ -414,7 +414,6 @@ pub enum ConfigError {
 /// (`SetEnv`, `SendEnv`). LabLink sets addressing, host-key and batch options
 /// itself.
 const ALLOWED_SSH_OPTIONS: &[&str] = &[
-    "addkeystoagent",
     "addressfamily",
     "certificatefile",
     "ciphers",
@@ -478,6 +477,13 @@ pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 /// cost seconds of CPU and a 400 KB one minutes.
 pub const MAX_YAML_FLOW_DEPTH: usize = 64;
 
+/// Most `[` and `{` characters a configuration may contain, wherever they
+/// are (inside quotes and comments too). Nesting can never be deeper than
+/// this count, so it bounds the parser's cost even if the depth lexer below
+/// disagrees with the YAML grammar somewhere. LabLink writes block style;
+/// hand-written configs need a handful.
+pub const MAX_YAML_FLOW_OPENERS: usize = 4096;
+
 /// Refuse YAML whose flow collections nest deeper than
 /// [`MAX_YAML_FLOW_DEPTH`], before handing it to the parser. Quoted scalars
 /// and comments are skipped; a quote only opens a scalar at the start of a
@@ -485,12 +491,20 @@ pub const MAX_YAML_FLOW_DEPTH: usize = 64;
 /// brackets from the count.
 pub fn check_yaml_nesting(text: &str) -> Result<(), String> {
     let b = text.as_bytes();
+    let openers = b.iter().filter(|c| matches!(c, b'[' | b'{')).count();
+    if openers > MAX_YAML_FLOW_OPENERS {
+        return Err(format!(
+            "the file has {openers} '[' or '{{' characters; LabLink configurations allow at most {MAX_YAML_FLOW_OPENERS} (use block style)"
+        ));
+    }
     let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
     let token_start = |i: usize| {
         i == 0
             || matches!(
                 b[i - 1],
-                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b'{' | b',' | b':' | b'-'
+                // YAML needs whitespace after ':' and '-', so a quote right
+                // after them is plain text (counting on is the safe side).
+                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b'{' | b','
             )
     };
     while i < b.len() {
@@ -1458,6 +1472,7 @@ devices:
         for opt in [
             "PKCS11Provider",
             "SecurityKeyProvider",
+            "AddKeysToAgent",
             "ForwardAgent",
             "ForwardX11Trusted",
             "RemoteForward",
@@ -1715,10 +1730,19 @@ mod site_tests {
             format!("sites: {}1{}\n", "{a: ".repeat(n), "}".repeat(n)),
             // An apostrophe inside a word does not open a quoted scalar.
             format!("sites: it's{}\n", "[".repeat(n)),
+            // Nor one right after '-' (the lexer used to take it for an
+            // unterminated quote and stop counting).
+            format!("zz: [-', {}{}]\n", "[".repeat(n), "]".repeat(n)),
+            // An unterminated quote at a token start cannot hide brackets
+            // from the opener count, which ignores quoting.
+            format!("zz: ['{}{}]\n", "[".repeat(n), "]".repeat(n)),
         ] {
             let t0 = std::time::Instant::now();
             let e = errs(&deep);
-            assert!(e[0].contains("nest"), "{e:?}");
+            assert!(
+                e[0].contains("nest") || e[0].contains("'[' or '{'"),
+                "{e:?}"
+            );
             assert!(t0.elapsed() < std::time::Duration::from_millis(200));
         }
         // Brackets in quoted scalars and comments are text, not nesting.
@@ -1730,6 +1754,10 @@ mod site_tests {
         );
         assert!(errs(&quoted).is_empty(), "{:?}", errs(&quoted));
         assert!(check_yaml_nesting(&format!("a: {}{}", "[".repeat(64), "]".repeat(64))).is_ok());
+        // Below the opener cap, the depth lexer itself counts brackets after
+        // a quote that follows '-'.
+        let e = check_yaml_nesting(&format!("zz: [-', {}{}]", "[".repeat(100), "]".repeat(100)));
+        assert!(e.unwrap_err().contains("nest"));
     }
 
     #[test]
