@@ -208,6 +208,10 @@ pub struct Device {
     /// only after proving it holds the key (`Mode::KeyProof`): anyone can
     /// replay a public key to ssh-keyscan.
     pub key_proof_due: Option<IpAddr>,
+    /// When this device last proved it holds its pinned key (0: not since
+    /// the daemon started). Only proofs after the current default gateways
+    /// appeared count as evidence of where the user is.
+    pub proven_ms: u64,
     persisted_last_seen_ms: u64,
 }
 
@@ -257,6 +261,7 @@ impl Device {
             icmp_misses_while_up: 0,
             attributed_names: Vec::new(),
             key_proof_due: None,
+            proven_ms: 0,
             persisted_last_seen_ms: 0,
         }
     }
@@ -494,6 +499,11 @@ pub struct Registry {
     /// Pinned host keys seen for devices whose site was not engaged:
     /// device id -> (address, when).
     key_sightings: BTreeMap<String, (IpAddr, u64)>,
+    /// The default gateways (interface, address, MAC) at the last site
+    /// evaluation, and since when they have been in place. A host key
+    /// proven before that may have been proven at another place.
+    gateways_seen: Option<Vec<(String, IpAddr, Option<String>)>>,
+    gateways_since_ms: u64,
     /// Site mode or learned signatures changed: persist them.
     pub sites_dirty: bool,
     /// Something site detection depends on changed: re-evaluate.
@@ -572,6 +582,8 @@ impl Registry {
             assessments: BTreeMap::new(),
             learned_gateways: BTreeMap::new(),
             key_sightings: BTreeMap::new(),
+            gateways_seen: None,
+            gateways_since_ms: 0,
             sites_dirty: false,
             sites_stale: true,
         }
@@ -1705,6 +1717,8 @@ impl Registry {
             .join(", ");
         match proof {
             KeyProof::Proven => {
+                d.proven_ms = now;
+                self.sites_stale = true;
                 if let Some(mac) = mac.as_deref() {
                     self.learn_mac(name, mac);
                 }
@@ -3599,6 +3613,7 @@ impl Registry {
             .values()
             .filter(|d| {
                 d.identity == IdentityState::Verified
+                    && d.proven_ms >= self.gateways_since_ms
                     && d.healthy()
                     && self.route_via(d).is_none()
                     && d.rec.current_ip.is_some_and(|ip| self.is_attached_ip(ip))
@@ -3610,7 +3625,10 @@ impl Registry {
             })
             .collect();
         for (id, (ip, ts)) in &self.key_sightings {
-            if now.saturating_sub(*ts) <= KEY_SIGHTING_TTL_MS && self.is_attached_ip(*ip) {
+            if now.saturating_sub(*ts) <= KEY_SIGHTING_TTL_MS
+                && *ts >= self.gateways_since_ms
+                && self.is_attached_ip(*ip)
+            {
                 if let Some(d) = self.devices.get(id) {
                     v.push(KeySighting {
                         site: d.site.clone(),
@@ -3663,6 +3681,7 @@ impl Registry {
         self.key_sightings
             .retain(|_, (_, ts)| now.saturating_sub(*ts) <= KEY_SIGHTING_TTL_MS);
         let signals = self.local_signals();
+        self.note_gateways(&signals, now);
         let keys = self.key_evidence(now);
         let assessments: Vec<sites::Assessment> = self
             .cfg
@@ -3715,7 +3734,7 @@ impl Registry {
         }
         for d in &decisions {
             if d.state == SiteState::Active && d.confidence == sites::Confidence::High {
-                self.learn_gateways(&d.site, &signals);
+                self.learn_gateways(&d.site, &signals, &keys);
             }
         }
         self.decisions = decisions.into_iter().map(|d| (d.site.clone(), d)).collect();
@@ -3726,12 +3745,47 @@ impl Registry {
         wake
     }
 
-    /// Record the gateway MACs of a site confirmed by host keys, so the next
-    /// visit is recognized before any device answers.
-    fn learn_gateways(&mut self, site: &str, signals: &sites::LocalSignals) {
+    /// A default gateway appeared, changed or went away: the user may be at
+    /// another place now. Host keys proven before this no longer place the
+    /// user anywhere, and every verified device proves its key again.
+    fn note_gateways(&mut self, signals: &sites::LocalSignals, now: u64) {
+        let mut seen: Vec<(String, IpAddr, Option<String>)> = signals
+            .gateways
+            .iter()
+            .map(|g| (g.interface.clone(), g.ip, g.mac.clone()))
+            .collect();
+        seen.sort();
+        if self.gateways_seen.as_ref() == Some(&seen) {
+            return;
+        }
+        self.gateways_seen = Some(seen);
+        self.gateways_since_ms = now;
+        for d in self.devices.values_mut() {
+            if d.identity == IdentityState::Verified {
+                d.key_proof_due = d.rec.current_ip;
+                d.last_identity_check_ms = 0;
+            }
+        }
+    }
+
+    /// Record the gateway MACs of a site confirmed by host keys proven
+    /// since these gateways appeared, so the next visit is recognized before
+    /// any device answers. A MAC that contradicts one already recorded for
+    /// the network (another place that reuses the subnet, or a replaced
+    /// router) needs two of the site's devices to have proven their keys.
+    fn learn_gateways(&mut self, site: &str, signals: &sites::LocalSignals, keys: &[KeySighting]) {
         let Some(cfg) = self.cfg.site(site) else {
             return;
         };
+        let provers = keys
+            .iter()
+            .filter(|k| k.site == site)
+            .map(|k| k.device.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        if provers == 0 {
+            return;
+        }
         let mut learned = self.learned_gateways.get(site).cloned().unwrap_or_default();
         let mut changed = false;
         for g in &signals.gateways {
@@ -3741,6 +3795,11 @@ impl Registry {
                     .ok()
                     .is_some_and(|net| net.contains(&g.ip));
                 if !inside || learned.iter().any(|(x, m)| x == &n.name && m == mac) {
+                    continue;
+                }
+                let recorded = n.gateway_mac.as_deref().and_then(normalize_mac).is_some()
+                    || learned.iter().any(|(x, _)| x == &n.name);
+                if recorded && provers < 2 {
                     continue;
                 }
                 learned.push((n.name.clone(), mac.clone()));

@@ -442,3 +442,112 @@ fn known_hosts_of_another_site_at_a_shared_address_is_not_imported() {
     );
     assert_eq!(r.pinned_view("lab/robot").len(), 1);
 }
+
+const LAB_GW: &str = "02:00:00:00:02:01";
+const CLUB_GW: &str = "02:00:00:00:03:01";
+const SHARED: &str = "sites:\n  - id: lab\n    name: Lab\n    networks:\n      - name: lan\n        cidr: 192.168.50.0/24\n    devices:\n      - name: robot\n        expected_ips: [192.168.50.10]\n      - name: arm\n        expected_ips: [192.168.50.30]\n  - id: club\n    name: Club\n    networks:\n      - name: lan\n        cidr: 192.168.50.0/24\n    devices:\n      - name: pc\n";
+
+/// The link as seen from 192.168.50.100: the default gateway .1 with `gw`.
+fn link(r: &mut Registry, gw: &str, now: u64) {
+    let snap = Snapshot {
+        interfaces: vec![Interface {
+            index: 2,
+            name: "eth0".into(),
+            up: true,
+            loopback: false,
+            mac: None,
+            addrs: vec!["192.168.50.100/24".parse().unwrap()],
+        }],
+        neighbors: [("192.168.50.1", gw)]
+            .iter()
+            .map(|(i, m)| Neighbor {
+                ip: ip(i),
+                mac: Some(m.to_string()),
+                ifindex: 2,
+                state: NeighState::Reachable,
+            })
+            .collect(),
+        gateways: vec![("eth0".into(), ip("192.168.50.1"))],
+        ssids: vec![],
+    };
+    for (o, s) in r.set_snapshot(snap) {
+        r.observe(&o, &s, None, now);
+    }
+    r.refresh_sites(now);
+}
+
+/// `name` at `at` shows `k` and proves it holds it (pinning it first if
+/// it has no pin yet).
+fn prove(r: &mut Registry, name: &str, at: &str, k: &HostKey, now: u64) {
+    let none = UserKnown::default();
+    r.apply_probe(name, &up(at, PortState::Open), now);
+    r.apply_keys(name, ip(at), Ok(vec![k.clone()]), &none, now);
+    if r.pinned_view(name).is_empty() {
+        r.trust(
+            name,
+            ip(at),
+            std::slice::from_ref(k),
+            std::slice::from_ref(&k.fingerprint),
+            false,
+            now,
+        )
+        .expect("trust");
+        r.apply_keys(name, ip(at), Ok(vec![k.clone()]), &none, now);
+    }
+    r.apply_key_proof(name, ip(at), &KeyProof::Proven, now);
+    assert_eq!(r.device(name).unwrap().identity, IdentityState::Verified);
+}
+
+fn learned(r: &mut Registry) -> String {
+    r.take_batch()
+        .meta
+        .into_iter()
+        .filter(|(k, _)| k == "learned_gateways")
+        .map(|(_, v)| v)
+        .collect()
+}
+
+/// Two places reuse 192.168.50.0/24. Moving from the lab to the club
+/// without the lab's devices first failing (roam, dock, suspend) must not
+/// teach the lab the club's gateway: the next visit to the club would then
+/// be taken for the lab. Host keys proven before the gateway changed do not
+/// place the user anywhere.
+#[test]
+fn a_silent_move_does_not_teach_a_site_another_place_s_gateway() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::parse(SHARED, "test").unwrap();
+    let mut r = Registry::new(cfg, dir.path().join("known_hosts"));
+    let (robot, arm) = (fake_key("lab-robot"), fake_key("lab-arm"));
+    let now = 5_000_000;
+    link(&mut r, LAB_GW, now);
+    prove(&mut r, "lab/robot", "192.168.50.10", &robot, now + 1);
+    r.refresh_sites(now + 2);
+    assert_eq!(
+        r.decision("lab").unwrap().confidence,
+        lablink_core::site::Confidence::High
+    );
+    assert!(learned(&mut r).contains(LAB_GW));
+
+    // At the club now; lab/robot is still "verified and online" from before.
+    link(&mut r, CLUB_GW, now + 10);
+    assert_ne!(
+        r.decision("lab").unwrap().confidence,
+        lablink_core::site::Confidence::High
+    );
+    r.refresh_sites(now + 11);
+    assert!(!learned(&mut r).contains(CLUB_GW));
+    let d = r.device("lab/robot").unwrap();
+    assert_eq!(d.key_proof_due, Some(ip("192.168.50.10")), "re-proof asked");
+
+    // One lab device really here (carried along): the site is found, but one
+    // device does not overrule the gateway recorded for the network.
+    prove(&mut r, "lab/robot", "192.168.50.10", &robot, now + 20);
+    r.refresh_sites(now + 21);
+    assert!(!learned(&mut r).contains(CLUB_GW));
+
+    // Two devices proven behind the new gateway (the lab's router was
+    // replaced): it is learned.
+    prove(&mut r, "lab/arm", "192.168.50.30", &arm, now + 30);
+    r.refresh_sites(now + 31);
+    assert!(learned(&mut r).contains(CLUB_GW));
+}
