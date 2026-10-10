@@ -550,6 +550,26 @@ fn check_config_reports_errors_with_exit_2() {
 }
 
 #[test]
+fn a_path_in_an_error_cannot_forge_lines_or_drive_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let odd = dir
+        .path()
+        .join("x\nlablink: config.yaml: OK (1 sites\x1b[2K");
+    std::fs::create_dir(&odd).unwrap();
+    let p = odd.join("bad.yaml");
+    std::fs::write(&p, "devices: [").unwrap();
+    let o = lablink(None, &["check-config", p.to_str().unwrap()]);
+    assert_eq!(code(&o), exit::USAGE);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(err.lines().count(), 1, "{err:?}");
+    assert!(!err.contains('\x1b'), "{err:?}");
+    assert!(
+        err.contains("x\\nlablink: ") && err.contains("\\u{1b}[2K"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn doctor_runs_read_only_checks_through_the_exec_path() {
     let e = setup("");
     wait_color(&e, "jetson-a", "green");

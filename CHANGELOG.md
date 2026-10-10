@@ -24,6 +24,8 @@ All notable changes are listed here. The format follows
   read two other files, one relative to the working directory.
 - Refuse a state file or journal with more than one link.
 - A gateway hop of a batch `exec`, `doctor` or app action never prompts.
+- Error messages show control characters in paths escaped, so a crafted
+  path cannot forge an `OK` line or send terminal escape sequences.
 - Installers refuse a prefix containing `=`; `uninstall --purge` leaves a
   custom `LABLINK_STATE_DIR` in place.
 

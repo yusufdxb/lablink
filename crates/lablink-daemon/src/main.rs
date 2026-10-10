@@ -76,7 +76,7 @@ fn main() {
         match Config::load(&config_path) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("lablinkd: {e}");
+                eprintln!("lablinkd: {}", lablink_core::printable(&e.to_string()));
                 std::process::exit(lablink_core::exit::USAGE);
             }
         }
@@ -84,7 +84,7 @@ fn main() {
         if args.config.is_some() {
             eprintln!(
                 "lablinkd: config file {} does not exist",
-                config_path.display()
+                lablink_core::printable(&config_path.display().to_string())
             );
             std::process::exit(lablink_core::exit::USAGE);
         }
@@ -94,7 +94,7 @@ fn main() {
     if args.check_config {
         println!(
             "{}: OK ({} sites, {} networks, {} devices)",
-            config_path.display(),
+            lablink_core::printable(&config_path.display().to_string()),
             config.sites.len(),
             config.network_count(),
             config.device_count()
@@ -148,7 +148,7 @@ fn main() {
         .await
     });
     if let Err(e) = result {
-        eprintln!("lablinkd: {e}");
+        eprintln!("lablinkd: {}", lablink_core::printable(&e.to_string()));
         std::process::exit(lablink_core::exit::FAILURE);
     }
 }

@@ -63,15 +63,7 @@ pub fn identity_word(s: IdentityState) -> &'static str {
 /// messages) with control characters shown escaped, so it can never move the
 /// cursor, rewrite lines or change the terminal title.
 pub fn printable(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control() {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    lablink_core::printable(s)
 }
 
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {

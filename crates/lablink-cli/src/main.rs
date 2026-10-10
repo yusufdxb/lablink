@@ -585,7 +585,8 @@ fn main() {
             };
             match api.ambiguity_text(command) {
                 Some(t) => eprint!("{t}"),
-                None => eprintln!("lablink: {}", f.message),
+                // Messages name paths and other text LabLink did not write.
+                None => eprintln!("lablink: {}", output::printable(&f.message)),
             }
             f.code
         }
