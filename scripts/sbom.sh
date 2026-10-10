@@ -13,7 +13,24 @@ out=dist/lablink-$version.cdx.json
 docker run --rm -v "$PWD/Cargo.lock:/src/Cargo.lock:ro" "$syft" \
     scan file:/src/Cargo.lock --source-name lablink --source-version "$version" \
     -o cyclonedx-json > "$out"
-n=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['components']))" "$out")
+# Deterministic SBOM: syft stamps a random serial number and the current
+# time; use the commit time and a serial derived from commit + Cargo.lock,
+# so rebuilding a commit gives a byte-identical file.
+epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct HEAD)}
+commit=$(sed -n 's/^commit: //p' dist/BUILDINFO)
+n=$(python3 - "$out" "$epoch" "$commit" <<'PY'
+import hashlib, json, sys, time, uuid
+path, epoch, commit = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+doc = json.load(open(path))
+lock = hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest()
+doc["serialNumber"] = "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"lablink:{commit}:{lock}"))
+doc.setdefault("metadata", {})["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+with open(path, "w") as f:
+    json.dump(doc, f, indent=2, sort_keys=True)
+    f.write("\n")
+print(len(doc["components"]))
+PY
+)
 [ "$n" -gt 0 ] || { echo "sbom: no components in $out" >&2; exit 1; }
 (
     cd dist
