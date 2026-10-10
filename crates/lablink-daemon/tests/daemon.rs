@@ -255,6 +255,81 @@ fn host_key_mismatch_is_red_and_never_accepted() {
     d.stop().unwrap();
 }
 
+/// Final qualification WSC2-F2, F3: a MISMATCH is kept across a restart,
+/// and clears (without a restart) once the genuine machine proves the
+/// pinned key again; meanwhile the device is not key-scanned at every check.
+#[test]
+fn mismatch_survives_restart_and_clears_when_the_pin_is_proven_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let net = lab_with_jetson("10.9.0.31");
+    let cfg = fast_config(&jetson_cfg("    expected_ips: [10.9.0.31]\n"));
+    let d = TestDaemon::start(cfg.clone(), net.clone(), dir.path().into(), true).unwrap();
+    wait_for(&d, "jetson-a", 15, "green", |s| s.color == Color::Green);
+    let cycle_port = |d: &TestDaemon| {
+        net.host("10.9.0.31", |h| h.port = PortMode::Refused);
+        wait_for(d, "jetson-a", 15, "port closed", |s| {
+            s.ssh_port == PortState::Closed
+        });
+        net.host("10.9.0.31", |h| h.port = PortMode::Open);
+    };
+    net.host("10.9.0.31", |h| h.keys = vec![fake_key("impostor")]);
+    cycle_port(&d);
+    wait_for(&d, "jetson-a", 15, "mismatch", |s| {
+        s.identity == IdentityState::Mismatch
+    });
+    d.stop().unwrap();
+    // Restart with the impostor gone: still a security stop, with its reason.
+    net.host("10.9.0.31", |h| h.up = false);
+    let d = TestDaemon::start(cfg, net.clone(), dir.path().into(), false).unwrap();
+    let s = status(&d, "jetson-a");
+    assert_eq!(s.identity, IdentityState::Mismatch, "{s:#?}");
+    assert!(s.reasons.iter().any(|r| r.contains("SECURITY")), "{s:#?}");
+    assert!(d
+        .client()
+        .call(&Request::Resolve {
+            device: "jetson-a".into()
+        })
+        .is_err());
+    // The genuine machine returns with the pinned key.
+    net.host("10.9.0.31", |h| {
+        h.up = true;
+        h.keys = vec![fake_key("jetson-a")];
+    });
+    let s = wait_for(&d, "jetson-a", 20, "verified again", |s| {
+        s.identity == IdentityState::Verified
+    });
+    assert_ne!(s.color, Color::Red);
+    let m0: MetricsReport = d.client().call_typed(&Request::Metrics).unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    let m1: MetricsReport = d.client().call_typed(&Request::Metrics).unwrap();
+    assert!(
+        m1.counters["keyscans"] - m0.counters["keyscans"] <= 1,
+        "{} keyscans in 4 s",
+        m1.counters["keyscans"] - m0.counters["keyscans"]
+    );
+    d.stop().unwrap();
+}
+
+/// Final qualification WSC2-F4: a new link-layer address at the device's
+/// address takes the verified label away until the pin is proven again.
+#[test]
+fn new_mac_at_the_address_is_not_shown_verified_until_proven() {
+    let dir = tempfile::tempdir().unwrap();
+    let net = lab_with_jetson("10.9.0.31");
+    let cfg = fast_config(&jetson_cfg("    expected_ips: [10.9.0.31]\n"));
+    let d = TestDaemon::start(cfg, net.clone(), dir.path().into(), true).unwrap();
+    wait_for(&d, "jetson-a", 15, "green", |s| s.color == Color::Green);
+    // Another machine (new MAC) that shows no host keys at all.
+    net.host("10.9.0.31", |h| {
+        h.mac = Some("02:4c:4c:00:00:99".into());
+        h.keys = vec![];
+    });
+    wait_for(&d, "jetson-a", 20, "not verified", |s| {
+        s.identity != IdentityState::Verified
+    });
+    d.stop().unwrap();
+}
+
 #[test]
 fn intermittent_packet_loss_never_goes_offline() {
     let dir = tempfile::tempdir().unwrap();

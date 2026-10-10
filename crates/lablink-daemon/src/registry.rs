@@ -114,6 +114,9 @@ pub struct DeviceRecord {
     pub first_seen_ms: Option<u64>,
     pub last_seen_ms: Option<u64>,
     pub active_username: Option<String>,
+    /// The security finding while the identity is MISMATCH, kept across a
+    /// restart so the stop does not fade into "unknown".
+    pub mismatch: Option<String>,
 }
 
 /// A host seen on the network that is not a tracked device.
@@ -662,6 +665,15 @@ impl Registry {
                 d.rec = rec;
                 d.apply_runtime_ssh();
                 self.devices.insert(id, d);
+            }
+        }
+        // A security stop survives the restart until the pinned key is
+        // proven again or the user replaces the pin.
+        for d in self.devices.values_mut() {
+            if let Some(m) = d.rec.mismatch.clone() {
+                d.identity = IdentityState::Mismatch;
+                d.auth = AuthState::Unavailable;
+                d.last_error = Some(m);
             }
         }
         // A config edit may have created two devices claiming one address.
@@ -1286,9 +1298,14 @@ impl Registry {
         d.identity = new;
         d.identity_signal = signal;
         d.identity_ip = Some(ip);
+        let finding = (new == IdentityState::Mismatch).then(|| detail.clone());
         if new == IdentityState::Mismatch {
             d.last_error = Some(detail.clone());
             d.auth = AuthState::Unavailable;
+        }
+        if d.rec.mismatch != finding {
+            d.rec.mismatch = finding;
+            self.mark(name);
         }
         if old != new {
             self.sites_stale = true;
@@ -1616,8 +1633,24 @@ impl Registry {
     pub fn key_proof_target(&self, name: &str) -> Option<(IpAddr, Target)> {
         let d = self.devices.get(name)?;
         let ip = d.key_proof_due.filter(|ip| d.rec.current_ip == Some(*ip))?;
-        let t = self.target_for(name, d.username()).ok()?;
+        // A device in MISMATCH is asked too: the proof offers no
+        // credentials, and it is how the genuine machine clears the stop
+        // when it returns with the pinned key.
+        let mut r = self.resolve_inner(name, d.username(), true, true).ok()?;
+        r.identity = IdentityState::Unknown;
+        let t = Target::from_resolve(&r).ok()?;
         t.host_key_alias.is_some().then_some((ip, t))
+    }
+
+    /// A proof was due but cannot run now (for example the gateway is
+    /// down): wait for the next identity interval instead of scanning
+    /// the host's keys again at every check.
+    pub fn key_proof_unavailable(&mut self, name: &str, now: u64) {
+        if let Some(d) = self.devices.get_mut(name) {
+            if d.key_proof_due.take().is_some() {
+                d.last_identity_check_ms = now;
+            }
+        }
     }
 
     /// Apply a host-key possession proof (see [`Device::key_proof_due`]).
@@ -1797,7 +1830,14 @@ impl Registry {
                 .map(|d| d.id.clone())
                 .collect();
             for n in changed {
-                self.devices.get_mut(&n).unwrap().identity_recheck = true;
+                let d = self.devices.get_mut(&n).unwrap();
+                d.identity_recheck = true;
+                // Another machine may hold the address now: the device is
+                // not shown as verified until the host proves the pin again.
+                if d.identity == IdentityState::Verified {
+                    d.identity = IdentityState::Unknown;
+                    d.identity_ip = None;
+                }
                 self.event(
                     Some(&n),
                     "mac_changed",
@@ -2470,7 +2510,7 @@ impl Registry {
 
     /// Build the OpenSSH target for `name`.
     pub fn target_for(&self, name: &str, username: Option<String>) -> Result<Target, ApiError> {
-        let r = self.resolve_inner(name, username, true)?;
+        let r = self.resolve_inner(name, username, true, false)?;
         Target::from_resolve(&r).map_err(|e| ApiError::new(ErrorCode::IdentityMismatch, e))
     }
 
@@ -2478,16 +2518,19 @@ impl Registry {
     pub fn resolve(&self, name: &str) -> Result<ResolveResult, ApiError> {
         let name = self.require(name)?;
         let d = &self.devices[&name];
-        self.resolve_inner(&name, d.username(), false)
+        self.resolve_inner(&name, d.username(), false, false)
     }
 
     /// `batch_jump`: a ProxyCommand through a gateway must not prompt
     /// (daemon checks); the CLI allows prompts on the user's terminal.
+    /// `for_proof`: only for the credential-free possession proof, which
+    /// may address a device in MISMATCH.
     fn resolve_inner(
         &self,
         name: &str,
         username: Option<String>,
         batch_jump: bool,
+        for_proof: bool,
     ) -> Result<ResolveResult, ApiError> {
         let d = self.devices.get(name).ok_or_else(|| {
             ApiError::new(
@@ -2501,7 +2544,7 @@ impl Registry {
                 format!("'{name}' is configured without SSH (ssh: false)"),
             ));
         }
-        if d.identity == IdentityState::Mismatch {
+        if d.identity == IdentityState::Mismatch && !for_proof {
             return Err(ApiError::new(
                 ErrorCode::IdentityMismatch,
                 format!(
@@ -2557,15 +2600,17 @@ impl Registry {
                         ),
                     ));
                 }
-                let gr = self.resolve_inner(&gw, g.username(), true).map_err(|e| {
-                    ApiError::new(
-                        e.code,
-                        format!(
-                            "'{name}' is reached via '{gw_label}', which cannot be used: {}",
-                            e.message
-                        ),
-                    )
-                })?;
+                let gr = self
+                    .resolve_inner(&gw, g.username(), true, false)
+                    .map_err(|e| {
+                        ApiError::new(
+                            e.code,
+                            format!(
+                                "'{name}' is reached via '{gw_label}', which cannot be used: {}",
+                                e.message
+                            ),
+                        )
+                    })?;
                 let mut gt = Target::from_resolve(&gr)
                     .map_err(|e| ApiError::new(ErrorCode::IdentityMismatch, e))?;
                 if batch_jump && !self.cfg.ssh.reuse_control_master {
@@ -2652,7 +2697,8 @@ impl Registry {
 
     // --------------------------------------------------------------- trust --
 
-    /// Pin `confirm`ed keys after a fresh scan returned exactly them.
+    /// Pin the `confirm`ed keys, and only them, after a fresh scan returned
+    /// every one of them.
     pub fn trust(
         &mut self,
         name: &str,
@@ -2674,9 +2720,10 @@ impl Registry {
         }
         let mut want: Vec<&str> = confirm.iter().map(String::as_str).collect();
         want.sort();
+        want.dedup();
         let mut got: Vec<&str> = scanned.iter().map(|k| k.fingerprint.as_str()).collect();
         got.sort();
-        if want != got {
+        if want.is_empty() || want.iter().any(|f| !got.contains(f)) {
             return Err(ApiError::new(
                 ErrorCode::Conflict,
                 format!(
@@ -2686,6 +2733,14 @@ impl Registry {
                 ),
             ));
         }
+        // A key the user did not confirm is never pinned, even when it was
+        // presented next to one they did.
+        let chosen: Vec<HostKey> = scanned
+            .iter()
+            .filter(|k| want.contains(&k.fingerprint.as_str()))
+            .cloned()
+            .collect();
+        let scanned = &chosen[..];
         let pinned_before = self.pinned_view(name);
         let has_pins = !d.pinned_fingerprints().is_empty();
         let all_known = scanned
@@ -2706,12 +2761,33 @@ impl Registry {
             ));
         }
         if all_known && has_pins {
+            let was_mismatch = d.identity == IdentityState::Mismatch;
             self.fill_pin_blobs(name, scanned, now);
+            if was_mismatch {
+                // The user confirmed keys that are already pinned: lift the
+                // stop and let the host prove it holds them.
+                let d = self.devices.get_mut(name).unwrap();
+                d.identity = IdentityState::Unknown;
+                d.rec.mismatch = None;
+                d.key_proof_due = Some(ip);
+                self.event(
+                    Some(name),
+                    "identity_unknown",
+                    format!("identity mismatch cleared by explicit `lablink trust`: {ip} presents the pinned key(s) again; checking that it holds them"),
+                );
+                self.mark(name);
+                self.urgent = true;
+            }
             return Ok(TrustReport {
                 schema_version: SCHEMA_VERSION,
                 device: name.into(),
                 ip: ip.to_string(),
-                action: "unchanged".into(),
+                action: if was_mismatch {
+                    "rechecking"
+                } else {
+                    "unchanged"
+                }
+                .into(),
                 scanned: key_views(scanned),
                 pinned_before: pinned_before.clone(),
                 pinned_now: pinned_before,
@@ -2747,6 +2823,7 @@ impl Registry {
         if d.identity == IdentityState::Mismatch {
             d.identity = IdentityState::Unknown;
         }
+        d.rec.mismatch = None;
         self.known_hosts_dirty = true;
         let fps: Vec<&str> = scanned.iter().map(|k| k.fingerprint.as_str()).collect();
         self.event(
@@ -3337,7 +3414,7 @@ impl Registry {
             ));
         }
         let r = self
-            .resolve_inner(gw, g.username(), true)
+            .resolve_inner(gw, g.username(), true, false)
             .map_err(|e| e.message)?;
         Target::from_resolve(&r)
     }

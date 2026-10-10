@@ -27,12 +27,16 @@ by OpenSSH.
    ```bash
    lablink trust <device>            # shows the fingerprints, pins nothing
    # on the device: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
-   lablink trust <device> --yes      # pin exactly what was shown
+   lablink trust <device> --fingerprint SHA256:...   # pin exactly that key
    ```
 
-   The confirmation must name exactly the fingerprints of a fresh scan; if
-   the device presents something else between the preview and the
-   confirmation, nothing is pinned.
+   Only the keys you name are pinned, and only if a fresh scan still shows
+   them; if the device presents something else by then, nothing is pinned.
+   Answering `y` at the interactive prompt pins exactly the keys it showed.
+   `--yes` without `--fingerprint` pins whatever the device presents at that
+   moment (trust on first use): use it only where nothing can stand in for
+   the device between your check and the command. LabLink prints every key
+   it pins.
 4. Optionally install your public key: `lablink copy-id <device>`. It refuses
    devices without a pin and passes LabLink's pinned host-key options to
    `ssh-copy-id`, so the password you type can only reach the verified

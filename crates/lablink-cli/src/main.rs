@@ -155,9 +155,14 @@ enum Cmd {
     /// Pin a device's current SSH host key after you have verified it.
     Trust {
         device: String,
-        /// Pin without asking (only after verifying the fingerprint out of band).
+        /// Pin without asking whatever the device presents now (trust on
+        /// first use). Prefer --fingerprint.
         #[arg(long)]
         yes: bool,
+        /// Pin exactly this key, verified on the device itself (`SHA256:...`;
+        /// repeat for more keys). Nothing is pinned unless the device presents it.
+        #[arg(long = "fingerprint", value_name = "SHA256:...")]
+        fingerprints: Vec<String>,
         /// Replace existing pins (required after a legitimate reinstall).
         #[arg(long)]
         replace: bool,
@@ -838,9 +843,10 @@ fn run(cli: Cli, client: &Client) -> R {
         Cmd::Trust {
             device,
             yes,
+            fingerprints,
             replace,
             json,
-        } => cmd_trust(client, &device, yes, replace, json),
+        } => cmd_trust(client, &device, yes, &fingerprints, replace, json),
         Cmd::Set {
             device,
             label,
@@ -1456,17 +1462,41 @@ fn cmd_exec(
     Ok(code)
 }
 
-fn cmd_trust(client: &Client, device: &str, yes: bool, replace: bool, json: bool) -> R {
+fn cmd_trust(
+    client: &Client,
+    device: &str,
+    yes: bool,
+    fingerprints: &[String],
+    replace: bool,
+    json: bool,
+) -> R {
+    if let Some(f) = fingerprints
+        .iter()
+        .find(|f| f.strip_prefix("SHA256:").is_none_or(str::is_empty))
+    {
+        return Err(Fail::new(
+            exit::USAGE,
+            "bad_request",
+            format!(
+                "'{f}' is not a SHA256 fingerprint (as `ssh-keygen -lf` prints it: SHA256:...)"
+            ),
+        ));
+    }
     let preview: TrustReport = client.call_typed(&Request::Trust {
         device: device.into(),
         confirm: None,
         replace,
     })?;
-    let fps: Vec<String> = preview
-        .scanned
-        .iter()
-        .map(|k| k.fingerprint.clone())
-        .collect();
+    // With --fingerprint, what the user verified; otherwise what was shown.
+    let fps: Vec<String> = if fingerprints.is_empty() {
+        preview
+            .scanned
+            .iter()
+            .map(|k| k.fingerprint.clone())
+            .collect()
+    } else {
+        fingerprints.to_vec()
+    };
     let render = |r: &TrustReport| {
         let mut s = format!("{} at {} presents:\n", r.device, r.ip);
         for k in &r.scanned {
@@ -1485,14 +1515,14 @@ fn cmd_trust(client: &Client, device: &str, yes: bool, replace: bool, json: bool
         }
         s
     };
-    if !yes {
+    if !yes && fingerprints.is_empty() {
         if json || !std::io::stdin().is_terminal() {
             if json {
                 print_json(&preview);
             } else {
                 print!("{}", render(&preview));
             }
-            eprintln!("lablink: nothing pinned; verify the fingerprints (e.g. `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the device), then re-run with --yes");
+            eprintln!("lablink: nothing pinned; verify a fingerprint on the device itself (e.g. `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`), then pin exactly that key: `lablink trust {} --fingerprint SHA256:...`", preview.device);
             return Ok(exit::REFUSED);
         }
         print!("{}", render(&preview));
@@ -1524,6 +1554,9 @@ fn cmd_trust(client: &Client, device: &str, yes: bool, replace: bool, json: bool
             r.action,
             r.pinned_now.len()
         );
+        for k in &r.pinned_now {
+            println!("  {:<22} {}", k.key_type, k.fingerprint);
+        }
     }
     Ok(exit::OK)
 }

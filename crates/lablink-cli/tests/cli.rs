@@ -428,6 +428,45 @@ fn trust_requires_confirmation_when_not_interactive() {
     wait_color(&e, "fresh", "green");
 }
 
+/// The two-step flow pins exactly the key the user verified: a host that
+/// changes between the preview and the confirmation gets nothing pinned
+/// (final qualification WSC2-F1: `--yes` pinned whatever answered then).
+#[test]
+fn trust_pins_only_the_fingerprint_the_user_verified() {
+    let e = setup("  - name: fresh\n    expected_ips: [10.9.0.51]\n");
+    e.net.add(
+        "10.9.0.51",
+        FakeHost::ssh_host(vec![fake_key("fresh")], "aa:00:00:00:00:51"),
+    );
+    wait_color(&e, "fresh", "yellow");
+    let real = fake_key("fresh").fingerprint;
+    let o = lablink(Some(&e), &["trust", "fresh"]);
+    assert_eq!(code(&o), exit::REFUSED);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--fingerprint"));
+    // An impostor answers before the confirmation.
+    e.net
+        .host("10.9.0.51", |h| h.keys = vec![fake_key("impostor")]);
+    let o = lablink(Some(&e), &["trust", "fresh", "--fingerprint", &real]);
+    assert_ne!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stdout));
+    let o = lablink(Some(&e), &["inspect", "fresh", "--json"]);
+    assert!(
+        !String::from_utf8_lossy(&o.stdout).contains(&fake_key("impostor").fingerprint),
+        "impostor pinned"
+    );
+    // Not a fingerprint: refused before anything is asked.
+    let o = lablink(Some(&e), &["trust", "fresh", "--fingerprint", "MD5:aa"]);
+    assert_eq!(code(&o), exit::USAGE);
+    // The real host is back, next to an extra key the user never checked.
+    e.net.host("10.9.0.51", |h| {
+        h.keys = vec![fake_key("fresh"), fake_key("extra")]
+    });
+    let o = lablink(Some(&e), &["trust", "fresh", "--fingerprint", &real]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    let out = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(out.contains(&real), "{out}");
+    assert!(!out.contains(&fake_key("extra").fingerprint), "{out}");
+}
+
 /// Without a pin, LabLink cannot tell the device from an impostor at the
 /// same address: ssh/exec need `lablink trust` first or an explicit
 /// --unpinned, and `resolve` prints only identity-verified addresses (scp and

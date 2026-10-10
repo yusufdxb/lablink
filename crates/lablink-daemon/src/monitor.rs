@@ -178,6 +178,7 @@ async fn liveness(state: &State, plan: &CheckPlan, ip: IpAddr) -> ProbeReport {
 /// prove it holds the key (no credentials are offered).
 async fn prove_key(state: &State, name: &str) {
     let Some((ip, target)) = state.reg().key_proof_target(name) else {
+        state.reg().key_proof_unavailable(name, now_ms());
         return;
     };
     crate::ipc::ensure_known_hosts(state).await;
