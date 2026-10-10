@@ -40,13 +40,29 @@ pub fn bind(path: &Path) -> Result<UnixListener, String> {
             dir.display()
         ));
     }
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
+    if std::fs::symlink_metadata(dir).is_err() {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        use std::os::unix::fs::DirBuilderExt;
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("cannot create {}: {e}", dir.display())),
+        }
     }
-    let meta = std::fs::metadata(dir).map_err(|e| e.to_string())?;
+    // lstat, not stat: a symlink planted after the first check (e.g. at
+    // /tmp/lablink-<uid> before the directory existed) is refused here. Once
+    // this is a real directory we own, nobody else can replace it (/tmp is
+    // sticky), so the checks below cannot be raced.
+    let meta = std::fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
+    if !meta.is_dir() {
+        return Err(format!(
+            "{} is not a directory; refusing to use it for the socket",
+            dir.display()
+        ));
+    }
     if meta.uid() != uid() {
         return Err(format!(
             "{} is owned by uid {}, not by us; refusing to use it",
@@ -494,5 +510,23 @@ mod tests {
         let e = super::bind(&link.join("lablinkd.sock")).unwrap_err();
         assert!(e.contains("symbolic link"), "{e}");
         assert!(super::bind(&real.join("lablinkd.sock")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn socket_directory_is_created_private_and_must_be_a_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("run").join("lablink-1000");
+        assert!(super::bind(&fresh.join("lablinkd.sock")).is_ok());
+        let mode = std::fs::symlink_metadata(&fresh)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        let file = dir.path().join("lablink-file");
+        std::fs::write(&file, "x").unwrap();
+        let e = super::bind(&file.join("lablinkd.sock")).unwrap_err();
+        assert!(!e.is_empty());
     }
 }
