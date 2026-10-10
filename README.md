@@ -14,6 +14,9 @@ of a percent of one CPU core ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)),
 and answers the CLI and the app over a private Unix socket. There is no
 network listener.
 
+Run `lablink` without arguments to open the desktop app. `lablink-gui` is
+also available. Every CLI subcommand keeps its existing behavior.
+
 ```console
 $ lablink status
 Site Alpha  ACTIVE  READY  (confidence: high)

@@ -207,7 +207,7 @@ impl TrustPlan {
     }
 
     pub fn can_pin(&self) -> bool {
-        !self.scanned.is_empty() && (!self.replace_required || self.verified_oob)
+        !self.scanned.is_empty() && self.verified_oob
     }
 
     /// `(confirm, replace)` for the pin request; None while pinning is not allowed.
@@ -437,7 +437,13 @@ mod tests {
 
     #[test]
     fn first_trust_confirms_exactly_the_previewed_keys_without_replace() {
-        let p = TrustPlan::from_preview(&preview(&["SHA256:a", "SHA256:b"], &[]), false);
+        let mut p = TrustPlan::from_preview(&preview(&["SHA256:a", "SHA256:b"], &[]), false);
+        assert_eq!(
+            p.request(),
+            None,
+            "first use requires independent confirmation"
+        );
+        p.verified_oob = true;
         assert!(!p.replace_required && !p.warn());
         assert_eq!(
             p.request(),

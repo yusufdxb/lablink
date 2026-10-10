@@ -6,6 +6,7 @@
 mod app;
 mod flow;
 mod health;
+mod onboarding;
 mod settings;
 mod term;
 mod view;

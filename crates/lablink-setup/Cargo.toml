@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dependencies]
 lablink-core.workspace = true
+lablink-ssh.workspace = true
 lablink-platform.workspace = true
 lablink-doctor.workspace = true
 serde.workspace = true

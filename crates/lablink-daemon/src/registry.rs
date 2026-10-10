@@ -85,6 +85,7 @@ pub struct AddressRecord {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Overrides {
+    pub identity_file: Option<String>,
     pub label: Option<String>,
     pub username: Option<String>,
     pub monitoring: Option<bool>,
@@ -2608,7 +2609,28 @@ impl Registry {
             known_hosts_file: kh,
             ssh_binary: self.ssh_cfg().binary.clone(),
             connect_timeout_s: self.ssh_cfg().connect_timeout_s,
-            ssh_options: self.ssh_cfg().options.clone(),
+            ssh_options: {
+                let mut options = self.ssh_cfg().options.clone();
+                if let Some(path) = &d.rec.overrides.identity_file {
+                    options.retain(|k, _| {
+                        ![
+                            "IdentityFile",
+                            "ControlPath",
+                            "ControlMaster",
+                            "ForwardAgent",
+                        ]
+                        .iter()
+                        .any(|forced| k.eq_ignore_ascii_case(forced))
+                    });
+                    options.insert("IdentityFile".into(), path.clone());
+                    // Onboarded connections must redo host-key verification,
+                    // even if user config has a pre-existing master socket.
+                    options.insert("ControlPath".into(), "none".into());
+                    options.insert("ControlMaster".into(), "no".into());
+                    options.insert("ForwardAgent".into(), "no".into());
+                }
+                options
+            },
             proxy_command,
         })
     }
@@ -2815,6 +2837,11 @@ impl Registry {
         let d = self.devices.get_mut(name).unwrap();
         let clear = |s: &String| if s.is_empty() { None } else { Some(s.clone()) };
         let mut msgs = Vec::new();
+        if let Some(path) = &c.identity_file {
+            d.rec.overrides.identity_file = clear(path);
+            d.auth = AuthState::Unknown;
+            msgs.push("SSH identity selected".into());
+        }
         if let Some(l) = &c.label {
             d.rec.overrides.label = clear(l);
             msgs.push(format!("label = {l:?}"));
@@ -3076,6 +3103,14 @@ pub fn validate_changes(
     configured_ssh: bool,
 ) -> Result<Option<Option<Profile>>, ApiError> {
     let bad = |m: String| Err(ApiError::new(ErrorCode::BadRequest, m));
+    if let Some(path) = &c.identity_file {
+        if !path.is_empty() && !lablink_core::config::valid_ssh_identity_path(path) {
+            return bad(
+                "SSH identity path must be absolute and contain only letters, digits, / . _ -"
+                    .into(),
+            );
+        }
+    }
     if let Some(u) = &c.username {
         if !u.is_empty() && !lablink_core::config::valid_username(u) {
             return bad(format!("invalid username '{u}'"));

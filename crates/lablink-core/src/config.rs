@@ -1831,3 +1831,12 @@ mod via_tests {
         assert!(e[0].contains("own gateway"), "{e:?}");
     }
 }
+/// Paths passed through OpenSSH config syntax and ssh-copy-id's shell script.
+/// Reject expansion, quoting, whitespace and option injection characters.
+pub fn valid_ssh_identity_path(path: &str) -> bool {
+    std::path::Path::new(path).is_absolute()
+        && path.len() <= 4096
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+}

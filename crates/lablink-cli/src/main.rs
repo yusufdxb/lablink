@@ -21,17 +21,23 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
-#[command(name = "lablink", version, about = "LabLink: find lab machines and robots and SSH to them by name", long_about = None)]
+#[command(name = "lablink", version, about = "LabLink: find lab machines and robots and SSH to them by name", long_about = None, after_help = "Run lablink without a subcommand to open the desktop app. lablink-gui also opens it directly.")]
 struct Cli {
     /// Daemon socket [default: $LABLINK_SOCKET, else $XDG_RUNTIME_DIR/lablink/lablinkd.sock]
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Interactive GUI onboarding helper. Passwords go directly to OpenSSH.
+    #[command(hide = true)]
+    OnboardSsh {
+        #[arg(long)]
+        session: PathBuf,
+    },
     /// Health of the devices at your current site, or of one device
     /// (`name` or `site/name`; the exit code reflects that device's color).
     Status {
@@ -525,14 +531,17 @@ fn main() {
             "lablink: ignoring ${v}: it is not an absolute path; the default location is used"
         );
     }
+    let Some(cmd) = cli.cmd else {
+        launch_gui(cli.socket.as_deref());
+    };
     let socket = cli
         .socket
         .clone()
         .unwrap_or_else(lablink_core::paths::default_socket_path);
     let client = Client::new(&socket);
-    let command = command_name(&cli.cmd);
+    let command = command_name(&cmd);
     let json_mode = matches!(
-        &cli.cmd,
+        &cmd,
         Cmd::Status { json: true, .. }
             | Cmd::Devices { json: true, .. }
             | Cmd::Sites { json: true }
@@ -551,7 +560,7 @@ fn main() {
             | Cmd::Doctor { json: true, .. }
             | Cmd::Version { json: true }
     );
-    let code = match run(cli, &client) {
+    let code = match run(cmd, &client) {
         Ok(c) => c,
         Err(f) => {
             if json_mode {
@@ -575,6 +584,29 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// Use the GUI from this installation, never an unrelated binary on PATH.
+/// Replacing the process preserves GUI signals and its exit status.
+fn launch_gui(socket: Option<&std::path::Path>) -> ! {
+    use std::os::unix::process::CommandExt;
+    let result = (|| {
+        let executable = std::env::current_exe()?;
+        let gui = executable
+            .parent()
+            .ok_or_else(|| std::io::Error::other("cannot locate the LabLink installation"))?
+            .join("lablink-gui");
+        let mut command = std::process::Command::new(gui);
+        if let Some(socket) = socket {
+            command.env("LABLINK_SOCKET", socket);
+        }
+        Err::<(), _>(command.exec())
+    })();
+    eprintln!(
+        "lablink: could not open the desktop app: {}. Install lablink-gui beside lablink, or use a CLI subcommand (lablink --help).",
+        result.unwrap_err()
+    );
+    std::process::exit(exit::REFUSED);
 }
 
 /// The subcommand's name, for messages that suggest a command line.
@@ -601,6 +633,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::Init { .. } => "init",
         Cmd::Version { .. } => "version",
         Cmd::CopyId { .. } => "copy-id",
+        Cmd::OnboardSsh { .. } => "onboard-ssh",
         Cmd::Export { .. } => "export",
         Cmd::Import { .. } => "import",
         Cmd::SupportBundle { .. } => "support-bundle",
@@ -612,9 +645,9 @@ fn command_name(c: &Cmd) -> &'static str {
     }
 }
 
-fn run(cli: Cli, client: &Client) -> R {
+fn run(cmd: Cmd, client: &Client) -> R {
     let socket = client.socket_path().to_path_buf();
-    match cli.cmd {
+    match cmd {
         Cmd::Status {
             device,
             site,
@@ -855,6 +888,7 @@ fn run(cli: Cli, client: &Client) -> R {
             let s: DeviceStatus = client.call_typed(&Request::Set {
                 device,
                 changes: DeviceChanges {
+                    identity_file: None,
                     label,
                     username: user,
                     monitoring,
@@ -1168,6 +1202,11 @@ fn run(cli: Cli, client: &Client) -> R {
             config,
         ),
         Cmd::Version { json } => setup_cmds::cmd_version(client, json),
+        Cmd::OnboardSsh { session } => {
+            lablink_setup::onboarding::run_helper(client, &session)
+                .map_err(|e| Fail::new(exit::FAILURE, "onboarding", e))?;
+            Ok(exit::OK)
+        }
         Cmd::CopyId {
             device,
             user,

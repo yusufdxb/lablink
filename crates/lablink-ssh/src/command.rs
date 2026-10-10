@@ -268,7 +268,34 @@ pub fn copy_id_args(t: &Target, pubkey: &std::path::Path) -> Result<Vec<String>,
     if t.host_key_alias.is_none() || t.known_hosts_file.is_none() {
         return Err("the device's host key is not pinned yet".into());
     }
-    let ssh = build_args(t, &Mode::Interactive, &[]);
+    if !pubkey
+        .to_str()
+        .is_some_and(lablink_core::config::valid_ssh_identity_path)
+        || t.ip.parse::<std::net::IpAddr>().is_err()
+        || !lablink_core::config::valid_hostname(&t.ssh_host)
+        || t.username
+            .as_deref()
+            .is_some_and(|u| !lablink_core::config::valid_username(u))
+    {
+        return Err("unsafe SSH target or public-key path".into());
+    }
+    // First options win in OpenSSH. Neither authentication nor host-key
+    // verification may reuse a master that authenticated an earlier peer.
+    let mut guarded = t.clone();
+    for (k, v) in [
+        ("ControlMaster", "no"),
+        ("ControlPath", "none"),
+        ("ForwardAgent", "no"),
+        ("ForwardX11", "no"),
+        ("ClearAllForwardings", "yes"),
+        ("PermitLocalCommand", "no"),
+    ] {
+        guarded
+            .options
+            .retain(|key, _| !key.eq_ignore_ascii_case(k));
+        guarded.options.insert(k.into(), v.into());
+    }
+    let ssh = build_args(&guarded, &Mode::Interactive, &[]);
     let mut a = vec!["-i".to_string(), pubkey.display().to_string()];
     let mut i = 0;
     while i < ssh.len() {
