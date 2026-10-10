@@ -361,6 +361,13 @@ fn run_remote(client: &Client, device: &str, command: &str) -> Result<RunResult,
         device: device.to_string(),
     })?;
     let target = Target::from_resolve(&resolved).map_err(Fail::msg)?;
+    // Like the doctor: actions only run on a machine whose key is pinned.
+    if target.host_key_alias.is_none() {
+        return Err(Fail::msg(format!(
+            "the host key of '{}' is not pinned yet: check its fingerprint and use Trust first",
+            resolved.name
+        )));
+    }
     let mode = Mode::Exec {
         command: command.to_string(),
         batch: true,

@@ -617,6 +617,14 @@ fn session(
         Ok(t) => t,
         Err(_) => return Outcome::Mismatch(mismatch_text(&who)),
     };
+    // Automated sessions only reach machines whose host key LabLink pinned:
+    // never OpenSSH's own (prompting or trust-on-first-use) policy.
+    if r.host_key_alias.is_none() {
+        return Outcome::SessionFailed(format!(
+            "{who}host key not pinned: check the fingerprint and run `lablink trust {}` before LabLink runs checks there",
+            r.name
+        ));
+    }
     let args = build_args(
         &t,
         &Mode::Exec {
@@ -632,12 +640,7 @@ fn session(
     let stdout = String::from_utf8_lossy(&out.stdout);
     if !out.timed_out {
         if let Some(sections) = parse_sections(&stdout) {
-            let identity = if r.host_key_alias.is_some() {
-                "host key pinned"
-            } else {
-                "host key NOT pinned"
-            };
-            return Outcome::Ran(sections, identity.into());
+            return Outcome::Ran(sections, "host key pinned".into());
         }
     }
     let stderr = String::from_utf8_lossy(&out.stderr);

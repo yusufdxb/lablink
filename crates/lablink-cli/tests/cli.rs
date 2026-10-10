@@ -428,6 +428,51 @@ fn trust_requires_confirmation_when_not_interactive() {
     wait_color(&e, "fresh", "green");
 }
 
+/// Without a pin, LabLink cannot tell the device from an impostor at the
+/// same address: ssh/exec need `lablink trust` first or an explicit
+/// --unpinned, and `resolve` prints only identity-verified addresses (scp and
+/// rsync would use the address without LabLink's pin).
+#[test]
+fn unpinned_devices_need_trust_or_an_explicit_opt_in() {
+    let e = setup("  - name: fresh\n    expected_ips: [10.9.0.51]\n");
+    e.net.add(
+        "10.9.0.51",
+        FakeHost::ssh_host(vec![fake_key("fresh")], "aa:00:00:00:00:51"),
+    );
+    wait_color(&e, "jetson-a", "green");
+    wait_color(&e, "fresh", "yellow");
+    for args in [&["exec", "fresh", "true"][..], &["ssh", "fresh"]] {
+        let o = lablink(Some(&e), args);
+        assert_eq!(code(&o), exit::REFUSED, "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("lablink trust fresh"),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    // The doctor's automated session refuses the unpinned device too.
+    let o = lablink(Some(&e), &["doctor", "fresh", "--json"]);
+    assert!(
+        String::from_utf8_lossy(&o.stdout).contains("host key not pinned"),
+        "{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    assert!(!e.args_file.exists(), "ssh must not have been started");
+    let o = lablink(Some(&e), &["exec", "fresh", "true", "--unpinned"]);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(!recorded_args(&e)
+        .iter()
+        .any(|a| a.starts_with("HostKeyAlias")));
+
+    let o = lablink(Some(&e), &["resolve", "fresh", "--json"]);
+    assert_eq!(code(&o), exit::REFUSED);
+    assert_eq!(json(&o)["error"]["code"], "unverified");
+    let o = lablink(Some(&e), &["resolve", "fresh", "--force"]);
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "10.9.0.51\n");
+    let o = lablink(Some(&e), &["resolve", "jetson-a"]);
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "10.9.0.31\n");
+}
+
 #[test]
 fn check_config_reports_errors_with_exit_2() {
     let dir = tempfile::tempdir().unwrap();

@@ -97,10 +97,16 @@ enum Cmd {
         json: bool,
     },
     /// Print a device's current IP (e.g. `scp f user@$(lablink resolve jetson-a):`).
+    /// Only for a device whose host key LabLink verified at that address:
+    /// scp/rsync use the address without LabLink's pinned identity.
     Resolve {
         device: String,
         #[arg(long)]
         json: bool,
+        /// Print the address even if its identity is not verified or the
+        /// device's site is AWAY.
+        #[arg(long)]
+        force: bool,
     },
     /// Open an interactive SSH session with the system OpenSSH client.
     Ssh {
@@ -111,6 +117,10 @@ enum Cmd {
         /// Try even if the device is currently offline.
         #[arg(long)]
         force: bool,
+        /// Connect although LabLink has not pinned the device's host key:
+        /// OpenSSH's own known_hosts policy (and prompt) decides.
+        #[arg(long)]
+        unpinned: bool,
         /// Do not print the connection line.
         #[arg(long, short)]
         quiet: bool,
@@ -137,6 +147,10 @@ enum Cmd {
         /// Try even if the device is currently offline.
         #[arg(long)]
         force: bool,
+        /// Run although LabLink has not pinned the device's host key:
+        /// OpenSSH's own known_hosts policy decides.
+        #[arg(long)]
+        unpinned: bool,
     },
     /// Pin a device's current SSH host key after you have verified it.
     Trust {
@@ -750,8 +764,32 @@ fn run(cli: Cli, client: &Client) -> R {
             }
             Ok(exit::OK)
         }
-        Cmd::Resolve { device, json } => {
+        Cmd::Resolve {
+            device,
+            json,
+            force,
+        } => {
             let r: ResolveResult = client.call_typed(&Request::Resolve { device })?;
+            if !force && (r.site_away || r.identity != IdentityState::Verified) {
+                return Err(Fail::new(
+                    exit::REFUSED,
+                    "unverified",
+                    format!(
+                        "'{}' at {} is {}: tools given this address (scp, rsync, ssh) would not check its identity. Use `lablink ssh`/`lablink exec`, verify it with `lablink trust {}`, or pass --force",
+                        shown(&r),
+                        r.ip,
+                        if r.site_away {
+                            format!("at {}, which is AWAY", r.site_name)
+                        } else {
+                            format!(
+                                "not identity-verified ({})",
+                                format!("{:?}", r.identity).to_lowercase()
+                            )
+                        },
+                        shown(&r)
+                    ),
+                ));
+            }
             if json {
                 print_json(&r);
             } else {
@@ -763,9 +801,10 @@ fn run(cli: Cli, client: &Client) -> R {
             device,
             user,
             force,
+            unpinned,
             quiet,
             ssh_args,
-        } => cmd_ssh(client, &device, user, force, quiet, &ssh_args),
+        } => cmd_ssh(client, &device, user, (force, unpinned), quiet, &ssh_args),
         Cmd::Exec {
             device,
             command,
@@ -774,6 +813,7 @@ fn run(cli: Cli, client: &Client) -> R {
             json,
             interactive_auth,
             force,
+            unpinned,
         } => cmd_exec(
             client,
             &device,
@@ -782,7 +822,7 @@ fn run(cli: Cli, client: &Client) -> R {
             timeout,
             json,
             interactive_auth,
-            force,
+            (force, unpinned),
         ),
         Cmd::Trust {
             device,
@@ -1162,15 +1202,29 @@ fn run(cli: Cli, client: &Client) -> R {
     }
 }
 
+/// `(force, unpinned)`: try an AWAY or offline device; connect without a
+/// LabLink pin (OpenSSH's own known_hosts policy decides).
 fn resolve_target(
     client: &Client,
     device: &str,
     user: Option<String>,
-    force: bool,
+    (force, unpinned): (bool, bool),
 ) -> Result<(ResolveResult, Target), Fail> {
     let r: ResolveResult = client.call_typed(&Request::Resolve {
         device: device.into(),
     })?;
+    if r.host_key_alias.is_none() && !unpinned {
+        return Err(Fail::new(
+            exit::REFUSED,
+            "unpinned",
+            format!(
+                "LabLink has not pinned the host key of '{}' ({}), so it cannot tell that machine from an impostor at the same address. Check its fingerprint and pin it with `lablink trust {}`, or pass --unpinned to let OpenSSH ask you",
+                shown(&r),
+                r.ip,
+                shown(&r)
+            ),
+        ));
+    }
     if r.site_away && !force {
         return Err(Fail::new(
             exit::DEVICE_UNREACHABLE,
@@ -1228,7 +1282,7 @@ fn cmd_ssh(
     client: &Client,
     device: &str,
     user: Option<String>,
-    force: bool,
+    force: (bool, bool),
     quiet: bool,
     extra: &[String],
 ) -> R {
@@ -1266,7 +1320,7 @@ fn cmd_exec(
     timeout: u64,
     json: bool,
     interactive: bool,
-    force: bool,
+    force: (bool, bool),
 ) -> R {
     if timeout == 0 {
         return Err(Fail::new(
