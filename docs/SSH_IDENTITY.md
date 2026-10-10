@@ -63,7 +63,8 @@ ssh -o HostKeyAlias=lablink.<site>.<name> -o UserKnownHostsFile=<LabLink's file>
     -o StrictHostKeyChecking=yes -o ControlPath=none -o BatchMode=yes
     -o PubkeyAuthentication=no -o PasswordAuthentication=no
     -o KbdInteractiveAuthentication=no -o GSSAPIAuthentication=no
-    -o HostbasedAuthentication=no -o IdentityAgent=none ... <device> true
+    -o HostbasedAuthentication=no -o IdentityAgent=none -o LogLevel=FATAL
+    ... <device> true
 ```
 
 OpenSSH verifies the server's signature with the pinned key during the key
@@ -71,6 +72,14 @@ exchange, before any authentication. Reaching `Permission denied` therefore
 proves the server holds the private key, while LabLink offered no key, no
 password and no agent. The device becomes *verified*; only then does LabLink
 learn its MAC address and run login and service checks.
+
+Text the server can send must never count as that proof: before the key
+exchange a server can send a disconnect reason, and OpenSSH before 9.0 prints
+it with newlines unescaped, so a fake server could print a line that looks
+like the client's own "Permission denied". The proof therefore runs at
+`LogLevel=FATAL` (OpenSSH logs disconnect reasons at ERROR level, so they are
+not printed) and is refused whenever stderr shows a disconnect or any other
+server-originated message.
 
 | Result of the proof | Device |
 |---|---|

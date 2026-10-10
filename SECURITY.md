@@ -46,7 +46,9 @@ any of them is a vulnerability.
   static IP or where you adopted the device). A device is reported
   *verified* at an address only after the host there proved it holds the
   pinned private key (a credential-free OpenSSH handshake); presenting the
-  public key, which anyone can copy, is not enough.
+  public key, which anyone can copy, is not enough. The proof never trusts
+  text the server can send: it runs at `LogLevel=FATAL` and is refused if
+  any server message or early disconnect shows up.
 - **No silent trust on first use.** `lablink ssh` and `lablink exec` refuse a
   device without a pin (exit 7) unless you pass `--unpinned`, which hands the
   decision to OpenSSH's own known_hosts prompt. The doctor, the app's
@@ -86,10 +88,13 @@ any of them is a vulnerability.
   with its parameters; refuses files over 1 MiB, YAML alias bombs and
   brackets nested deeper than 64 levels; and writes nothing without
   confirmation.
-- **No network listener.** The daemon serves a Unix socket only (mode 0600 in
-  a 0700 directory checked with `lstat`), checks every client's UID
-  (SO_PEERCRED), caps request size (64 KiB) and concurrent connections, and
-  times out idle ones. Clients refuse a socket served by another UID.
+- **No network control interface.** The daemon is controlled only through a
+  Unix socket (mode 0600 in a 0700 directory checked with `lstat`), checks
+  every client's UID (SO_PEERCRED), caps request size (64 KiB) and concurrent
+  connections, and times out idle ones. Clients refuse a socket served by
+  another UID. The only traffic it receives from the network unsolicited is
+  mDNS (UDP 5353, passive browsing; it announces nothing; `daemon.mdns:
+  false` turns it off). It opens no TCP listener.
 - **No privileges.** The daemon runs as you, as a systemd user service with
   `NoNewPrivileges=yes`. ICMP uses unprivileged datagram sockets. The package
   installs no setuid files and its maintainer scripts start nothing.
