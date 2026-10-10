@@ -18,8 +18,10 @@ process trustworthy.
 
 ## CI
 
-- Workflow permissions default to `contents: read`; only the provenance step
-  of a tagged release gets `id-token: write` and `attestations: write`.
+- Workflow permissions default to `contents: read`; only the `provenance`
+  job gets `id-token: write` and `attestations: write`. It runs only for
+  `v*` tags and executes no repository code: it signs the artifacts the
+  `release` job built and uploaded.
 - Third-party actions are pinned by commit SHA; `actions/checkout` never
   persists the token. There is no `pull_request_target` workflow and no
   secret is used anywhere, so pull requests from forks cannot reach one.
@@ -68,11 +70,14 @@ In CI, a `v*` tag also gets a Sigstore build-provenance attestation for the
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify lablink_<version>_amd64.deb --repo <owner>/<repo>
+gh attestation verify lablink_<version>_amd64.deb --repo <owner>/<repo> \
+    --signer-workflow <owner>/<repo>/.github/workflows/ci.yml \
+    --source-ref refs/tags/v<version> --deny-self-hosted-runners
 ```
 
 The attestation proves the file was built by this repository's CI workflow
-from the tagged commit. `lablink version` prints the version and commit; they
+from the tagged commit (`--source-ref` rejects attestations made for any other
+ref). `lablink version` prints the version and commit; they
 match the tag and `BUILDINFO`. The SBOM lists every crate compiled into the
 binaries.
 
