@@ -359,6 +359,37 @@ pub struct DeviceConfig {
     /// Extra capabilities beyond what `ssh`, `via` and the profile imply.
     #[serde(default)]
     pub capabilities: Vec<Capability>,
+    /// Optional remote access for when the device is not reachable on a
+    /// local network (see docs/REMOTE_ACCESS.md). Requires
+    /// `host_key_fingerprints`: every path verifies the same pinned host key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteConfig>,
+}
+
+/// How to reach a device from other networks. Only private overlay networks
+/// are supported; authentication always stays with OpenSSH and the pins.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteConfig {
+    /// Reach the device over Tailscale (network reachability only: LabLink
+    /// never uses Tailscale SSH, subnet routes or exit nodes).
+    #[serde(default)]
+    pub tailscale: Option<TailscaleRemote>,
+}
+
+/// A device's place in a tailnet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TailscaleRemote {
+    /// The device's MagicDNS name (`box.tailnet-1234.ts.net`) or Tailscale IP.
+    pub address: String,
+    /// The tailnet's MagicDNS suffix (`tailnet-1234.ts.net`). LabLink only
+    /// connects while the local Tailscale client is in this tailnet.
+    pub tailnet: String,
+    /// The device's Tailscale stable node ID (`Self.ID` in its
+    /// `tailscale status --json`). When set, the address must belong to it.
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 /// A user-defined service check: a command run on the device over SSH
@@ -799,6 +830,8 @@ fn validate_site(cfg: &Config, site: &SiteConfig, at_site: &str, errs: &mut Vec<
     let mut ips: BTreeMap<IpAddr, String> = BTreeMap::new();
     let mut macs: BTreeMap<String, String> = BTreeMap::new();
     let mut fps: BTreeMap<String, String> = BTreeMap::new();
+    // Tailnet addresses and node ids claimed by devices of this site.
+    let mut remote_ids: BTreeMap<String, String> = BTreeMap::new();
     for (i, dev) in site.devices.iter().enumerate() {
         let at = format!("{at_site}.devices[{i}] ({})", dev.name);
         if !valid_name(&dev.name) {
@@ -920,6 +953,9 @@ fn validate_site(cfg: &Config, site: &SiteConfig, at_site: &str, errs: &mut Vec<
                 errs.push(format!("{at}: a device reached via a gateway needs expected_ips (it cannot be discovered from here)"));
             }
         }
+        if let Some(r) = &dev.remote {
+            validate_remote(dev, r, &at, &mut remote_ids, errs);
+        }
         let mut svc_names = BTreeSet::new();
         for s in &dev.services {
             if !valid_name(&s.name) || !svc_names.insert(s.name.clone()) {
@@ -979,6 +1015,115 @@ fn validate_site(cfg: &Config, site: &SiteConfig, at_site: &str, errs: &mut Vec<
     }
 }
 
+/// Rules for a device's `remote:` block. Remote access must not weaken the
+/// identity model: the device needs pinned fingerprints (verified on every
+/// path), direct SSH (no gateway hop), and an explicit tailnet.
+fn validate_remote(
+    dev: &DeviceConfig,
+    r: &RemoteConfig,
+    at: &str,
+    claimed: &mut BTreeMap<String, String>,
+    errs: &mut Vec<String>,
+) {
+    let Some(t) = &r.tailscale else {
+        errs.push(format!("{at}: remote needs a `tailscale:` section"));
+        return;
+    };
+    if !dev.ssh {
+        errs.push(format!("{at}: remote access requires ssh: true"));
+    }
+    if dev.via.is_some() {
+        errs.push(format!(
+            "{at}: remote access is not supported for devices reached via a gateway"
+        ));
+    }
+    if dev.host_key_fingerprints.is_empty() {
+        errs.push(format!(
+            "{at}: remote access requires host_key_fingerprints: the same pinned host key is verified on every path (read them on the device with `lablink remote setup`)"
+        ));
+    }
+    for (what, v) in [
+        ("address", Some(&t.address)),
+        ("tailnet", Some(&t.tailnet)),
+        ("node_id", t.node_id.as_ref()),
+    ] {
+        if v.is_some_and(|v| looks_like_secret(v)) {
+            errs.push(format!(
+                "{at}: remote.tailscale.{what} looks like a Tailscale auth key or API token; LabLink never stores credentials, remove it"
+            ));
+            return;
+        }
+    }
+    if !valid_tailnet(&t.tailnet) {
+        errs.push(format!(
+            "{at}: remote.tailscale.tailnet must be the tailnet's MagicDNS suffix (e.g. tailnet-1234.ts.net)"
+        ));
+    }
+    match t.address.parse::<IpAddr>() {
+        Ok(ip) if ip.is_unspecified() || ip.is_multicast() => errs.push(format!(
+            "{at}: remote.tailscale.address {ip} is not a usable address"
+        )),
+        Ok(_) => {}
+        Err(_) => {
+            if !valid_hostname(&t.address) || !t.address.contains('.') {
+                errs.push(format!(
+                    "{at}: remote.tailscale.address must be the device's MagicDNS name or a Tailscale IP"
+                ));
+            } else if valid_tailnet(&t.tailnet) && !tailnet_name_in(&t.address, &t.tailnet) {
+                errs.push(format!(
+                    "{at}: remote.tailscale.address '{}' is not a name in tailnet '{}'",
+                    t.address, t.tailnet
+                ));
+            }
+        }
+    }
+    if let Some(n) = &t.node_id {
+        if !valid_node_id(n) {
+            errs.push(format!(
+                "{at}: remote.tailscale.node_id must be a Tailscale stable node ID ([A-Za-z0-9], 1-64 characters)"
+            ));
+        }
+    }
+    let keys = std::iter::once(format!("address {}", normalize_tailnet(&t.address)))
+        .chain(t.node_id.iter().map(|n| format!("node_id {n}")));
+    for k in keys {
+        if let Some(prev) = claimed.insert(k.clone(), dev.name.clone()) {
+            errs.push(format!(
+                "{at}: remote.tailscale {} is already used by device '{prev}'",
+                k
+            ));
+        }
+    }
+}
+
+/// Lower case, without a trailing dot.
+pub fn normalize_tailnet(s: &str) -> String {
+    s.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// A MagicDNS suffix: a DNS name with at least two labels.
+pub fn valid_tailnet(s: &str) -> bool {
+    valid_hostname(s) && normalize_tailnet(s).contains('.')
+}
+
+/// True when `name` is a host name inside `tailnet` (`box.<tailnet>`).
+pub fn tailnet_name_in(name: &str, tailnet: &str) -> bool {
+    normalize_tailnet(name)
+        .strip_suffix(&normalize_tailnet(tailnet))
+        .is_some_and(|h| h.len() > 1 && h.ends_with('.'))
+}
+
+/// Tailscale stable node ids are short alphanumeric strings.
+pub fn valid_node_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Values that are credentials, never identifiers: Tailscale auth keys and
+/// API tokens (`tskey-...`).
+pub fn looks_like_secret(s: &str) -> bool {
+    s.trim().to_ascii_lowercase().starts_with("tskey")
+}
+
 /// True when `text` uses the single-site layout (top-level `networks`,
 /// `devices` or `checks`), which LabLink reads as site `default`.
 pub fn uses_legacy_layout(text: &str) -> bool {
@@ -1030,6 +1175,7 @@ impl DeviceConfig {
             via: None,
             profile: None,
             capabilities: vec![],
+            remote: None,
         }
     }
 
@@ -1579,5 +1725,130 @@ mod via_tests {
         assert!(e[0].contains("needs expected_ips"), "{e:?}");
         let e = errs("devices:\n  - name: a\n    via: a\n    expected_ips: [10.0.0.2]\n");
         assert!(e[0].contains("own gateway"), "{e:?}");
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    const FP: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+
+    fn errs(text: &str) -> Vec<String> {
+        match Config::parse(text, "t") {
+            Ok(_) => vec![],
+            Err(ConfigError::Invalid(e)) => e,
+            Err(e) => vec![e.to_string()],
+        }
+    }
+
+    fn dev(remote: &str) -> String {
+        format!(
+            "devices:\n  - name: box\n    host_key_fingerprints: [\"{FP}\"]\n    remote:\n{remote}"
+        )
+    }
+
+    #[test]
+    fn valid_remote_round_trips_and_absence_is_unchanged() {
+        let text = dev("      tailscale:\n        address: box.tail-ex.ts.net\n        tailnet: tail-ex.ts.net\n        node_id: nBOX1CNTRL\n");
+        let c = Config::parse(&text, "t").unwrap();
+        let t = c.sites[0].devices[0]
+            .remote
+            .as_ref()
+            .unwrap()
+            .tailscale
+            .as_ref()
+            .unwrap();
+        assert_eq!(t.node_id.as_deref(), Some("nBOX1CNTRL"));
+        let again = Config::parse(&c.to_yaml(), "t").unwrap();
+        assert_eq!(again, c);
+        // A device without remote: serializes without the key.
+        let plain = Config::parse("devices:\n  - name: box\n", "t").unwrap();
+        assert!(plain.sites[0].devices[0].remote.is_none());
+        assert!(!plain.to_yaml().contains("remote"));
+        // Tailscale IPs (v4 and v6) are accepted as addresses.
+        for a in ["100.64.0.2", "fd7a:115c:a1e0::2"] {
+            let t = dev(&format!(
+                "      tailscale:\n        address: \"{a}\"\n        tailnet: tail-ex.ts.net\n"
+            ));
+            assert!(errs(&t).is_empty(), "{a}: {:?}", errs(&t));
+        }
+    }
+
+    #[test]
+    fn remote_requires_pins_ssh_and_no_gateway() {
+        let ts = "    remote:\n      tailscale:\n        address: box.tail-ex.ts.net\n        tailnet: tail-ex.ts.net\n";
+        let e = errs(&format!("devices:\n  - name: box\n{ts}"));
+        assert!(
+            e.iter()
+                .any(|x| x.contains("requires host_key_fingerprints")),
+            "{e:?}"
+        );
+        let e = errs(&format!(
+            "devices:\n  - name: box\n    ssh: false\n    host_key_fingerprints: [\"{FP}\"]\n{ts}"
+        ));
+        assert!(e.iter().any(|x| x.contains("requires ssh: true")), "{e:?}");
+        let e = errs(&format!("devices:\n  - name: gw\n  - name: box\n    via: gw\n    expected_ips: [10.0.0.2]\n    host_key_fingerprints: [\"{FP}\"]\n{ts}"));
+        assert!(e.iter().any(|x| x.contains("via a gateway")), "{e:?}");
+        let e = errs(&dev("      {}\n"));
+        assert!(
+            e.iter().any(|x| x.contains("needs a `tailscale:`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn remote_values_are_validated_and_secrets_rejected() {
+        for (body, want) in [
+            ("address: box.tail-ex.ts.net\n        tailnet: tail-ex.ts.net\n        node_id: tskeyauth123", "auth key"),
+            ("address: tskey-auth-kAbC-123\n        tailnet: tail-ex.ts.net", "auth key"),
+            ("address: box.tail-ex.ts.net\n        tailnet: TSKEY-api-x.ts.net", "auth key"),
+            ("address: box.other.ts.net\n        tailnet: tail-ex.ts.net", "not a name in tailnet"),
+            ("address: box\n        tailnet: tail-ex.ts.net", "MagicDNS name or a Tailscale IP"),
+            ("address: '-oProxyCommand=sh'\n        tailnet: tail-ex.ts.net", "MagicDNS name or a Tailscale IP"),
+            ("address: \"box.tail-ex.ts.net\\n\"\n        tailnet: tail-ex.ts.net", "MagicDNS name or a Tailscale IP"),
+            ("address: 0.0.0.0\n        tailnet: tail-ex.ts.net", "not a usable address"),
+            ("address: box.tail-ex.ts.net\n        tailnet: localhost", "MagicDNS suffix"),
+            ("address: box.tail-ex.ts.net\n        tailnet: tail-ex.ts.net\n        node_id: 'n1; rm -rf /'", "stable node ID"),
+            ("address: box.tail-ex.ts.net\n        tailnet: tail-ex.ts.net\n        authkey: x", "unknown field"),
+        ] {
+            let e = errs(&dev(&format!("      tailscale:\n        {body}\n")));
+            assert!(e.iter().any(|x| x.contains(want)), "{body}: {e:?}");
+            if want == "auth key" {
+                assert!(!e.iter().any(|x| x.contains("kAbC") || x.contains("tskeyauth123")), "the secret is not echoed: {e:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tailnet_identity_is_unique_within_a_site_but_sites_are_separate() {
+        let two = format!(
+            "devices:\n  - name: a\n    host_key_fingerprints: [\"{FP}\"]\n    hostnames: [a]\n    remote:\n      tailscale:\n        address: box.tail-ex.ts.net\n        tailnet: tail-ex.ts.net\n        node_id: nX\n  - name: b\n    host_key_fingerprints: [\"{FP}\"]\n    hostnames: [b]\n    remote:\n      tailscale:\n        address: BOX.tail-ex.ts.net.\n        tailnet: tail-ex.ts.net\n        node_id: nX\n"
+        );
+        let e = errs(&two);
+        assert!(
+            e.iter()
+                .any(|x| x.contains("address box.tail-ex.ts.net is already used")),
+            "{e:?}"
+        );
+        assert!(
+            e.iter().any(|x| x.contains("node_id nX is already used")),
+            "{e:?}"
+        );
+        // Two sites (e.g. two labs with separate tailnets) may reuse names.
+        let sites = format!(
+            "sites:\n  - id: careslab\n    name: CARES Lab\n    devices:\n      - name: box\n        host_key_fingerprints: [\"{FP}\"]\n        remote:\n          tailscale:\n            address: box.tail-a.ts.net\n            tailnet: tail-a.ts.net\n  - id: club\n    name: Robotics Club\n    devices:\n      - name: box\n        host_key_fingerprints: [\"{FP}\"]\n        remote:\n          tailscale:\n            address: box.tail-b.ts.net\n            tailnet: tail-b.ts.net\n"
+        );
+        assert!(errs(&sites).is_empty(), "{:?}", errs(&sites));
+    }
+
+    #[test]
+    fn tailnet_helpers() {
+        assert!(tailnet_name_in("Box.Tail-Ex.ts.net.", "tail-ex.ts.net"));
+        assert!(!tailnet_name_in("tail-ex.ts.net", "tail-ex.ts.net"));
+        assert!(!tailnet_name_in("boxtail-ex.ts.net", "tail-ex.ts.net"));
+        assert!(!valid_tailnet("ts"));
+        assert!(valid_node_id("nABC123CNTRL") && !valid_node_id("") && !valid_node_id("a-b"));
+        assert!(looks_like_secret(" TSKEY-api-1") && !looks_like_secret("box"));
     }
 }

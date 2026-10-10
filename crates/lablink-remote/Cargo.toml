@@ -1,0 +1,17 @@
+[package]
+name = "lablink-remote"
+description = "LabLink remote access: verified endpoint selection over the LAN or a private overlay network (Tailscale)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lablink-core.workspace = true
+lablink-ssh.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

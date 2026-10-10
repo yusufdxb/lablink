@@ -7,6 +7,7 @@
 
 mod complete;
 mod output;
+mod remote_cmds;
 mod setup_cmds;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -14,7 +15,8 @@ use lablink_core::client::{Client, ClientError};
 use lablink_core::exit;
 use lablink_core::model::*;
 use lablink_core::protocol::{DeviceChanges, ErrorCode, Request};
-use lablink_ssh::{build_args, Mode, OutputMode, Target};
+use lablink_ssh::{build_args, Mode, OutputMode};
+use remote_cmds::TransportArg;
 use serde_json::json;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -114,6 +116,10 @@ enum Cmd {
         /// Do not print the connection line.
         #[arg(long, short)]
         quiet: bool,
+        /// Which path to use: the LAN when it works, else Tailscale (only for
+        /// devices with `remote:` in the config).
+        #[arg(long, value_enum, default_value_t = TransportArg::Auto)]
+        transport: TransportArg,
         /// Extra arguments passed to ssh after `--` (cannot override host-key checking).
         #[arg(last = true)]
         ssh_args: Vec<String>,
@@ -137,6 +143,14 @@ enum Cmd {
         /// Try even if the device is currently offline.
         #[arg(long)]
         force: bool,
+        /// Which path to use (see `lablink ssh --help`).
+        #[arg(long, value_enum, default_value_t = TransportArg::Auto)]
+        transport: TransportArg,
+    },
+    /// Remote access over Tailscale: diagnostics and enrollment (read-only).
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
     },
     /// Pin a device's current SSH host key after you have verified it.
     Trust {
@@ -420,6 +434,25 @@ fn parse_on_off(s: &str) -> Result<bool, String> {
     }
 }
 
+#[derive(Subcommand, Debug)]
+enum RemoteAction {
+    /// This machine's Tailscale state and, for a device, every path `ssh`
+    /// would try (TCP and host-key checks only; never logs in).
+    Status {
+        device: Option<String>,
+        #[arg(long, value_enum, default_value_t = TransportArg::Auto)]
+        transport: TransportArg,
+        #[arg(long)]
+        json: bool,
+    },
+    /// What this machine needs for remote access, and the config snippet
+    /// other machines use to reach it. Changes nothing.
+    Setup {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// A failure with its exit code.
 struct Fail {
     code: i32,
@@ -531,6 +564,10 @@ fn main() {
             | Cmd::Ping { json: true }
             | Cmd::Doctor { json: true, .. }
             | Cmd::Version { json: true }
+            | Cmd::Remote {
+                action: RemoteAction::Status { json: true, .. }
+                    | RemoteAction::Setup { json: true }
+            }
     );
     let code = match run(cli, &client) {
         Ok(c) => c,
@@ -572,6 +609,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::Resolve { .. } => "resolve",
         Cmd::Ssh { .. } => "ssh",
         Cmd::Exec { .. } => "exec",
+        Cmd::Remote { .. } => "remote",
         Cmd::Trust { .. } => "trust",
         Cmd::Set { .. } => "set",
         Cmd::Adopt { .. } => "adopt",
@@ -764,8 +802,9 @@ fn run(cli: Cli, client: &Client) -> R {
             user,
             force,
             quiet,
+            transport,
             ssh_args,
-        } => cmd_ssh(client, &device, user, force, quiet, &ssh_args),
+        } => cmd_ssh(client, &device, user, force, quiet, transport, &ssh_args),
         Cmd::Exec {
             device,
             command,
@@ -774,6 +813,7 @@ fn run(cli: Cli, client: &Client) -> R {
             json,
             interactive_auth,
             force,
+            transport,
         } => cmd_exec(
             client,
             &device,
@@ -783,7 +823,19 @@ fn run(cli: Cli, client: &Client) -> R {
             json,
             interactive_auth,
             force,
+            transport,
         ),
+        Cmd::Remote {
+            action:
+                RemoteAction::Status {
+                    device,
+                    transport,
+                    json,
+                },
+        } => remote_cmds::cmd_status(client, device, transport, json),
+        Cmd::Remote {
+            action: RemoteAction::Setup { json },
+        } => remote_cmds::cmd_setup(json),
         Cmd::Trust {
             device,
             yes,
@@ -1162,50 +1214,6 @@ fn run(cli: Cli, client: &Client) -> R {
     }
 }
 
-fn resolve_target(
-    client: &Client,
-    device: &str,
-    user: Option<String>,
-    force: bool,
-) -> Result<(ResolveResult, Target), Fail> {
-    let r: ResolveResult = client.call_typed(&Request::Resolve {
-        device: device.into(),
-    })?;
-    if r.site_away && !force {
-        return Err(Fail::new(
-            exit::DEVICE_UNREACHABLE,
-            "unreachable",
-            format!(
-                "'{}' belongs to {}, which is AWAY: you do not appear to be there, and its last address ({}) may belong to another machine here. Switch with `lablink site use {}`, or pass --force to try anyway",
-                shown(&r),
-                r.site_name,
-                r.ip,
-                r.id.split('/').next().unwrap_or_default()
-            ),
-        ));
-    }
-    if r.network == NetworkState::Offline && !force {
-        return Err(Fail::new(
-            exit::DEVICE_UNREACHABLE,
-            "unreachable",
-            format!("'{}' is offline (last known address {}); `lablink status {}` for details, or pass --force to try anyway", shown(&r), r.ip, shown(&r)),
-        ));
-    }
-    let mut t = Target::from_resolve(&r)
-        .map_err(|e| Fail::new(exit::IDENTITY_MISMATCH, "identity_mismatch", e))?;
-    if let Some(u) = user {
-        if !lablink_core::config::valid_username(&u) {
-            return Err(Fail::new(
-                exit::USAGE,
-                "bad_request",
-                format!("invalid username '{u}'"),
-            ));
-        }
-        t.username = Some(u);
-    }
-    Ok((r, t))
-}
-
 /// How to name the resolved device: `site/name` when another site has a
 /// device of the same name (so the user sees which one was chosen).
 fn shown(r: &ResolveResult) -> String {
@@ -1216,38 +1224,49 @@ fn shown(r: &ResolveResult) -> String {
     }
 }
 
-fn describe_identity(r: &ResolveResult) -> &'static str {
-    if r.host_key_alias.is_some() {
+fn describe_identity(p: &remote_cmds::Planned) -> &'static str {
+    if p.pinned {
         "host key pinned by LabLink"
     } else {
         "host key NOT pinned: OpenSSH's own known_hosts policy applies"
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_ssh(
     client: &Client,
     device: &str,
     user: Option<String>,
     force: bool,
     quiet: bool,
+    transport: TransportArg,
     extra: &[String],
 ) -> R {
     use std::os::unix::process::CommandExt;
-    let (r, t) = resolve_target(client, device, user, force)?;
-    let args = build_args(&t, &Mode::Interactive, extra);
+    let p = remote_cmds::plan(client, device, user, force, transport)?;
+    let t = &p.target;
+    let args = build_args(t, &Mode::Interactive, extra);
     if !quiet {
         let who = t
             .username
             .as_deref()
             .map(|u| format!("{u}@"))
             .unwrap_or_default();
+        let via = if p.via_daemon {
+            String::new()
+        } else {
+            format!(" via {}", p.transport.as_str())
+        };
         eprintln!(
-            "lablink: {} -> {who}{}:{} ({})",
-            shown(&r),
-            r.ip,
-            r.port,
-            describe_identity(&r)
+            "lablink: {} -> {who}{}:{}{via} ({})",
+            p.shown,
+            p.ip,
+            p.port,
+            describe_identity(&p)
         );
+        for n in &p.notes {
+            eprintln!("lablink: note: {n}");
+        }
     }
     let err = std::process::Command::new(&t.binary).args(&args).exec();
     Err(Fail::new(
@@ -1267,6 +1286,7 @@ fn cmd_exec(
     json: bool,
     interactive: bool,
     force: bool,
+    transport: TransportArg,
 ) -> R {
     if timeout == 0 {
         return Err(Fail::new(
@@ -1282,9 +1302,10 @@ fn cmd_exec(
             "--interactive-auth cannot be combined with --json",
         ));
     }
-    let (r, t) = resolve_target(client, device, user, force)?;
+    let r = remote_cmds::plan(client, device, user, force, transport)?;
+    let t = &r.target;
     let args = build_args(
-        &t,
+        t,
         &Mode::Exec {
             command: command.into(),
             batch: !interactive,
@@ -1322,7 +1343,14 @@ fn cmd_exec(
         .then(|| lablink_ssh::classify_ssh_failure(&stderr));
     let ssh_error = failure.as_ref().map(|f| f.describe());
     let advice = failure.as_ref().map(|f| f.advice(&r.name));
-    if code == exit::SSH_ERROR && !out.timed_out && !json {
+    if code == exit::SSH_ERROR && !out.timed_out && !json && !r.via_daemon {
+        eprintln!(
+            "lablink: ssh exited 255 (via {} {}). {}",
+            r.transport.as_str(),
+            r.ip,
+            advice.clone().unwrap_or_default()
+        );
+    } else if code == exit::SSH_ERROR && !out.timed_out && !json {
         // stderr went to the terminal; the daemon's view explains the state.
         let hint = client
             .call_typed::<StatusReport>(&Request::Status {
@@ -1372,12 +1400,14 @@ fn cmd_exec(
             "stderr_truncated": out.stderr_truncated,
             "ssh_error": ssh_error,
             "advice": advice,
-            "identity_pinned": r.host_key_alias.is_some(),
+            "identity_pinned": r.pinned,
+            "transport": r.transport.as_str(),
+            "notes": r.notes,
         }));
     } else if out.timed_out {
         eprintln!(
             "lablink: command timed out after {timeout}s on {} and was killed",
-            shown(&r)
+            r.shown
         );
     } else if r.shared_name {
         eprintln!(

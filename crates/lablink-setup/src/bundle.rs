@@ -288,6 +288,7 @@ fn redact_secret_line_tail(line: &str) -> String {
                 "xox",
                 "sk-",
                 "AKIA",
+                "tskey-",
             ]
             .iter()
             .any(|p| t.starts_with(p)))
@@ -535,6 +536,14 @@ fn register(r: &mut Redactor, c: &Collected) {
                 }
                 if let Some(l) = &d.label {
                     r.add(l, "label");
+                }
+                if let Some(t) = d.remote.as_ref().and_then(|x| x.tailscale.as_ref()) {
+                    // Tailnet names identify a person or organization.
+                    r.add_ci(&t.tailnet, "tailnet");
+                    r.add_ci(&t.address, "host");
+                    if let Some(n) = &t.node_id {
+                        r.add(n, "node");
+                    }
                 }
                 if let Some(h) = &d.ssh_host {
                     r.add_ci(h, "host");
@@ -1105,5 +1114,70 @@ ssh: carol@rover7-host.local: Permission denied; /home/dave/.ssh/id_ed25519 and 
             })
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn remote_access_details_and_tailscale_keys_are_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "devices:\n  - name: mewbox\n    usernames: [yusuf]\n    host_key_fingerprints: [\"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\"]\n    notes: 'joined with tskey-auth-kQ3a7Example1CNTRL-SuperSecretValue1234 by mistake'\n    remote:\n      tailscale:\n        address: mewbox.tail-priv123.ts.net\n        tailnet: tail-priv123.ts.net\n        node_id: nPRIV42CNTRL\n",
+        )
+        .unwrap();
+        let opts = BundleOptions {
+            config_path: cfg,
+            socket: dir.path().join("none.sock"),
+            out_dir: dir.path().to_path_buf(),
+            doctor: false,
+        };
+        let b = create(&opts).unwrap();
+        let x = dir.path().join("x");
+        std::fs::create_dir(&x).unwrap();
+        assert!(Command::new("tar")
+            .arg("-xzf")
+            .arg(&b.path)
+            .arg("-C")
+            .arg(&x)
+            .status()
+            .unwrap()
+            .success());
+        let mut all = String::new();
+        for e in walk(&x) {
+            all.push_str(&std::fs::read_to_string(e).unwrap_or_default());
+        }
+        assert!(
+            all.contains("remote:"),
+            "the remote block itself is kept:\n{all}"
+        );
+        for leak in [
+            "tail-priv123",
+            "nPRIV42CNTRL",
+            "mewbox",
+            "yusuf",
+            "tskey",
+            "SuperSecretValue",
+            "47DEQ",
+        ] {
+            assert!(!all.contains(leak), "{leak} leaked:\n{all}");
+        }
+        // A token in free text (a log line) is caught by shape as well.
+        let mut r = Redactor::new(None);
+        let out =
+            r.apply("tailscale up --auth-key tskey-auth-kQ3a7Example1CNTRL-SuperSecretValue1234");
+        assert!(!out.contains("SuperSecret"), "{out}");
+    }
+
+    fn walk(d: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut v = Vec::new();
+        for e in std::fs::read_dir(d).unwrap().filter_map(Result::ok) {
+            let p = e.path();
+            if p.is_dir() {
+                v.extend(walk(&p));
+            } else {
+                v.push(p);
+            }
+        }
+        v
     }
 }

@@ -127,6 +127,8 @@ pub fn build(
         for s in &mut cfg.sites {
             for d in &mut s.devices {
                 d.host_key_fingerprints.clear();
+                // Remote access requires pins; without them it is dropped.
+                d.remote = None;
             }
         }
     }
@@ -319,6 +321,12 @@ pub fn plan(current: &Config, doc: &ExportDoc, opts: ImportOptions) -> Result<Im
             } else {
                 dropped_pins += d.host_key_fingerprints.len();
                 d.host_key_fingerprints.clear();
+                // Remote access requires pins: it is only imported with them.
+                if d.remote.take().is_some() {
+                    skipped.push(format!(
+                        "device {id}: remote access not imported (it needs the pinned fingerprints; use --trust-pins)"
+                    ));
+                }
             }
             for svc in &d.services {
                 let entry = (id.clone(), svc.name.clone(), svc.command.clone());
@@ -513,6 +521,46 @@ mod tests {
             .all(|(_, d)| d.host_key_fingerprints.is_empty()));
         // Config only (daemon down).
         assert_eq!(build(&base(), None, true, 0).unwrap().config, base());
+    }
+
+    fn with_remote() -> Config {
+        Config::parse(
+            &format!("devices:\n  - name: box\n    host_key_fingerprints: [\"{FP}\"]\n    remote:\n      tailscale:\n        address: box.tail-ex.ts.net\n        tailnet: tail-ex.ts.net\n"),
+            "t",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn remote_access_travels_only_with_its_pins() {
+        let doc = build(&with_remote(), None, true, 0).unwrap();
+        assert!(dev(&doc.config, "box").remote.is_some());
+        let without = build(&with_remote(), None, false, 0).unwrap();
+        assert!(
+            dev(&without.config, "box").remote.is_none(),
+            "export without pins stays valid"
+        );
+        // Import without --trust-pins drops remote access and says so.
+        let p = plan(&Config::default(), &doc, ImportOptions::default()).unwrap();
+        assert!(dev(&p.config, "box").remote.is_none());
+        assert!(
+            p.skipped
+                .iter()
+                .any(|s| s.contains("remote access not imported")),
+            "{:?}",
+            p.skipped
+        );
+        p.config.validate().unwrap();
+        let p = plan(
+            &Config::default(),
+            &doc,
+            ImportOptions {
+                trust_pins: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(dev(&p.config, "box").remote.is_some());
     }
 
     #[test]
