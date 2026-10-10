@@ -214,6 +214,38 @@ fn kill_group(pid: u32) {
     }
 }
 
+/// Host-key signature algorithms for the key types pinned under `alias` in
+/// LabLink's own known_hosts file, in file order; empty when it has none.
+/// Passed first as `HostKeyAlgorithms`, so a list from a config file (which
+/// stops OpenSSH preferring known key types) or a certificate algorithm can
+/// never make the proof offer a type that is not pinned.
+pub(crate) fn pinned_algorithms(known_hosts: &str, alias: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in known_hosts.lines() {
+        let mut f = line.split_whitespace();
+        let (Some(host), Some(kt), Some(_key)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        if host.starts_with('#') || host.starts_with('@') || !host.eq_ignore_ascii_case(alias) {
+            continue;
+        }
+        let algs: &[&str] = match kt {
+            // SHA-1 signatures are off in current OpenSSH.
+            "ssh-rsa" => &["rsa-sha2-512", "rsa-sha2-256"],
+            other => &[other][..],
+        };
+        for a in algs {
+            if a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-@.".contains(c))
+                && !out.iter().any(|x| x == a)
+            {
+                out.push((*a).to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Wait up to `limit` for a helper thread, never forever.
 fn join_within<T>(h: std::thread::JoinHandle<T>, limit: Duration) -> Option<T> {
     let end = Instant::now() + limit;
@@ -231,8 +263,16 @@ fn join_within<T>(h: std::thread::JoinHandle<T>, limit: Duration) -> Option<T> {
 /// holds one of the keys pinned for `t.host_key_alias`. Blocking; gives up
 /// after `timeout`.
 pub fn prove_host_key(t: &Target, timeout: Duration) -> KeyProof {
-    if t.host_key_alias.is_none() || t.known_hosts_file.is_none() {
+    let (Some(alias), Some(kh)) = (&t.host_key_alias, &t.known_hosts_file) else {
         return KeyProof::Inconclusive("no pinned host key".into());
+    };
+    let algorithms = std::fs::read_to_string(kh)
+        .map(|s| pinned_algorithms(&s, alias))
+        .unwrap_or_default();
+    if algorithms.is_empty() {
+        return KeyProof::Inconclusive(format!(
+            "LabLink's known_hosts file has no key pinned for {alias}"
+        ));
     }
     let deadline = Instant::now() + timeout;
     let mut transport = match Transport::open(t, deadline) {
@@ -246,7 +286,11 @@ pub fn prove_host_key(t: &Target, timeout: Duration) -> KeyProof {
             return KeyProof::Inconclusive(e.to_string());
         }
     };
-    let args = build_args(t, &Mode::KeyProof, &[]);
+    let mut args = vec![
+        "-o".to_string(),
+        format!("HostKeyAlgorithms={}", algorithms.join(",")),
+    ];
+    args.extend(build_args(t, &Mode::KeyProof, &[]));
     let mut ssh = match Command::new(&t.binary)
         .args(&args)
         .stdin(Stdio::piped())
@@ -403,6 +447,23 @@ mod tests {
         let mut w = ClientWatch::default();
         assert_eq!(w.feed(b"x\n"), Seen::Malformed);
         assert_eq!(w.feed(&client_stream(true)), Seen::Malformed);
+    }
+
+    #[test]
+    fn only_pinned_key_types_are_offered() {
+        let kh = "# Managed by lablinkd\n\
+                  lablink.s.dev ssh-ed25519 AAAA\n\
+                  lablink.s.other ecdsa-sha2-nistp256 AAAA\n\
+                  @revoked lablink.s.dev ssh-dss AAAA\n\
+                  LABLINK.S.DEV ssh-rsa AAAA\n\
+                  lablink.s.dev ssh-ed25519 BBBB\n\
+                  lablink.s.dev bad,type AAAA\n";
+        assert_eq!(
+            pinned_algorithms(kh, "lablink.s.dev"),
+            ["ssh-ed25519", "rsa-sha2-512", "rsa-sha2-256"]
+        );
+        assert!(pinned_algorithms(kh, "lablink.s.none").is_empty());
+        assert!(pinned_algorithms("", "lablink.s.dev").is_empty());
     }
 
     #[test]

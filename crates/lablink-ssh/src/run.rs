@@ -258,11 +258,16 @@ pub(crate) fn classify_unproven(stderr: &str, timed_out: bool) -> KeyProof {
         || stderr.contains("signature verification failed")
         || stderr.contains("error in libcrypto")
     {
-        return KeyProof::Refused("the host could not sign with the pinned key".into());
+        return KeyProof::Refused("it could not sign with the pinned key".into());
     }
     match classify_ssh_failure(stderr) {
-        SshFailure::HostKeyChanged | SshFailure::HostKeyUnknown => {
-            KeyProof::Refused("the host presented a different key than the pin".into())
+        SshFailure::HostKeyChanged => {
+            KeyProof::Refused("it presented a different key of a pinned type".into())
+        }
+        // No key of the offered type is pinned: says nothing about the
+        // device (the scan comparison catches contradicting keys).
+        SshFailure::HostKeyUnknown => {
+            KeyProof::Inconclusive("the host offered no key of a pinned type".into())
         }
         SshFailure::AuthFailed { .. } => {
             KeyProof::Inconclusive("authentication output without a completed key exchange".into())
@@ -431,8 +436,14 @@ mod tests {
             KeyProof::Refused(_)
         ));
         assert!(matches!(
-            p("Host key verification failed.\n"),
+            p("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.\n"),
             KeyProof::Refused(_)
+        ));
+        // Nothing of a pinned type offered (another algorithm list, an
+        // empty pin file): not a verdict about the device.
+        assert!(matches!(
+            p("No ED25519 host key is known for lablink.s.dev and you have requested strict checking.\nHost key verification failed.\n"),
+            KeyProof::Inconclusive(_)
         ));
         assert!(matches!(
             classify_unproven("", true),

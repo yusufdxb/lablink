@@ -544,3 +544,118 @@ fn forged_kexinit_offer_is_never_a_key_proof() {
         "{proof:?}"
     );
 }
+
+/// Only the ed25519 key of a host with two key types is pinned, and the
+/// target's options ask for ECDSA first (an explicit list stops OpenSSH
+/// preferring known key types). The proof offers only pinned types, so the
+/// real device proves its key instead of landing in a false security stop.
+#[test]
+fn a_partial_pin_with_another_algorithm_order_still_proves() {
+    if !have_openssh_server() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    keygen(d, "hk");
+    assert!(Command::new("ssh-keygen")
+        .args(["-q", "-t", "ecdsa", "-N", "", "-f"])
+        .arg(d.join("hk_ecdsa"))
+        .status()
+        .unwrap()
+        .success());
+    let (_server, port) = sshd(
+        d,
+        "dev",
+        "hk",
+        &format!("HostKey {}\n", d.join("hk_ecdsa").display()),
+    );
+    let mut t = pinned(d, port, &pubkey(d, "hk"));
+    t.options.insert(
+        "HostKeyAlgorithms".into(),
+        "ecdsa-sha2-nistp256,ssh-ed25519".into(),
+    );
+    assert_eq!(
+        lablink_ssh::prove_host_key(&t, PROOF_TIMEOUT),
+        lablink_ssh::KeyProof::Proven
+    );
+    // A pin file without this device: never run, never a verdict.
+    std::fs::write(
+        t.known_hosts_file.as_ref().unwrap(),
+        "lablink.t.other ssh-ed25519 AAAA\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        lablink_ssh::prove_host_key(&t, PROOF_TIMEOUT),
+        lablink_ssh::KeyProof::Inconclusive(_)
+    ));
+    assert_no_auth(d, "dev");
+}
+
+/// A hostile `~/.ssh/config`: a KnownHostsCommand that vouches for the
+/// server's real key, a `Match` block that breaks only LabLink's option
+/// probe, `GSSAPIKeyExchange`, `VerifyHostKeyDNS`, `ProxyUseFdpass`. With
+/// another key pinned the proof must not succeed; with the real key pinned it
+/// must. Rewrites the current user's ~/.ssh/config, so it runs only with
+/// LABLINK_TEST_HOSTILE_SSH_CONFIG=1 (disposable containers).
+#[test]
+fn a_hostile_client_config_cannot_vouch_for_a_key() {
+    if std::env::var_os("LABLINK_TEST_HOSTILE_SSH_CONFIG").is_none() {
+        eprintln!("SKIP: set LABLINK_TEST_HOSTILE_SSH_CONFIG=1 (rewrites ~/.ssh/config)");
+        return;
+    }
+    if !have_openssh_server() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    keygen(d, "hk");
+    keygen(d, "other");
+    let (_server, port) = sshd(d, "dev", "hk", "");
+    let khc = d.join("khc.sh");
+    std::fs::write(
+        &khc,
+        format!("#!/bin/sh\necho 'lablink.t.dev {}'\n", pubkey(d, "hk")),
+    )
+    .unwrap();
+    std::fs::set_permissions(&khc, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let home = std::path::PathBuf::from(
+        String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "getent passwd $(id -u) | cut -d: -f6"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim(),
+    );
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    let cfg = home.join(".ssh/config");
+    assert!(
+        !cfg.exists(),
+        "refusing to overwrite an existing {}",
+        cfg.display()
+    );
+    // One attack per config, so that one cannot mask another.
+    let configs = [
+        format!(
+            "IgnoreUnknown KnownHostsCommand,GSSAPIKeyExchange\n\
+             Match host lablink-option-check\n  CanonicalizeHostname yes\n  CanonicalizeFallbackLocal no\n  CanonicalDomains nowhere.invalid\n\
+             Host *\n  KnownHostsCommand {}\n  GSSAPIKeyExchange yes\n  VerifyHostKeyDNS yes\n",
+            khc.display()
+        ),
+        "Host *\n  ProxyUseFdpass yes\n".to_string(),
+    ];
+    for c in configs {
+        std::fs::write(&cfg, &c).unwrap();
+        let impostor =
+            lablink_ssh::prove_host_key(&pinned(d, port, &pubkey(d, "other")), PROOF_TIMEOUT);
+        let real = lablink_ssh::prove_host_key(&pinned(d, port, &pubkey(d, "hk")), PROOF_TIMEOUT);
+        std::fs::remove_file(&cfg).unwrap();
+        assert!(
+            !matches!(impostor, lablink_ssh::KeyProof::Proven),
+            "{impostor:?} with {c}"
+        );
+        assert_eq!(real, lablink_ssh::KeyProof::Proven, "with {c}");
+    }
+}

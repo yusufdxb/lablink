@@ -263,7 +263,7 @@ fn replayed_public_key_is_never_verified() {
     };
     for (proof, want) in [
         (
-            KeyProof::Refused("the host could not sign with the pinned key".into()),
+            KeyProof::Refused("it could not sign with the pinned key".into()),
             IdentityState::Mismatch,
         ),
         (

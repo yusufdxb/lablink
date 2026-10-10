@@ -1647,7 +1647,7 @@ impl Registry {
             }
             KeyProof::Refused(why) => {
                 let detail = format!(
-                    "SECURITY: {ip} presented the pinned host key of '{name}' but {why}: another machine may be replaying the key. Not accepted; check the device, then `lablink status {name}`"
+                    "SECURITY: {ip} showed the pinned host key of '{name}' to a scan, but in the possession proof {why}: another machine may be replaying the key. Not accepted; check the device, then `lablink status {name}`"
                 );
                 self.set_identity(
                     name,

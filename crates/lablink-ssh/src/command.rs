@@ -97,8 +97,10 @@ fn supports_option(binary: &str, setting: &str) -> bool {
     if let Some(v) = cache.lock().unwrap().get(&key) {
         return *v;
     }
+    // -F /dev/null: no config file is read, so a `Match` block that only
+    // breaks this probe cannot make LabLink leave the option out.
     let v = std::process::Command::new(binary)
-        .args(["-G", "-o", setting, "lablink-option-check"])
+        .args(option_probe_args(setting))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -106,6 +108,17 @@ fn supports_option(binary: &str, setting: &str) -> bool {
         .is_ok_and(|s| s.success());
     cache.lock().unwrap().insert(key, v);
     v
+}
+
+fn option_probe_args(setting: &str) -> [&str; 6] {
+    [
+        "-F",
+        "/dev/null",
+        "-G",
+        "-o",
+        setting,
+        "lablink-option-check",
+    ]
 }
 
 fn supports_known_hosts_command(binary: &str) -> bool {
@@ -173,6 +186,8 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
                 opt(&mut a, k, "no");
             }
             opt(&mut a, "IdentityAgent", "none");
+            // A config's ProxyUseFdpass would make ssh refuse ProxyCommand=-.
+            opt(&mut a, "ProxyUseFdpass", "no");
             // Distribution builds can trust a Kerberos exchange instead of
             // the host key; the proof must only ever rest on the pin.
             if supports_option(&t.binary, "GSSAPIKeyExchange=no") {
@@ -381,6 +396,12 @@ mod tests {
             !a.contains(&"-n".to_string()),
             "stdin is the transport: {a:?}"
         );
+        assert!(a.contains(&"ProxyUseFdpass=no".to_string()));
+    }
+
+    #[test]
+    fn option_probes_ignore_every_config_file() {
+        assert_eq!(&option_probe_args("X=y")[..2], ["-F", "/dev/null"]);
     }
 
     #[test]

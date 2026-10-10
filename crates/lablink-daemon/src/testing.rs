@@ -263,7 +263,7 @@ impl Prober for FakeNet {
             match h {
                 Some(h) if h.up && h.port == PortMode::Open && h.holds_keys => KeyProof::Proven,
                 Some(h) if h.up && h.port == PortMode::Open => {
-                    KeyProof::Refused("the host could not sign with the pinned key".into())
+                    KeyProof::Refused("it could not sign with the pinned key".into())
                 }
                 _ => KeyProof::Inconclusive("connection timed out".into()),
             }
