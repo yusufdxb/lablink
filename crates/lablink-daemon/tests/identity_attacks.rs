@@ -163,7 +163,10 @@ fn contradicting_key_at_a_name_claimed_address_is_a_mismatch() {
         r.apply_probe("lab/jetson", &down(REAL), now);
     }
     r.observe(&mdns(EVIL), "mdns", None, now + 1);
-    assert_eq!(r.device("lab/jetson").unwrap().rec.current_ip, Some(ip(EVIL)));
+    assert_eq!(
+        r.device("lab/jetson").unwrap().rec.current_ip,
+        Some(ip(EVIL))
+    );
     r.apply_probe("lab/jetson", &up(EVIL, PortState::Open), now + 2);
     r.apply_keys(
         "lab/jetson",
@@ -186,7 +189,10 @@ fn contradicting_key_at_a_name_claimed_address_is_a_mismatch() {
         host_keys: vec![k.clone()],
     };
     r.observe(&real, "keyscan", None, now + 10);
-    assert_eq!(r.device("lab/jetson").unwrap().rec.current_ip, Some(ip(REAL)));
+    assert_eq!(
+        r.device("lab/jetson").unwrap().rec.current_ip,
+        Some(ip(REAL))
+    );
     check_identity(&mut r, REAL, vec![k], KeyProof::Proven, now + 11);
     let res = r.resolve("jetson").unwrap();
     assert_eq!(
@@ -230,7 +236,10 @@ fn key_verified_sighting_displaces_a_squatter() {
         host_keys: vec![k.clone()],
     };
     r.observe(&real, "keyscan", None, now);
-    assert_eq!(r.device("lab/jetson").unwrap().rec.current_ip, Some(ip(REAL)));
+    assert_eq!(
+        r.device("lab/jetson").unwrap().rec.current_ip,
+        Some(ip(REAL))
+    );
     check_identity(&mut r, REAL, vec![k], KeyProof::Proven, now + 1);
     let res = r.resolve("jetson").unwrap();
     assert_eq!(
