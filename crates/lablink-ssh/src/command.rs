@@ -160,7 +160,12 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
                 opt(&mut a, k, "no");
             }
             opt(&mut a, "IdentityAgent", "none");
-            opt(&mut a, "LogLevel", "ERROR");
+            // FATAL, not ERROR: OpenSSH logs a server's disconnect reason at
+            // ERROR level, and before 9.0 it does not escape newlines in it,
+            // so a server holding no key could print a forged "Permission
+            // denied" line. At FATAL only the client's own fatal messages
+            // (including its "Permission denied") reach stderr.
+            opt(&mut a, "LogLevel", "FATAL");
             for o in AUTOMATED_SESSION_OPTIONS {
                 a.push("-o".into());
                 a.push(o.into());

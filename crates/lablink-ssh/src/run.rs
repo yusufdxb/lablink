@@ -226,14 +226,32 @@ pub enum KeyProof {
     Inconclusive(String),
 }
 
-/// Classify a [`crate::Mode::KeyProof`] run. Only OpenSSH's own
-/// `user@host: Permission denied (...)` line (or success) counts as proof:
-/// text the server sends before the key exchange (a disconnect reason) is
-/// printed after a fixed prefix and with newlines escaped, so it cannot
-/// produce that line.
+/// Text OpenSSH prints when the server ended the connection or sent text of
+/// its own. Its presence means the run proves nothing: a server that holds
+/// no key can embed a forged denial line in a disconnect reason (OpenSSH
+/// before 9.0 prints those with newlines unescaped).
+const SERVER_TEXT_MARKERS: &[&str] = &[
+    "Received disconnect",
+    "Disconnected from",
+    "Connection closed",
+    "Connection reset",
+    "kex_exchange_identification",
+    "banner",
+    "protocol version",
+    "Protocol major versions",
+];
+
+/// Classify a [`crate::Mode::KeyProof`] run (made with `LogLevel=FATAL`, so
+/// a server's disconnect text is not printed at all). Proof is either
+/// success or OpenSSH's own `user@host: Permission denied (...)` line, and
+/// never when any sign of server-originated text or an early disconnect is
+/// present.
 pub fn classify_key_proof(exit_code: Option<i32>, stderr: &str, timed_out: bool) -> KeyProof {
     if timed_out {
         return KeyProof::Inconclusive("timed out".into());
+    }
+    if let Some(m) = SERVER_TEXT_MARKERS.iter().find(|m| stderr.contains(*m)) {
+        return KeyProof::Inconclusive(format!("the server closed the connection ({m})"));
     }
     if exit_code == Some(0) {
         return KeyProof::Proven;
@@ -409,6 +427,7 @@ mod tests {
         // is printed after a fixed prefix and must not count as proof.
         for forged in [
             "Received disconnect from 10.0.0.9 port 22:2: x@y: Permission denied (publickey).\n",
+            "Received disconnect from 10.0.0.9 port 22:2: x\nops@10.0.0.9: Permission denied (publickey).\n",
             "Disconnected from 10.0.0.9 port 22\nkex_exchange_identification: Connection closed by remote host\n",
             "Connection closed by 10.0.0.9 port 22\n",
         ] {

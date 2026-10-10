@@ -180,3 +180,76 @@ fn key_proof_against_a_real_sshd() {
     let log = std::fs::read_to_string(d.join("sshd.log")).unwrap_or_default();
     assert!(!log.contains("Failed "), "no authentication attempt: {log}");
 }
+
+/// A server that holds no key sends, before any key exchange, a disconnect
+/// reason with an embedded newline and a forged `user@host: Permission
+/// denied (...)` line (OpenSSH 8.9 prints such reasons unescaped). The
+/// possession proof must never call that proven. Skipped without ssh.
+#[test]
+fn forged_pre_kex_disconnect_is_never_a_key_proof() {
+    use std::io::{Read, Write};
+    if !have("ssh") {
+        eprintln!("SKIP: ssh not installed");
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").unwrap();
+        let mut buf = [0u8; 512];
+        let _ = s.read(&mut buf); // client banner
+        let reason = b"x\nops@127.0.0.1: Permission denied (publickey,password).\n";
+        let mut payload = vec![1u8]; // SSH_MSG_DISCONNECT
+        payload.extend_from_slice(&2u32.to_be_bytes());
+        payload.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+        payload.extend_from_slice(reason);
+        payload.extend_from_slice(&0u32.to_be_bytes()); // language tag
+        let mut pad = 8 - ((5 + payload.len()) % 8);
+        if pad < 4 {
+            pad += 8;
+        }
+        let mut pkt = ((1 + payload.len() + pad) as u32).to_be_bytes().to_vec();
+        pkt.push(pad as u8);
+        pkt.extend_from_slice(&payload);
+        pkt.extend(std::iter::repeat_n(0u8, pad));
+        s.write_all(&pkt).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let kh = dir.path().join("known_hosts");
+    std::fs::write(
+        &kh,
+        "lablink.t.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
+    )
+    .unwrap();
+    let t = lablink_ssh::Target {
+        binary: "ssh".into(),
+        ip: "127.0.0.1".into(),
+        port,
+        ssh_host: "dev".into(),
+        username: Some("ops".into()),
+        host_key_alias: Some("lablink.t.dev".into()),
+        known_hosts_file: Some(kh),
+        connect_timeout_s: 5,
+        options: Default::default(),
+        proxy_command: None,
+    };
+    let args = lablink_ssh::build_args(&t, &lablink_ssh::Mode::KeyProof, &[]);
+    let o = lablink_ssh::run_captured(
+        "ssh",
+        &args,
+        std::time::Duration::from_secs(15),
+        lablink_ssh::OutputMode::Capture,
+        true,
+    )
+    .unwrap();
+    let _ = server.join();
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    let proof = lablink_ssh::classify_key_proof(o.exit_code, &stderr, o.timed_out);
+    assert_ne!(
+        proof,
+        lablink_ssh::KeyProof::Proven,
+        "stderr was: {stderr:?}"
+    );
+}
