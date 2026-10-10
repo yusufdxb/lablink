@@ -8,7 +8,8 @@
 #   -> doctor -> GUI -> export/import -> support bundle
 #   -> two sites: move between networks, AWAY, auto-detection, manual
 #      override, ambiguous names, scan restriction
-#   -> security stop -> GUI-only fresh user -> .deb removal
+#   -> security stop -> password isolation, other local user, package
+#      privileges, hostile import -> GUI-only fresh user -> .deb removal
 #   -> tarball install / uninstall in another fresh container
 #
 # Containers on private Docker networks (no real lab hardware):
@@ -367,6 +368,34 @@ wait_for 30 'lablink status robot --json | grep -q "\"identity\": \"mismatch\""'
 out_of 'lablink status robot' > "$out/status-mismatch.txt"
 grep -q "SECURITY STOP" "$out/status-mismatch.txt" || fail "security stop" "no security-stop explanation"
 pass "security stop" "new robot host key -> RED MISMATCH (exit 11); exec and ssh refused with exit 6"
+
+# ---- security properties of the installed package ----------------------------------------
+# The password typed for copy-id (robot-pass-1, via OpenSSH's askpass) must
+# not be anywhere LabLink writes: config, state (pinned keys, SQLite cache),
+# cache dir, daemon journal. (The support bundle was checked above.)
+as_tester 'journalctl --user -u lablinkd --no-pager' > "$out/journal-full.txt" 2>&1 || true
+hits=$(out_of 'grep -raIl -- robot-pass-1 ~/.config/lablink ~/.local/state/lablink ~/.cache 2>/dev/null; grep -ac robot-pass-1 ~/.local/state/lablink/cache.db 2>/dev/null | grep -v "^0$"')
+[ -z "$hits" ] && ! grep -q robot-pass-1 "$out/journal-full.txt" || fail "password isolation" "password found: $hits"
+pass "password isolation" "copy-id password absent from ~/.config/lablink, ~/.local/state/lablink (incl. cache.db), ~/.cache and the lablinkd journal"
+# Another local account cannot reach or impersonate this user's daemon.
+docker exec "$desk" useradd -m mallory
+mal=$(docker exec -u mallory -e HOME=/home/mallory "$desk" bash -c 'ls /run/user/1000/lablink 2>&1; LABLINK_SOCKET=/run/user/1000/lablink/lablinkd.sock lablink status --json >/dev/null 2>&1; echo "exit=$?"')
+grep -q "Permission denied" <<<"$mal" && grep -q "exit=3" <<<"$mal" || fail "other local user" "$mal"
+pass "other local user" "mallory: socket directory 'Permission denied', lablink status exit 3 (daemon unavailable)"
+# Package: no setuid/setgid files, nothing world-writable, root-owned files.
+perm=$(docker exec "$desk" bash -c 'dpkg -L lablink | while read -r f; do [ -e "$f" ] && stat -c "%a %U %n" "$f"; done' )
+bad=$(awk '$2 != "root" || substr($1, length($1), 1) ~ /[2367]/ || (length($1) == 4 && substr($1,1,1) != "0")' <<<"$perm")
+[ -z "$bad" ] || fail "package privileges" "$bad"
+pass "package privileges" "$(wc -l <<<"$perm") packaged paths: all root-owned, none setuid/setgid or world-writable; maintainer scripts only print and stop lablinkd"
+# A hostile export cannot add OpenSSH options that load code or forward the agent.
+as_tester 'printf "lablink_export: 1\nconfig:\n  ssh:\n    options:\n      PKCS11Provider: /tmp/x.so\n" > /tmp/evil.yaml'
+[ "$(code_of 'lablink import /tmp/evil.yaml --config /tmp/evil-out.yaml --yes')" -ne 0 ] && [ "$(code_of 'test -e /tmp/evil-out.yaml')" -ne 0 ] \
+    || fail "hostile import" "PKCS11Provider file was accepted"
+as_tester 'printf "lablink_export: 1\nconfig:\n  ssh:\n    options:\n      ForwardAgent: \"no\"\n" > /tmp/opts.yaml'
+as_tester 'lablink import /tmp/opts.yaml --config /tmp/opts-out.yaml --replace --yes' > "$out/import-ssh-options.txt" 2>&1 || true
+grep -q "ssh.options: never imported" "$out/import-ssh-options.txt" && [ "$(code_of 'grep -q ForwardAgent /tmp/opts-out.yaml')" -ne 0 ] \
+    || fail "hostile import" "ssh.options were imported (import-ssh-options.txt)"
+pass "hostile import" "file with PKCS11Provider refused, nothing written; ssh.options never imported even with --replace"
 
 # ---- resources --------------------------------------------------------------------
 as_tester 'lablink metrics --json' > "$out/metrics.json"
