@@ -359,7 +359,16 @@ pub fn plan(current: &Config, doc: &ExportDoc, opts: ImportOptions) -> Result<Im
                     "checks for {sid}/{dev}: different checks exist (use --replace)"
                 )),
                 _ => {
-                    changes.push(format!("checks for {sid}/{dev}: {} check(s)", specs.len()));
+                    // Every check with its parameters (paths a check reads
+                    // on the device, ping targets): the user sees what runs.
+                    changes.push(format!(
+                        "checks for {sid}/{dev}: {}",
+                        specs
+                            .iter()
+                            .map(|c| serde_json::to_string(c).unwrap_or_else(|_| c.kind().into()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                     site.checks.insert(dev.clone(), specs.clone());
                 }
             }
@@ -736,6 +745,26 @@ mod tests {
             }
             let _ = Config::parse(&s, "fuzz");
         }
+    }
+
+    #[test]
+    fn imported_checks_are_listed_with_their_parameters() {
+        let file = "lablink_export: 1\nconfig:\n  sites:\n    - id: s\n      name: S\n      devices:\n        - name: jetson\n      checks:\n        jetson:\n          - dds: { interface: eth0, config: /home/ops/cyclonedds.xml }\n          - disk: { path: /data }\n";
+        let p = plan(
+            &Config::default(),
+            &parse(file).unwrap(),
+            ImportOptions::default(),
+        )
+        .unwrap();
+        let line = p
+            .changes
+            .iter()
+            .find(|c| c.starts_with("checks for s/jetson"))
+            .unwrap();
+        assert!(
+            line.contains("/home/ops/cyclonedds.xml") && line.contains("/data"),
+            "{line}"
+        );
     }
 
     #[test]

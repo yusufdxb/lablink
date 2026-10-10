@@ -200,6 +200,19 @@ impl Redactor {
                         let t = self.token(&original, "fp");
                         out.push_str(&format!("SHA256:<{t}>"));
                     } else {
+                        // `name@<address>` (OpenSSH errors): the login name
+                        // may be one LabLink never saw (~/.ssh/config).
+                        if out.ends_with('@') {
+                            let at = out.len() - 1;
+                            let start = out[..at]
+                                .rfind(|c: char| !(c.is_ascii_alphanumeric() || "._-".contains(c)))
+                                .map_or(0, |p| p + 1);
+                            if start < at && !out[start..at].starts_with("user-") {
+                                let user = out[start..at].to_string();
+                                let u = self.token(&user, "user");
+                                out.replace_range(start..at, &u);
+                            }
+                        }
                         let t = self.token(&original, kind);
                         out.push_str(&t);
                     }
@@ -601,6 +614,10 @@ fn register(r: &mut Redactor, c: &Collected) {
 /// shell commands of service checks (they may contain anything).
 fn config_for_bundle(cfg: &Config) -> String {
     let mut c = cfg.clone();
+    // Option values can be key paths or user names: keep only the names.
+    for v in c.ssh.options.values_mut() {
+        *v = "<value removed>".into();
+    }
     for s in &mut c.sites {
         for d in &mut s.devices {
             d.notes = None;
@@ -945,7 +962,8 @@ ghp_0123456789abcdefghijklmnopqrstuvwxyz0 /home/bob/cyclonedds.xml\n\
 
     fn adversarial() -> Collected {
         let yaml = "sites:\n  - id: site-alpha\n    name: Alpha Robotics Lab\n    networks:\n      - name: alpha_lan\n        cidr: 10.77.0.0/24\n        gateway: 10.77.0.1\n        gateway_mac: 02:aa:bb:cc:dd:01\n        ssid: Alpha Guest WiFi\n    devices:\n      - name: rover-7\n        label: Rover Seven\n        usernames: [carol]\n        hostnames: [rover7-host.local]\n        host_key_fingerprints: [\"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\"]\n        notes: door code 4711\n        services:\n          - name: probe\n            command: \"curl -H 'X-Api-Key: SUPERSECRET' http://10.77.0.9\"\n  - id: site-beta\n    name: Beta Workshop\n    devices:\n      - name: bench-pc\n        expected_ips: [\"fd12:3456:789a::5\"]\n";
-        let cfg = Config::parse(yaml, "t").unwrap();
+        let yaml = format!("ssh:\n  options:\n    IdentityFile: /opt/fleet-keys/erin_lab\n{yaml}");
+        let cfg = Config::parse(&yaml, "t").unwrap();
         let mut c = Collected::empty();
         c.cfg = Some(cfg);
         c.cfg_present = true;
@@ -955,7 +973,8 @@ ghp_0123456789abcdefghijklmnopqrstuvwxyz0 /home/bob/cyclonedds.xml\n\
         c.journal = "2026-10-09T10:00:00 daves-laptop lablinkd[42]: rover-7: located at 10.77.0.42 (matched by fingerprint via keyscan)\n\
 2026-10-09T10:00:01 daves-laptop lablinkd[42]: SSH fingerprint verified at 10.77.0.42 (SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU)\n\
 learned MAC 02:aa:bb:cc:dd:42; bench-pc at fd12:3456:789a::5; site 'Alpha Robotics Lab' is ACTIVE; \"Alpha Guest WiFi\" on wlan0\n\
-ssh: carol@rover7-host.local: Permission denied; /home/dave/.ssh/id_ed25519 and /home/carol/ws\n".into();
+ssh: carol@rover7-host.local: Permission denied; /home/dave/.ssh/id_ed25519 and /home/carol/ws\n\
+ssh: erin@10.77.0.42: Permission denied (publickey)\n".into();
         c.doctor = Some("{\"detail\": \"GPU OK on rover-7 (Rover Seven), user carol, /home/carol/ws, 10.77.0.42\"}".into());
         c
     }
@@ -989,6 +1008,8 @@ ssh: carol@rover7-host.local: Permission denied; /home/dave/.ssh/id_ed25519 and 
             "SUPERSECRET",
             "bench-pc",
             "4711",
+            "erin",
+            "fleet-keys",
         ] {
             assert!(!all.contains(leak), "{leak} leaked:\n{all}");
         }
