@@ -50,6 +50,8 @@ All notable changes are listed here. The format follows
   may still be running, instead of claiming it was killed.
 - Concurrent known_hosts writes land in order; at most 20 configuration
   backups are kept per file.
+- INSTALL.md says that a tarball install next to the `.deb` uses the
+  packaged daemon unit, and how to switch back after removing the package.
 
 ## [0.3.0] - 2026-10-10
 

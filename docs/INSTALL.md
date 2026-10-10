@@ -70,7 +70,10 @@ cd lablink-0.3.0-x86_64-linux
 
 `install.sh` copies the three binaries to `~/.local/bin`, and the menu entry,
 icon and bash completion to `~/.local/share`. `lablink init` then writes a
-systemd user unit pointing at `~/.local/bin/lablinkd`.
+systemd user unit pointing at `~/.local/bin/lablinkd`. If the `.deb` is also
+installed on the machine, `lablink init` uses the packaged unit
+(`/usr/bin/lablinkd`) instead, so removing the package stops your daemon too;
+run `lablink init` again afterwards to switch to the tarball daemon.
 
 Remove with `./uninstall.sh` (keeps configuration and state) or
 `./uninstall.sh --purge` (also deletes `~/.config/lablink` and

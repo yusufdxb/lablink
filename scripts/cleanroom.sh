@@ -467,13 +467,16 @@ shot gui-b4-adopt
 click 276 580 4                    # Adopt
 grep -q '"profile": "generic_linux"' <<<"$(status_json robot)" || fail "GUI-only: adopt" "robot not adopted (gui-b4-adopt.png)"
 pass "GUI-only: adopt" "inspected fingerprints, chose the site, named robot, label, type, user"
-click 503 341 4                    # Trust host key... (in the explanation)
+click 607 392 4                    # Trust host key... (in the wrapped explanation)
 shot gui-b5-trust
-click 482 625 8                    # Pin N key(s)
+x "xdotool mousemove 720 600"; for _ in 1 2 3; do x "xdotool click 5"; done; sleep 1   # scroll to the pin button
+shot gui-b5a-scrolled
+click 586 538 8                    # Pin N key(s)
 grep -q '"identity": "verified"' <<<"$(status_json robot)" || fail "GUI-only: trust" "not pinned (gui-b5-trust.png)"
+x "xdotool mousemove 720 600"; for _ in $(seq 15); do x "xdotool click 4"; done; sleep 1   # back to the top
 shot gui-b6-auth-failed
 pass "GUI-only: trust" "fingerprints shown, pinned only after the explicit click"
-click 442 329 3                    # SSH Setup -> terminal running lablink copy-id
+click 592 425 3                    # SSH Setup -> terminal running lablink copy-id
 term=$(x 'xdotool search --class xterm | head -1')
 [ -n "$term" ] || fail "GUI-only: SSH setup" "no terminal opened"
 x "xdotool windowfocus --sync $term; xdotool type --window $term y; xdotool key --window $term Return"; sleep 1
