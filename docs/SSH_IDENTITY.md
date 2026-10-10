@@ -60,7 +60,8 @@ check due: LabLink then opens a TCP connection to that address itself (or
 starts the gateway hop) and runs OpenSSH over it:
 
 ```
-ssh -o ProxyCommand=-            # ssh speaks over stdin/stdout, LabLink carries the bytes
+ssh -F /dev/null                 # no config file: everything the proof needs is below
+    -o ProxyCommand=-            # ssh speaks over stdin/stdout, LabLink carries the bytes
     -o HostKeyAlias=lablink.<site>.<name> -o UserKnownHostsFile=<LabLink's file>
     -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes
     -o KnownHostsCommand=none -o VerifyHostKeyDNS=no -o UpdateHostKeys=no
@@ -71,8 +72,11 @@ ssh -o ProxyCommand=-            # ssh speaks over stdin/stdout, LabLink carries
 ```
 
 (`KnownHostsCommand` and `GSSAPIKeyExchange` only where the installed ssh
-knows them; that is checked with `ssh -F /dev/null -G`, so no config file can
-hide them. `HostKeyAlgorithms` is set first to exactly the key types pinned
+knows them: an option is left out only when `ssh -F /dev/null -G` answers
+"Bad configuration option"; any other probe failure passes it. The proof reads
+no `~/.ssh/config` or `/etc/ssh/ssh_config` at all, so nothing there can vouch
+for a key or print text into its stderr; `lablink ssh`/`exec` still use your
+config, behind the same pinned options. `HostKeyAlgorithms` is set first to exactly the key types pinned
 for the device, read from LabLink's own known_hosts file, so a config's
 algorithm list or a host certificate cannot steer the exchange to an unpinned
 type; with no entry for the device the proof does not run. `ProxyUseFdpass=no`
