@@ -270,6 +270,28 @@ fn version_warns_when_an_older_daemon_is_running() {
 }
 
 #[test]
+fn daemon_commands_warn_when_the_running_daemon_is_an_older_build() {
+    use std::io::{BufRead, BufReader};
+    let h = Home::new();
+    let socket = h.path().join("old.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+        assert!(request.contains("ping"));
+        stream.write_all(b"{\"ok\":true,\"result\":{\"version\":\"0.3.0\",\"protocol_version\":1,\"pid\":123,\"uptime_s\":0}}\n").unwrap();
+    });
+    let out = h.run(&socket, &["status", "--json"]);
+    server.join().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("running lablinkd is 0.3.0"), "{err}");
+    assert!(err.contains("systemctl --user restart lablinkd"), "{err}");
+    // The warning never lands on stdout, which carries the JSON.
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("WARNING"));
+}
+
+#[test]
 fn concurrent_site_adds_preserve_every_acknowledged_change() {
     let h = Home::new();
     std::thread::scope(|scope| {

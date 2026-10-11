@@ -294,6 +294,42 @@ pub fn cmd_init(
     Ok(if failed { exit::FAILURE } else { exit::OK })
 }
 
+fn build_status_of(v: &serde_json::Value) -> &'static str {
+    if v["version"].as_str() != Some(lablink_core::VERSION)
+        || v["protocol_version"].as_u64() != Some(PROTOCOL_VERSION as u64)
+    {
+        "different"
+    } else {
+        match (lablink_core::GIT_SHA, v["git_sha"].as_str()) {
+            (Some(a), Some(b)) if a == b => "same",
+            (Some(_), Some(_)) => "different",
+            _ => "unknown",
+        }
+    }
+}
+
+/// Warn on stderr when the running daemon is a different build than this
+/// client (typically an old daemon left running after a package upgrade).
+/// Never changes the command's result or stdout, and never restarts anything,
+/// so active SSH sessions are untouched. A daemon that is down or slow is
+/// ignored here: the command reports that itself.
+pub fn warn_if_daemon_outdated(client: &Client) {
+    let Ok(v) = client
+        .clone()
+        .with_timeout(std::time::Duration::from_secs(1))
+        .call(&Request::Ping)
+    else {
+        return;
+    };
+    if build_status_of(&v) == "different" {
+        eprintln!(
+            "lablink: WARNING: the running lablinkd is {} but this lablink is {}. An old daemon lacks fixes in this build. Run `systemctl --user restart lablinkd` (open SSH sessions are not affected) and check `lablink version`.",
+            v["version"].as_str().unwrap_or("an unknown version"),
+            lablink_core::VERSION
+        );
+    }
+}
+
 pub fn cmd_version(client: &Client, json_out: bool) -> R {
     let daemon = client
         .clone()
@@ -301,19 +337,7 @@ pub fn cmd_version(client: &Client, json_out: bool) -> R {
         .call(&Request::Ping)
         .ok();
     let exe = std::env::current_exe().ok();
-    let build_status = daemon.as_ref().map(|v| {
-        if v["version"].as_str() != Some(lablink_core::VERSION)
-            || v["protocol_version"].as_u64() != Some(PROTOCOL_VERSION as u64)
-        {
-            "different"
-        } else {
-            match (lablink_core::GIT_SHA, v["git_sha"].as_str()) {
-                (Some(a), Some(b)) if a == b => "same",
-                (Some(_), Some(_)) => "different",
-                _ => "unknown",
-            }
-        }
-    });
+    let build_status = daemon.as_ref().map(build_status_of);
     let install = match exe.as_deref().and_then(Path::parent) {
         Some(d) if d == Path::new("/usr/bin") => "Debian package (/usr/bin)".to_string(),
         Some(d) => d.display().to_string(),

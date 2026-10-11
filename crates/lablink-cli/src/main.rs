@@ -632,6 +632,23 @@ fn command_name(c: &Cmd) -> &'static str {
 
 fn run(cli: Cli, client: &Client) -> R {
     let socket = client.socket_path().to_path_buf();
+    if matches!(
+        &cli.cmd,
+        Cmd::Status { .. }
+            | Cmd::Devices { .. }
+            | Cmd::Inspect { .. }
+            | Cmd::Discover { .. }
+            | Cmd::Resolve { .. }
+            | Cmd::Ssh { .. }
+            | Cmd::Exec { .. }
+            | Cmd::Trust { .. }
+            | Cmd::Forget { .. }
+            | Cmd::Adopt { .. }
+            | Cmd::Doctor { .. }
+            | Cmd::CopyId { .. }
+    ) {
+        setup_cmds::warn_if_daemon_outdated(client);
+    }
     match cli.cmd {
         Cmd::Status {
             device,
