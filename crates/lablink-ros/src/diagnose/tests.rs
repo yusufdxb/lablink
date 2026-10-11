@@ -543,3 +543,28 @@ fn missing_ip_tool_is_unavailable_not_a_routing_failure() {
     assert_eq!(get(&r, "routing").verdict, Verdict::Unavailable);
     assert_eq!(r.level, Some(3), "{:#?}", r.levels);
 }
+
+#[test]
+fn graph_snapshot_is_labeled_by_device_and_drops_cli_nodes() {
+    let f = fake(
+        vec![
+            dev("orin", "10.42.0.20", 101),
+            dev("laptop", "10.42.0.30", 202),
+        ],
+        &[("orin", "laptop")],
+    );
+    let (ia, ib) = inspect::inspect_pair(&f, "orin", "laptop", &opts());
+    let (ia, ib) = (ia.unwrap(), ib.unwrap());
+    let a = crate::graph::GraphSnapshot::from_inspection(&ia).unwrap();
+    let b = crate::graph::GraphSnapshot::from_inspection(&ib).unwrap();
+    assert_eq!((a.device.as_str(), b.device.as_str()), ("orin", "laptop"));
+    assert_eq!(a.domain, ia.graph.as_ref().unwrap().domain);
+    let g = ia.graph.as_ref().unwrap();
+    assert_eq!(a.nodes, g.nodes);
+    assert!(!g.cli_nodes.is_empty(), "orin saw laptop's query node");
+    assert!(a.nodes.iter().all(|n| !n.starts_with("/_ros2cli")));
+    assert_eq!(a.topics.len(), g.topics.len());
+    // No graph query, no snapshot.
+    let (ic, _) = inspect::inspect_pair(&f, "orin", "laptop", &Options::default());
+    assert!(crate::graph::GraphSnapshot::from_inspection(&ic.unwrap()).is_none());
+}

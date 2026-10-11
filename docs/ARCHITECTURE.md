@@ -31,12 +31,18 @@ open items are listed at the end.
 | `lablink-daemon` | lib + `lablinkd` | Registry, per-device monitors, discovery coordinator, persistence, IPC server, metrics, service-check extension point, test harness (`testing`). | rusqlite (bundled SQLite), tokio, tracing |
 | `lablink-doctor` | lib | Read-only health checks: plans checks per device (config `checks:`, else the device profile), runs one batch SSH session per device through the same resolve and pinned-identity path as `exec`, renders human and JSON reports. | lablink-ssh |
 | `lablink-setup` | lib | Actions shared by the CLI and GUI that are not daemon requests: first-run `init`, site creation, systemd user-service control, completion install, local network detection (`getifaddrs`, read-only), validated atomic config writes with backups, export/import, redacted support bundles. No probing. | libc, tempfile |
+| `lablink-fieldnet` | lib | Optional Field Network: read-only host facts (NetworkManager, adapters, routes, sessions), preflight, the NetworkManager hotspot backend, client listing from the neighbor table and leases, macOS capability detection and guidance, and `ops` (the preflight plan and client classification the CLI and app share). Every OS call goes through a `System` trait, so tests use a scripted fake. | lablink-core, ipnet |
+| `lablink-ros` | lib | Optional robotics mode: read-only ROS 2 / DDS inspection over the doctor's pinned SSH path (`Remote` trait), DDS XML scanning, the twelve checks and levels (`diagnose`), the opt-in active probe, `check` (the flow the CLI and app share), and `graph` (an interface for a future graph view). | lablink-doctor |
 | `lablink-cli` | `lablink` | Client commands, prompts, human and JSON output, `ssh`/`exec`/`copy-id` via OpenSSH. No async runtime. | clap |
-| `lablink-gui` | `lablink-gui` | Native egui client of the daemon API and `lablink-setup`: setup wizard, site selector and views, device lifecycle, Health, Sites and Settings tabs. No networking logic of its own. | eframe |
+| `lablink-gui` | `lablink-gui` | Native egui client of the daemon API and `lablink-setup`: setup wizard, site selector and views, device lifecycle, Health, Sites and Settings tabs, and the optional Field Network and Robotics tabs (through `lablink-fieldnet` and `lablink-ros`, the same code the CLI runs). | eframe |
 
 Dependency rule: clients depend on `lablink-core` (and `lablink-ssh` to launch
 OpenSSH); only `lablink-daemon` depends on `lablink-discovery`. The GUI cannot
-probe the network because it does not link the code that does.
+probe the network because it does not link the code that does. The optional
+`lablink-fieldnet` and `lablink-ros` crates, used by the CLI and the GUI, send
+no probes either: they read local state, call NetworkManager, or run fixed
+scripts over pinned SSH. Neither is a dependency of the daemon, and neither
+adds a daemon request.
 
 ### Why these choices
 
@@ -423,6 +429,60 @@ stays a general network/SSH device manager.
   TESTING.md).
 - Service control never drives a systemd user manager whose `HOME` /
   `XDG_CONFIG_HOME` differ from the caller's (sandboxes, tests).
+
+## Field Network
+
+The optional Field Network ([FIELD_NETWORK.md](FIELD_NETWORK.md)) has two
+halves:
+
+- **Site side** (`lablink-core::site`, the daemon's registry): a site with
+  `roaming: true` is an overlay. While it is ACTIVE, devices of AWAY sites
+  with a provable pinned key are *visiting*: monitored on the roaming
+  site's networks only, matched by host key alone (names, MACs and home
+  addresses ignored), GRAY rather than RED when absent, and never counted
+  as evidence for their home site. They keep their home site and record.
+  At most one roaming site exists.
+- **Network side** (`lablink-fieldnet`, run by the CLI or the app as the
+  user): `host::gather` reads facts, `preflight::check` turns them into
+  findings (block / warn / info, with stable codes), `nm` creates or reuses
+  one NetworkManager profile and activates it under a checkpoint when
+  polkit allows, and `state` records the previous connection in
+  `fieldnet.json` (0600, no secrets). `field_site` writes the roaming
+  site's network into the config after a start.
+
+`ops::plan` and `ops::classify_clients` are the shared entry points, so the
+CLI and the app apply the same blockers. The app re-runs `ops::plan` in its
+worker just before starting and refuses if a blocker appeared or a warning
+the user did not accept. Client classification asks the daemon for its
+verdicts (`Status`, `History`); a client is a registered device only when
+the daemon has matched it by pinned key.
+
+Nothing here talks to the daemon to change the network, and the daemon
+never touches NetworkManager.
+
+## Robotics mode
+
+The optional robotics mode ([ROBOTICS.md](ROBOTICS.md)) is agentless:
+
+1. `check::locate` resolves each device through the daemon (identity,
+   AWAY and reachability refusals apply).
+2. `inspect` runs phase 1, a constant read-only script (files and `/proc`),
+   over `Remote` (production: `SshRemote`, which calls the doctor's
+   `run_pinned_script`: pinned key required, batch mode, bounded time).
+3. Phase 2 reads the DDS files phase 1 found and, if asked, queries the
+   graph with `--no-daemon` in the environment the running nodes use.
+   Parameters taken from phase 1 are validated and shell-quoted.
+4. For a pair, both devices are inspected at the same time, so each graph
+   query can see the other's query node.
+5. `active` runs only on request: pings, one multicast packet each way and
+   a pub/sub probe on a random topic, each under `timeout -k`, then a
+   leftover-process check.
+6. `diagnose` turns inspections (and the active report) into twelve checks
+   and levels 1 to 4. Level 4 comes only from the active probe.
+
+`graph::GraphSource` and `GraphSnapshot` define what a future graph view
+would consume (per-device snapshots, never merged). No view implements it
+yet.
 
 ## Open items
 

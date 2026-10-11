@@ -37,12 +37,18 @@ part.
 | Local network list for setup | `lablink-setup::ifaces` | `getifaddrs` + `/sys/class/net` | `getifaddrs` + OS interface metadata |
 | Terminal launching | `lablink-gui::term` | `x-terminal-emulator`, GNOME Terminal, Konsole, ... | `open -a Terminal` / AppleScript |
 | File locations | `lablink-core::paths` | XDG directories, `$XDG_RUNTIME_DIR`, private state-directory socket fallback | `~/Library/Application Support`, `~/Library/Caches`, a per-user socket directory |
+| Field Network hotspot (optional) | `lablink-fieldnet::nm`, `host` | NetworkManager via `nmcli`, polkit permissions, `/proc/net/*`, `ip` | macOS: capability detection and guided Internet Sharing only (`lablink-fieldnet::macos`), no hotspot creation; other OSes: unsupported |
+| Field Network clients (optional) | `lablink-fieldnet::clients` | `ip neigh` (or `/proc/net/arp`) and NetworkManager's dnsmasq leases | the ARP table via `sysctl`; macOS Internet Sharing's own leases |
 | Packaging | `scripts/package.sh`, `packaging/` | `.deb`, tarball, desktop entry | app bundle / Homebrew formula |
 
 The daemon's `Prober` trait (`crates/lablink-daemon/src/probe.rs`) is the
 seam: the real implementation calls the platform crates; the tests use a
 simulated network, which is why the whole daemon is tested without root or
 a real network.
+
+Robotics mode (`lablink-ros`) runs nothing locally beyond OpenSSH: its
+scripts run on the device, and expect a Linux device with `/proc` and
+ROS 2 under `/opt/ros`. The local OS only matters for SSH.
 
 ## Not portable by design
 

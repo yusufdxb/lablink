@@ -184,6 +184,29 @@ A configuration written before sites existed (top-level `networks:` and
 cache is migrated on first start. LabLink writes the `sites:` layout the next
 time it saves the file.
 
+## Optional: Field Network and Robotics mode
+
+Two optional features, both off by default
+(`lablink feature enable field-network|robotics`, or **Settings** in the
+app). Both are new and not yet validated on real robot hardware; see each
+guide's proof limits.
+
+- **Field Network** ([docs/FIELD_NETWORK.md](docs/FIELD_NETWORK.md)): a
+  temporary WPA2/WPA3 Wi-Fi network hosted by this machine through
+  NetworkManager, for places with no usable network. Offline by default (no
+  internet sharing unless you ask), a read-only `lablink hotspot preflight`
+  that names everything starting would disconnect, rollback and
+  `lablink hotspot stop` to restore the previous network. Registered
+  devices that join are recognized by their pinned host key only. On macOS,
+  LabLink detects capabilities and guides you through Internet Sharing.
+- **Robotics mode** ([docs/ROBOTICS.md](docs/ROBOTICS.md)): read-only ROS 2
+  and DDS diagnostics of registered devices over pinned SSH, with no agent
+  and no ROS on this machine. `lablink ros inspect <device>` and
+  `lablink ros dds-check <a> --peer <b>` run twelve checks and report the
+  connectivity level reached (IP, configuration, discovery, data exchange).
+  Data exchange is reported only from an explicit `--active` probe on a
+  topic of its own.
+
 ## Install
 
 Supported: **Ubuntu 20.04, 22.04 and 24.04 LTS** (x86_64). No Rust toolchain
@@ -235,6 +258,9 @@ building from source.
   detection signals.
 - **Settings:** monitoring interval, history retention, terminal, per-device
   runtime settings and the background service.
+- **Field Network** and **Robotics** (optional, when enabled in Settings):
+  hotspot capabilities, preflight, start/stop and clients; DDS checks between
+  two devices with every check's evidence.
 
 | Site selector | Sites |
 |---|---|
@@ -275,6 +301,8 @@ Scripts and AI agents: [docs/AUTOMATION.md](docs/AUTOMATION.md).
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): what LabLink defends against, and how
 - [docs/PORTABILITY.md](docs/PORTABILITY.md): what is Linux-specific, and the boundary for other OSes
 - [docs/AUTOMATION.md](docs/AUTOMATION.md): JSON output and exit codes for scripts and agents
+- [docs/FIELD_NETWORK.md](docs/FIELD_NETWORK.md): the optional temporary Wi-Fi network (Linux/NetworkManager; guided on macOS)
+- [docs/ROBOTICS.md](docs/ROBOTICS.md): optional read-only ROS 2 / DDS diagnostics
 - [docs/TESTING.md](docs/TESTING.md), [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
 - [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md)
 

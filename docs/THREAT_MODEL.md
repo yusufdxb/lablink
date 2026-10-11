@@ -144,3 +144,48 @@ Residual availability limits include sustained mDNS UDP floods and loss of
 recent debounced settings after abrupt shutdown. Network filesystems, real
 LDAP/SSSD deployments, Wayland sessions and long-duration hardware soaks need
 separate qualification; unit and container tests do not prove those paths.
+
+## Field Network and Robotics mode
+
+Both are optional and off by default (`preferences.features`). Neither adds
+a daemon request, a listening socket, a service or a privileged helper: the
+hotspot commands run in the CLI or app process as the user and change the
+network only through NetworkManager, whose polkit rules decide what that
+user may do; the robotics commands run fixed scripts over the existing
+pinned-key SSH path. User guides: [FIELD_NETWORK.md](FIELD_NETWORK.md),
+[ROBOTICS.md](ROBOTICS.md).
+
+Additional attacker models:
+
+| | Attacker | Can |
+|---|---|---|
+| H | Malicious hotspot client | join with the password, take any address, hostname or MAC, answer probes, present any host key, flood the hotspot |
+| I | Someone who sees this machine's process list, logs or support bundle | read every process's argument list, LabLink's logs and files |
+| J | A compromised or misconfigured robot computer | return any text from its environment, DDS files, `ip` output, node and topic names |
+
+| # | Threat | Mitigation | Verified by |
+|---|---|---|---|
+| T38 | The hotspot password leaks through a process argument list, a log, LabLink's files, JSON output, a support bundle or an error message (I) | The password goes to `nmcli connection edit` on stdin only; that editor echoes its input, so its stdout is discarded and its stderr scrubbed of the secret. NetworkManager keeps it in its root-only secret store; `fieldnet.json` (0600) holds the profile UUID, never the password. The support bundle reads only LabLink's config, status, doctor output and daemon log. The app forgets a shown password after the next action. | `start_creates_a_wpa2_profile_with_the_password_only_on_stdin`, `real_runs_capture_time_out_and_scrub_the_secret`, `round_trip_private_and_secret_free`, `results_drop_the_shown_password` |
+| T39 | An open, WEP or silently downgraded hotspot | Only `wpa2` and `wpa3` are accepted; the profile is read back after every write and refused (never activated) unless it is WPA2/WPA3 with a key. | `insecure_or_invalid_requests_are_usage_errors_before_anything_runs`, `insecure_modes_are_refused_by_name`, `an_insecure_profile_is_refused_and_never_activated` |
+| T40 | An SSID, password, interface or subnet injects a command or an extra editor line | Programs run with structured arguments (no shell) from trusted `PATH` directories; SSIDs and user passwords are limited to characters the editor takes literally (no newlines or control characters); interface names and subnets are validated before anything runs. | `ssids_cannot_inject_editor_lines`, `user_passwords`, `validation`, `insecure_or_invalid_requests_are_usage_errors_before_anything_runs` |
+| T41 | The hotspot silently bridges clients to the internet or to other networks this machine routes to (H) | Another internet uplink is a blocker unless `--allow-internet-sharing`; other routed networks (VPN, containers, LAN) are named in a warning because NetworkManager's shared mode enables IPv4 forwarding. LabLink changes no firewall rule or sysctl; `start` and `status` report forwarding before and after. | `another_uplink_blocks_unless_sharing_is_explicit`, `single_adapter_host_warns_about_disconnect_uplink_and_forwarding` |
+| T42 | Starting the hotspot over SSH cuts the session that would be needed to undo it | Preflight refuses, with no override, when the command's SSH session arrives through the adapter or its interface cannot be determined. An SSH connection is never treated as the rollback path. | `own_ssh_session_over_the_adapter_is_refused_without_override` |
+| T43 | A failed start leaves the machine offline or with a half-made profile | NetworkManager checkpoint (rolled back by NetworkManager itself after 120 s if LabLink dies) when polkit allows it; otherwise LabLink reconnects the recorded previous connection. A failed password step deletes the new profile. | `checkpoint_guards_activation_when_permitted`, `failed_activation_restores_the_previous_connection`, `a_failed_password_step_deletes_the_new_profile` |
+| T44 | A hotspot client claims a registered device's hostname, MAC or address to be treated as it, or to get the real device marked failed (H) | Visiting devices are matched by their pinned host key alone; names, MACs and configured addresses are ignored on the Field Network. Unknown clients are `discovered-untrusted` and nothing is pinned automatically. A contradicting key is the usual security stop. | `hotspot_clients_claiming_a_name_or_mac_never_move_or_condemn_a_visitor`, `pinned_device_visits_the_field_network_without_a_duplicate` |
+| T45 | Another local user, or a hotspot client, controls the hotspot through LabLink | There is no LabLink API for it: hotspot control is not a daemon request, and the daemon socket stays peer-UID checked. Changes need the user's own polkit rights. Every changing command refuses while the feature is off. | `the_feature_is_off_by_default_and_gates_every_change`, `no_networkmanager_or_no_permission`, `gated_commands_refuse_while_their_feature_is_off` |
+| T46 | Values from a device (environment, DDS XML paths, distribution, RMW, topic names) inject shell into a later script, or control the terminal (J) | Remote values are validated against strict grammars before they are reused, and shell-quoted; the scripts are fixed templates. User-given topic names are validated and bounded. Remote text is shown with control characters escaped. | `phase2_refuses_invalid_parameters`, `query_env_drops_invalid_values`, `validators`, `qos_topics_are_bounded_and_checked`, `remote_details_cannot_control_the_terminal` |
+| T47 | A robotics command reaches an unpinned, impostor or AWAY device | Every device goes through the daemon's `resolve` (identity mismatch, unknown and AWAY refused) and the doctor's pinned-key SSH path, which never trusts on first use and runs in batch mode. | `no_daemon_is_exit_3_and_nothing_connects`, `unknown_device_errors_propagate`, the doctor's pinned-path tests |
+| T48 | A diagnostic disturbs a robot: publishes on its topics, leaves processes running, restarts nodes, rewrites DDS config | Inspection reads files and `/proc`; graph queries use `--no-daemon` and `timeout`. The active probe runs only on explicit request (a second confirmation in the app), on a random `/lablink_probe_<hex>` topic, under `timeout -k`, followed by a leftover-process check. Nothing writes configuration or signals nodes. | `inspect_is_read_only`, `phase2_uses_no_daemon_timeouts_and_exact_env`, `probe_scripts_are_bounded_and_own_topic_only`, `tokens_are_unique_hex`, `default_check_is_passive`, `active_needs_a_peer_and_a_second_confirmation` |
+| T49 | The app starts a hotspot on a stale check, or with a blocker | Start is offered only for the exact settings checked, with no blocker and every warning ticked; the worker re-runs preflight just before starting and refuses on any blocker or any warning code the user did not accept. | `start_needs_a_check_of_the_same_settings_and_every_warning_accepted`, `a_blocker_cannot_be_accepted`, `a_preflight_for_old_settings_is_dropped` (the worker's re-check is reviewed, not unit-tested) |
+
+Residual risks:
+
+| Risk | Severity | Why it remains | Mitigation |
+|---|---|---|---|
+| Hotspot clients can reach services this machine exposes on all interfaces (SSH, development servers) | medium | Same as joining any network; LabLink does not change firewall rules | Documented; check listeners before starting |
+| NetworkManager may leave IPv4 forwarding on after stop | low | LabLink does not write sysctls | `status` reports it against the value before start |
+| Anyone with the password can join, and a hotspot can be jammed or deauthenticated (H) | low | Inherent to WPA2-Personal; PMF is off for client compatibility (on with WPA3) | Generated 120-bit passwords; `password --rotate`; WPA3 opt-in |
+| Hotspot clients are not isolated from each other | low | Robots on the hotspot must talk to each other | Unknown clients are never trusted by LabLink |
+| Firewall rules on devices are not read | low | Needs root | Reported as a warning, never a pass |
+| The active probe joins the robot's DDS domain for a few seconds | low | Needed to prove data exchange | Explicit opt-in, own topic, bounded, leftover check |
+| Hotspot start, real clients and real rollback are untested on hardware | process | No radio test bench yet | Fake-backed tests; documented as experimental |

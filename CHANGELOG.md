@@ -4,6 +4,44 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Two optional features, off by default (`lablink feature enable
+field-network|robotics`, or Settings in the app). Neither adds a daemon
+request, a listening socket or a privileged helper. Neither has been
+validated on real robot hardware or with a real hotspot client yet; see the
+proof limits in each guide.
+
+### Added
+
+- Field Network ([docs/FIELD_NETWORK.md](docs/FIELD_NETWORK.md)):
+  `lablink hotspot capabilities|preflight|start|status|clients|password|restart|stop|forget`.
+  A WPA2 (default) or WPA3 hotspot through NetworkManager, offline by
+  default; WEP and open refused. Read-only preflight with blockers (own SSH
+  session over the adapter, another uplink without
+  `--allow-internet-sharing`, subnet conflicts, missing polkit permission)
+  and warnings (what disconnects, forwarding exposure, registered devices
+  and SSH sessions that would lose this machine). NetworkManager checkpoint
+  rollback when permitted, restore of the previous connection on failure
+  and on stop. Passwords go to NetworkManager on stdin only.
+- Roaming sites: the `field-network` site is an overlay on which pinned
+  devices of other sites are recognized by host key alone, without
+  duplicates or new trust.
+- Hotspot client states: discovered-untrusted, registered, ssh-available,
+  ssh-authenticated, ssh-unreachable, identity-mismatch, disconnected, and
+  address changes since the hotspot started.
+- macOS: capability detection and guided Internet Sharing steps (no
+  hotspot creation).
+- Robotics mode ([docs/ROBOTICS.md](docs/ROBOTICS.md)):
+  `lablink ros inspect|nodes|topics|dds-check`. Read-only inspection over
+  pinned SSH (Humble and Jazzy), twelve DDS checks with evidence, levels 1
+  to 4 (level 4 only from the opt-in `--active` probe on a unique topic,
+  with cleanup check).
+- `lablink feature list|enable|disable` and `preferences.features` in the
+  config.
+- App: Field Network and Robotics tabs, feature switches in Settings; the
+  top bar wraps on narrow windows.
+
 ## [0.3.1] - 2026-10-10
 
 Installing 0.3.1 over an earlier 0.3.0 build is no longer a same-version no-op.
