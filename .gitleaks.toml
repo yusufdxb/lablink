@@ -7,7 +7,7 @@ useDefault = true
 
 [allowlist]
 description = "synthetic fixtures in the redaction tests"
-paths = ['''crates/lablink-setup/src/bundle\.rs''']
+paths = ['''crates/lablink-setup/src/bundle\.rs''', '''tests/cleanroom/hostkeys/''']
 regexes = [
   '''ghp_0123456789abcdefghijklmnopqrstuvwxyz0''',
   '''b3BlbnNzaC1rZXktdjEAAAAA''',

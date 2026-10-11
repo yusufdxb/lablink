@@ -104,7 +104,7 @@ docker cp "$old_deb" "$desk:$xfer/old.deb"
 docker cp "$deb" "$desk:$xfer/new.deb"
 docker exec "$desk" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/old.deb" > "$out/apt-install-old.log" 2>&1 \
     || fail "install old" "apt-get install failed, see apt-install-old.log"
-[ "$(out_of 'lablink version' | head -1 | awk '{print $2}')" = "$old_version" ] || fail "install old" "wrong version"
+[ "$(out_of 'lablink version 2>/dev/null' | head -1 | awk '{print $2}')" = "$old_version" ] || fail "install old" "wrong version"
 pass "install old" "$(basename "$old_deb") via apt"
 
 as_tester 'ping -c 1 -W 1 '"$pre"'.1 >/dev/null 2>&1 || true'
@@ -137,7 +137,7 @@ old_pid=$(out_of 'systemctl --user show lablinkd -p MainPID --value')
 # ---- upgrade over the running old daemon -----------------------------------------
 docker exec "$desk" bash -c "apt-get install -y -qq $xfer/new.deb" > "$out/apt-install-new.log" 2>&1 \
     || fail "upgrade" "apt-get install of the new .deb failed, see apt-install-new.log"
-v=$(out_of 'lablink version'); echo "$v" > "$out/version-after-upgrade.txt"
+v=$(out_of 'lablink version 2>/dev/null'); echo "$v" > "$out/version-after-upgrade.txt"   # stdout only: the stale-daemon warning goes to stderr
 [ "$(head -1 <<<"$v" | awk '{print $2}')" = "$new_version" ] || fail "upgrade" "client is not $new_version: $(head -1 <<<"$v")"
 pass "upgrade" "apt installed $(basename "$deb") over the running $old_version daemon; client now $new_version"
 
@@ -170,7 +170,7 @@ as_tester 'systemctl --user restart lablinkd'
 wait_for 30 'lablink ping' || fail "restart" "new daemon not answering"
 new_pid=$(out_of 'systemctl --user show lablinkd -p MainPID --value')
 [ "$new_pid" != "$old_pid" ] || fail "restart" "daemon pid unchanged"
-vv=$(out_of 'lablink version'); echo "$vv" > "$out/version-after-restart.txt"
+vv=$(out_of 'lablink version 2>&1'); echo "$vv" > "$out/version-after-restart.txt"
 grep -q "commit $new_sha" <<<"$vv" && grep -qE "lablinkd $new_version .*running|running" <<<"$vv" || fail "restart" "version output: $vv"
 ! grep -qiE 'older|different' <<<"$vv" || fail "restart" "still reports a mismatch: $vv"
 pass "restart" "new daemon pid $new_pid, commit ${new_sha:0:12}; client and daemon agree"
