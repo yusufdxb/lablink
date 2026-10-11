@@ -19,7 +19,7 @@
 #
 # Usage: BASE=ubuntu:20.04 scripts/cleanroom.sh [OUT_DIR]
 # Needs: docker (privileged containers for systemd), dist/ from
-# scripts/release.sh, ffmpeg on the host for PNG screenshots (optional).
+# scripts/release.sh, ffmpeg on the host (PNG screenshots; the GUI-only steps read the layout from a screenshot).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -113,6 +113,51 @@ start_desktop() { # start_desktop NAME HOSTNAME NETWORK IP
         || fail "fresh machine ($1)" "systemd user session did not start"
 }
 status_json() { out_of "lablink status $1 --json"; }
+x() { as_tester "export DISPLAY=:99; $1"; }
+click() { x "xdotool mousemove $1 $2 click 1"; sleep "${3:-1}"; }
+
+# The device detail pane is a resizable egui panel. Its width on first display
+# varies between runs (seen: divider at x=542 and, once on Ubuntu 20.04,
+# x=440), which moves every control in it. Find the divider from a screenshot
+# (not from sleeps or coordinates) and drag it to where the click coordinates
+# below expect it; fail if the layout cannot be established.
+panel_divider_x() {
+    x "xdotool mousemove 1100 650"; sleep 0.6   # the divider is drawn brighter under the pointer
+    as_tester "DISPLAY=:99 xwd -root -silent > $xfer/_row.xwd"
+    docker cp "$cur:$xfer/_row.xwd" "$out/_row.xwd" >/dev/null
+    ffmpeg -loglevel error -y -i "$out/_row.xwd" -vf crop=1280:1:0:300 -f rawvideo -pix_fmt rgb24 "$out/_row.raw"
+    python3 -I -c '
+import sys
+d = open(sys.argv[1], "rb").read()
+for x in range(300, 760):
+    if tuple(d[x * 3:x * 3 + 3]) == (60, 60, 60):
+        print(x); break
+' "$out/_row.raw"
+}
+# egui needs a frame with the pointer over the handle before the press, and
+# frames between the moves: one chained xdotool command is too fast.
+drag_divider() { # drag_divider FROM_X TO_X
+    local from=$1 to=$2 p
+    x "xdotool mousemove $from 300"; sleep 0.6
+    x "xdotool mousedown 1"; sleep 0.4
+    for p in $(seq "$from" $(( to > from ? 20 : -20 )) "$to") "$to"; do x "xdotool mousemove $p 300"; sleep 0.1; done
+    sleep 0.3; x "xdotool mouseup 1"; sleep 1
+}
+gui_pin_panel_layout() { # gui_pin_panel_layout WANT_X
+    local want=$1 got i first
+    first=$(panel_divider_x)
+    if [ -n "${CR_SKEW_PANEL:-}" ]; then   # test hook: start from the other layout
+        got=$(panel_divider_x); drag_divider "$got" 440
+    fi
+    for i in 1 2 3; do
+        got=$(panel_divider_x)
+        [ "$got" = "$want" ] && { echo "initial=$first (skew hook: ${CR_SKEW_PANEL:-off}) final=$got attempts=$i" > "$out/panel-divider-x.txt"; return 0; }
+        [ -n "$got" ] || break
+        drag_divider "$got" "$want"
+    done
+    shot gui-layout-fail
+    fail "GUI-only: layout" "detail pane divider at x=${got:-none}, wanted $want (gui-layout-fail.png)"
+}
 
 echo "== artifacts"
 (cd dist && sha256sum -c SHA256SUMS) > "$out/sha256-check.txt" 2>&1 || fail "artifacts" "SHA256SUMS mismatch"
@@ -133,6 +178,8 @@ docker run -d --name "$robotB" --hostname robot-bench-b --network "$netB" --ip "
 docker exec "$robotB" bash -c 'rm -f /etc/ssh/ssh_host_* && ssh-keygen -A >/dev/null && kill -HUP 1'
 start_desktop "$desk" lab-desktop "$netA" "$preA.10"
 pass "fresh machine" "$base, user tester, systemd user session up"
+# GUI_ONLY=1 skips straight to the GUI-only section (repeat runs of that test).
+if [ -z "${GUI_ONLY:-}" ]; then
 as_tester 'for t in cargo rustc ssh lablink; do command -v $t && exit 1; done; exit 0' || fail "fresh machine" "unexpected tools present"
 pass "no Rust, no ssh, no LabLink" "cargo, rustc, ssh, lablink all absent"
 
@@ -361,8 +408,6 @@ as_tester 'DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 nohup lablink-gui >/tmp/gui3.log 
 sleep 6
 as_tester 'pgrep -x lablink-gui' >/dev/null || fail "GUI sites" "exited"
 shot gui-3-site-alpha
-x() { as_tester "export DISPLAY=:99; $1"; }
-click() { x "xdotool mousemove $1 $2 click 1"; sleep "${3:-1}"; }
 click "${SEL_X:-150}" "${SEL_Y:-14}" 2      # site selector
 shot gui-4-site-selector
 x 'xdotool key Escape'; sleep 1
@@ -423,6 +468,8 @@ as_tester 'pgrep -x lablinkd' >/dev/null && fail "remove .deb" "lablinkd still r
 as_tester 'test -f ~/.config/lablink/config.yaml && test -f ~/.local/state/lablink/cache.db' || fail "remove .deb" "user data was deleted"
 pass "remove .deb" "apt remove: binaries gone, daemon stopped; configuration and pinned keys kept in the home directory"
 
+fi
+
 # ---- GUI only: a second fresh user does everything from the GUI ------------------------
 # A fresh robot from its image: its original host keys keep the dialog
 # layout (and so the click coordinates below) identical on every run.
@@ -467,6 +514,7 @@ shot gui-b4-adopt
 click 276 580 4                    # Adopt
 grep -q '"profile": "generic_linux"' <<<"$(status_json robot)" || fail "GUI-only: adopt" "robot not adopted (gui-b4-adopt.png)"
 pass "GUI-only: adopt" "inspected fingerprints, chose the site, named robot, label, type, user"
+gui_pin_panel_layout 542
 click 607 392 4                    # Trust host key... (in the wrapped explanation)
 shot gui-b5-trust
 x "xdotool mousemove 720 600"; for _ in 1 2 3; do x "xdotool click 5"; done; sleep 1   # scroll to the pin button

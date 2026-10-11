@@ -168,6 +168,70 @@ jobs:
           name: cleanroom-${{ strategy.job-index }}
           path: ${{ runner.temp }}/cleanroom/
 
+  reproduce:
+    # A second build of the same commit on a different runner, from scratch
+    # (fresh builder image and cargo registry): every artifact must match the
+    # release job's, byte for byte.
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    needs: [release]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lablink-dist
+          path: first-build/
+      - run: scripts/release.sh
+      - run: scripts/reproduce-check.sh first-build dist
+
+  baseline:
+    # The previous release (0.3.0), built the same way, for the upgrade test.
+    # Pinned to the 0.3.0 commit; it never changes.
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: 17a0e1f0d2104bac67e79df3a5fc98dac5640d5b
+          persist-credentials: false
+      - run: scripts/release.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lablink-baseline-0.3.0
+          path: dist/lablink_0.3.0_amd64.deb
+
+  upgrade:
+    # A working 0.3.0 install (site, devices, pinned keys, open SSH session)
+    # is upgraded with the real 0.3.1 .deb: state preserved, old daemon
+    # refused by security-sensitive commands, restart, everything recovers.
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    needs: [release, baseline]
+    strategy:
+      fail-fast: false
+      matrix:
+        base: ["ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lablink-dist
+          path: dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lablink-baseline-0.3.0
+          path: baseline/
+      - run: BASE=${{ matrix.base }} scripts/upgrade-test.sh baseline/lablink_0.3.0_amd64.deb "$RUNNER_TEMP/upgrade"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: upgrade-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/upgrade/
+
   aarch64-check:
     # Keep the CLI and daemon portable to Jetson-class aarch64 Linux (compile only).
     timeout-minutes: 60
