@@ -16,6 +16,7 @@ pub mod clients;
 pub mod host;
 pub mod macos;
 pub mod nm;
+pub mod ops;
 pub mod password;
 pub mod preflight;
 pub mod state;

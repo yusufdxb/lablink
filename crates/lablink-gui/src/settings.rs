@@ -216,6 +216,8 @@ impl Settings {
             self.monitoring_section(ui);
             ui.separator();
             self.preferences_section(ui);
+            ui.separator();
+            self.features_section(ui);
             ui.add_space(6.0);
             self.save_row(ui, &mut actions);
             ui.weak(format!(
@@ -508,6 +510,15 @@ impl Settings {
         ui.weak("Empty: $TERMINAL, then the first installed of the buttons shown.");
     }
 
+    fn features_section(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Optional features");
+        let f = &mut self.edit.preferences.features;
+        ui.checkbox(&mut f.field_network, "Field Network");
+        ui.weak("Lets this app and `lablink hotspot` start a temporary WPA2/WPA3 hotspot through NetworkManager. Off: the tab only shows what this machine could do.");
+        ui.checkbox(&mut f.robotics, "Robotics mode");
+        ui.weak("Adds the Robotics tab and `lablink ros`: read-only ROS 2 / DDS diagnostics of registered devices over SSH. Nothing is installed on them.");
+    }
+
     fn devices_section(
         &mut self,
         ui: &mut egui::Ui,
@@ -664,6 +675,17 @@ mod tests {
         let s = Settings::load(p);
         drop(dir);
         s
+    }
+
+    #[test]
+    fn optional_features_start_off_and_save_with_the_config() {
+        let mut s = settings("networks:\n  - name: lab\n    cidr: 192.168.50.0/24\n");
+        assert_eq!(s.edit.preferences.features, Default::default());
+        s.edit.preferences.features.robotics = true;
+        assert!(s.dirty());
+        let (c, errs) = s.candidate();
+        assert!(errs.is_empty());
+        assert!(c.preferences.features.robotics && !c.preferences.features.field_network);
     }
 
     #[test]

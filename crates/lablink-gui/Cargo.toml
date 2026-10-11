@@ -17,6 +17,9 @@ path = "src/main.rs"
 lablink-core.workspace = true
 lablink-ssh.workspace = true
 lablink-doctor.workspace = true
+lablink-fieldnet.workspace = true
+lablink-ros.workspace = true
+ipnet.workspace = true
 lablink-setup.workspace = true
 serde_json.workspace = true
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }

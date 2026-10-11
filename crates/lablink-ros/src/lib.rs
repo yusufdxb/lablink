@@ -7,6 +7,7 @@
 //! its own.
 
 pub mod active;
+pub mod check;
 pub mod dds;
 pub mod diagnose;
 pub mod env;

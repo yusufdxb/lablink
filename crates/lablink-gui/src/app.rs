@@ -1,13 +1,15 @@
 //! Application state and UI. All device data comes from `lablinkd` via the
 //! worker; setup actions go through `lablink_setup` (also via the worker).
 
+use crate::fieldnet::{self, FieldPanel};
 use crate::flow::{self, AdoptForm, StepState, TrustPlan};
 use crate::health::{self, DoctorPanel};
+use crate::robotics::{self, RosPanel};
 use crate::settings::{self, DeviceEdit, Settings};
 use crate::term;
 use crate::view::{self, Level};
 use crate::wizard::{self, Wizard};
-use crate::worker::{Cmd, Event, Fail, RunResult, Worker, POLL_INTERVAL};
+use crate::worker::{Cmd, Event, Fail, FieldCmd, RunResult, Worker, POLL_INTERVAL};
 use eframe::egui::{self, Color32, RichText};
 use lablink_core::explain::{self, Action as Fix};
 use lablink_core::model::{
@@ -27,6 +29,8 @@ enum Tab {
     Devices,
     Discovered,
     Health,
+    Field,
+    Robotics,
     Sites,
     Settings,
 }
@@ -126,12 +130,22 @@ pub struct App {
     settings: Option<Settings>,
     /// Preferred terminal from the config's `preferences`.
     terminal: Option<String>,
+    /// Optional features from the config (the worker re-reads them).
+    features: lablink_core::config::Features,
+    field: FieldPanel,
+    ros: RosPanel,
 }
 
 fn load_terminal(path: &std::path::Path) -> Option<String> {
     lablink_core::Config::load(path)
         .ok()
         .and_then(|c| c.preferences.terminal)
+}
+
+fn load_features(path: &std::path::Path) -> lablink_core::config::Features {
+    lablink_core::Config::load(path)
+        .map(|c| c.preferences.features)
+        .unwrap_or_default()
 }
 
 impl App {
@@ -148,6 +162,9 @@ impl App {
             worker,
             rx,
             terminal: load_terminal(&config_path),
+            features: load_features(&config_path),
+            field: FieldPanel::default(),
+            ros: RosPanel::default(),
             socket,
             config_path,
             tab: Tab::Devices,
@@ -474,28 +491,55 @@ impl App {
                     s.saved(r);
                 }
                 self.terminal = load_terminal(&self.config_path);
+                self.features = load_features(&self.config_path);
                 self.worker.refresh();
             }
+            Event::Field(e) => {
+                let changed = matches!(
+                    e,
+                    crate::worker::FieldEvent::Started(_) | crate::worker::FieldEvent::Stopped(_)
+                );
+                self.field.event(e);
+                if changed {
+                    self.field.loading = true;
+                    self.worker.send(Cmd::Field(FieldCmd::Refresh));
+                    self.worker.refresh();
+                }
+            }
+            Event::RosChecked(r) => self.ros.finished(r),
         }
     }
 
     // ---- top bar ---------------------------------------------------------
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        // Wraps onto a second row on a narrow window instead of clipping tabs.
+        ui.horizontal_wrapped(|ui| {
             ui.heading("LabLink");
             self.site_selector(ui);
             let here = self.visible_devices().len();
-            for (tab, name) in [
+            let mut tabs = vec![
                 (Tab::Devices, format!("Devices ({here})")),
                 (Tab::Discovered, "Discovered".to_string()),
                 (Tab::Health, "Health".to_string()),
-                (Tab::Sites, "Sites".to_string()),
-                (Tab::Settings, "Settings".to_string()),
-            ] {
+                (Tab::Field, "Field Network".to_string()),
+            ];
+            // Robotics stays out of the way of non-robotics users until enabled.
+            if self.features.robotics {
+                tabs.push((Tab::Robotics, "Robotics".to_string()));
+            }
+            tabs.push((Tab::Sites, "Sites".to_string()));
+            tabs.push((Tab::Settings, "Settings".to_string()));
+            for (tab, name) in tabs {
                 if ui.selectable_value(&mut self.tab, tab, name).clicked() {
                     match tab {
                         Tab::Discovered => self.worker.send(Cmd::Discovered),
+                        Tab::Field => {
+                            if self.field.snap.is_none() && !self.field.loading {
+                                self.field.loading = true;
+                                self.worker.send(Cmd::Field(FieldCmd::Refresh));
+                            }
+                        }
                         Tab::Settings | Tab::Sites => {
                             if self.settings.is_none() {
                                 self.settings = Some(Settings::load(self.config_path.clone()));
@@ -525,17 +569,17 @@ impl App {
             if ui.button("Refresh").clicked() {
                 self.refresh();
             }
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| match (&self.daemon_version, self.daemon_uptime_s) {
-                    (Some(v), Some(up)) => {
-                        ui.weak(format!("lablinkd {v}, up {}", format_age(up * 1000)));
-                    }
-                    _ => {
-                        ui.weak("lablinkd: no data");
-                    }
-                },
-            );
+            let daemon = match (&self.daemon_version, self.daemon_uptime_s) {
+                (Some(v), Some(up)) => format!("lablinkd {v}, up {}", format_age(up * 1000)),
+                _ => "lablinkd: no data".to_string(),
+            };
+            if ui.available_width() > 180.0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak(daemon);
+                });
+            } else {
+                ui.weak(daemon);
+            }
         });
         if let Some(warning) = &self.daemon_build_warning {
             ui.colored_label(view::YELLOW, warning);
@@ -1755,6 +1799,35 @@ impl App {
         self.settings_actions(actions);
     }
 
+    fn field_tab(&mut self, ui: &mut egui::Ui) {
+        for a in self.field.ui(ui) {
+            match a {
+                fieldnet::Action::Refresh => self.worker.send(Cmd::Field(FieldCmd::Refresh)),
+                fieldnet::Action::Preflight(args) => {
+                    self.worker.send(Cmd::Field(FieldCmd::Preflight(args)))
+                }
+                fieldnet::Action::Start { args, accepted } => self
+                    .worker
+                    .send(Cmd::Field(FieldCmd::Start { args, accepted })),
+                fieldnet::Action::Stop { restore } => {
+                    self.worker.send(Cmd::Field(FieldCmd::Stop { restore }))
+                }
+                fieldnet::Action::Password => self.worker.send(Cmd::Field(FieldCmd::Password)),
+                fieldnet::Action::OpenSettings => self.tab = Tab::Settings,
+            }
+        }
+    }
+
+    fn robotics_tab(&mut self, ui: &mut egui::Ui) {
+        let ids: Vec<String> = self.devices.iter().map(|d| d.id.clone()).collect();
+        for a in self.ros.ui(ui, self.features.robotics, &ids) {
+            match a {
+                robotics::Action::Check(req) => self.worker.send(Cmd::RosCheck(req)),
+                robotics::Action::OpenSettings => self.tab = Tab::Settings,
+            }
+        }
+    }
+
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
         if self.settings.is_none() {
             self.settings = Some(Settings::load(self.config_path.clone()));
@@ -1853,6 +1926,8 @@ impl eframe::App for App {
                     None => {}
                 }
             }
+            Tab::Field => self.field_tab(ui),
+            Tab::Robotics => self.robotics_tab(ui),
             Tab::Settings => self.settings_tab(ui),
             Tab::Sites => self.sites_tab(ui),
         });

@@ -9,6 +9,8 @@ use lablink_core::model::{
     TrustReport,
 };
 use lablink_core::protocol::{DeviceChanges, Request};
+use lablink_fieldnet::system::RealSystem;
+use lablink_fieldnet::{nm, ops};
 use lablink_ssh::{build_args, run_captured, Mode, OutputMode, Target};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -113,7 +115,57 @@ pub enum Cmd {
         scope: String,
         devices: Vec<String>,
     },
+    /// Field Network (local NetworkManager), gated by its feature.
+    Field(FieldCmd),
+    /// Robotics `dds-check` (read-only unless `active`), gated by its feature.
+    RosCheck(Box<lablink_ros::check::CheckRequest>),
 }
+
+pub enum FieldCmd {
+    /// Capabilities, status and classified clients. Read-only.
+    Refresh,
+    /// The read-only preflight for these settings.
+    Preflight(ops::PlanArgs),
+    /// Start. `accepted` holds the warning codes the user saw and accepted;
+    /// the plan is re-run first, and a warning not in it refuses the start.
+    Start {
+        args: ops::PlanArgs,
+        accepted: Vec<String>,
+    },
+    Stop {
+        restore: bool,
+    },
+    /// Read the password from NetworkManager (shown on request only).
+    Password,
+}
+
+/// What the Field Network tab shows.
+pub struct FieldSnapshot {
+    pub feature_on: bool,
+    pub caps: lablink_fieldnet::Capabilities,
+    /// `None` without NetworkManager or with the feature off.
+    pub status: Option<Result<nm::Status, String>>,
+    pub clients: Vec<ops::ClientRow>,
+}
+
+pub enum FieldEvent {
+    Snapshot(Box<FieldSnapshot>),
+    Preflight(
+        ops::PlanArgs,
+        Result<Box<lablink_fieldnet::preflight::Preflight>, String>,
+    ),
+    Started(Result<String, String>),
+    Stopped(Result<String, String>),
+    Password(Result<String, String>),
+}
+
+pub type RosResult = Result<
+    Box<(
+        lablink_ros::diagnose::Report,
+        Option<lablink_ros::active::ActiveReport>,
+    )>,
+    String,
+>;
 
 pub enum Event {
     Poll {
@@ -139,6 +191,8 @@ pub enum Event {
     ServiceDone(&'static str, Result<(), String>),
     ConfigSaved(Result<String, String>),
     TestSsh(String, Result<RunResult, Fail>),
+    Field(FieldEvent),
+    RosChecked(RosResult),
 }
 
 /// Handle held by the UI.
@@ -240,6 +294,7 @@ fn needs_current_daemon(cmd: &Cmd) -> bool {
             | Cmd::TrustPreview(_)
             | Cmd::TrustPin { .. }
             | Cmd::Doctor { .. }
+            | Cmd::RosCheck(_)
     )
 }
 
@@ -254,6 +309,7 @@ fn refused_event(cmd: Cmd, why: String) -> Event {
         Cmd::TrustPreview(device) => Event::TrustPreview(device, Err(f)),
         Cmd::TrustPin { device, .. } => Event::TrustPinned(device, Err(f)),
         Cmd::Doctor { scope, .. } => Event::Doctor(scope, Err(f)),
+        Cmd::RosCheck(_) => Event::RosChecked(Err(f.message)),
         _ => unreachable!("only commands in needs_current_daemon are refused"),
     }
 }
@@ -419,6 +475,16 @@ fn execute_inner(socket: &PathBuf, cmd: Cmd) -> Event {
             Event::TrustPinned(device, r)
         }
         Cmd::Doctor { scope, devices } => Event::Doctor(scope, run_doctor(&client, devices)),
+        Cmd::Field(c) => Event::Field(field(
+            &client,
+            &lablink_core::paths::default_config_path(),
+            c,
+        )),
+        Cmd::RosCheck(req) => Event::RosChecked(ros_check(
+            &client,
+            &lablink_core::paths::default_config_path(),
+            &req,
+        )),
     }
 }
 
@@ -480,6 +546,173 @@ fn run_doctor(client: &Client, devices: Vec<String>) -> Result<Box<lablink_docto
             }
             lablink_doctor::DoctorError::NoDevices => Fail::msg("no devices to check"),
         })
+}
+
+/// The config's optional features, read fresh for every gated command (the
+/// UI's copy may be stale). An unreadable config counts as "off".
+fn features(config: &std::path::Path) -> lablink_core::config::Features {
+    lablink_setup::configfile::load_or_default(config)
+        .map(|c| c.preferences.features)
+        .unwrap_or_default()
+}
+
+const FIELD_OFF: &str =
+    "The Field Network is an optional feature and is off: turn it on in Settings.";
+
+fn field(client: &Client, config: &std::path::Path, cmd: FieldCmd) -> FieldEvent {
+    let sys = RealSystem;
+    let state_dir = lablink_core::paths::default_state_dir();
+    let on = features(config).field_network;
+    match cmd {
+        FieldCmd::Refresh => {
+            // Capabilities are read-only and shown even with the feature off.
+            let caps = lablink_fieldnet::capabilities(&sys);
+            let status = (on && caps.backend == "networkmanager")
+                .then(|| nm::status(&sys, &state_dir).map_err(|e| e.to_string()));
+            let clients = match &status {
+                Some(Ok(s)) if s.active => ops::classify_clients(
+                    client,
+                    &s.clients,
+                    s.state.as_ref().and_then(|st| st.started_ms),
+                ),
+                _ => Vec::new(),
+            };
+            FieldEvent::Snapshot(Box::new(FieldSnapshot {
+                feature_on: on,
+                caps,
+                status,
+                clients,
+            }))
+        }
+        _ if !on => match cmd {
+            FieldCmd::Preflight(a) => FieldEvent::Preflight(a, Err(FIELD_OFF.into())),
+            FieldCmd::Start { .. } => FieldEvent::Started(Err(FIELD_OFF.into())),
+            FieldCmd::Stop { .. } => FieldEvent::Stopped(Err(FIELD_OFF.into())),
+            _ => FieldEvent::Password(Err(FIELD_OFF.into())),
+        },
+        FieldCmd::Preflight(args) => {
+            let r = load_config(config)
+                .and_then(|cfg| {
+                    ops::plan(&sys, client, &cfg, &state_dir, &args).map_err(|e| e.to_string())
+                })
+                .map(|p| Box::new(p.pf));
+            FieldEvent::Preflight(args, r)
+        }
+        FieldCmd::Start { args, accepted } => {
+            FieldEvent::Started(field_start(client, config, &state_dir, &args, &accepted))
+        }
+        FieldCmd::Stop { restore } => FieldEvent::Stopped(
+            nm::stop(&sys, &state_dir, restore)
+                .map(|r| {
+                    let mut m = if r.was_active {
+                        "Field Network stopped.".to_string()
+                    } else {
+                        "The Field Network was not running.".to_string()
+                    };
+                    if let Some(x) = r.restored {
+                        m.push(' ');
+                        m.push_str(&x);
+                    }
+                    m
+                })
+                .map_err(|e| e.to_string()),
+        ),
+        FieldCmd::Password => {
+            FieldEvent::Password(nm::password(&sys, &state_dir).map_err(|e| e.to_string()))
+        }
+    }
+}
+
+fn load_config(config: &std::path::Path) -> Result<lablink_core::Config, String> {
+    lablink_setup::configfile::load_or_default(config)
+}
+
+/// Re-plan, refuse on any blocker or on a warning the user did not accept,
+/// then start and record the `field-network` site.
+fn field_start(
+    client: &Client,
+    config: &std::path::Path,
+    state_dir: &std::path::Path,
+    args: &ops::PlanArgs,
+    accepted: &[String],
+) -> Result<String, String> {
+    let sys = RealSystem;
+    let cfg = load_config(config)?;
+    let p = ops::plan(&sys, client, &cfg, state_dir, args).map_err(|e| e.to_string())?;
+    if let Some(b) = p.pf.blockers().first() {
+        return Err(format!("Refused: {}", b.message));
+    }
+    let unseen: Vec<&str> =
+        p.pf.warnings()
+            .iter()
+            .filter(|w| !accepted.iter().any(|a| a == w.code))
+            .map(|w| w.message.as_str())
+            .collect();
+    if !unseen.is_empty() {
+        return Err(format!(
+            "Not started: the situation changed since the check. Run the check again. New: {}",
+            unseen.join(" ")
+        ));
+    }
+    let r = nm::start(
+        &sys,
+        state_dir,
+        &p.facts,
+        &p.pf,
+        &nm::StartOptions {
+            psk: None,
+            confirmed: true,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    let mut m = format!(
+        "Field Network '{}' is up on {} ({}, {}). This machine is {}.",
+        r.ssid, r.interface, r.subnet, r.security, r.gateway
+    );
+    if let Some(prev) = &r.previous {
+        m.push_str(&format!(
+            " '{}' is disconnected until you stop the Field Network.",
+            prev.name
+        ));
+    }
+    if r.ip_forward_after == Some(true) && r.ip_forward_before == Some(false) {
+        m.push_str(" NetworkManager turned on IPv4 forwarding for the hotspot (shared mode).");
+    }
+    if let Ok(net) = r.subnet.parse::<ipnet::Ipv4Net>() {
+        let mut changed = false;
+        match lablink_setup::configfile::update(config, |c| {
+            changed = lablink_fieldnet::field_site(c, &net, Some(&r.interface), Some(&r.ssid))?;
+            if changed {
+                Ok(())
+            } else {
+                Err("unchanged".into())
+            }
+        }) {
+            Ok(_) => m.push_str(&format!(
+                " Field Network site set to {net}. {}",
+                lablink_setup::service::restart_if_active()
+            )),
+            Err(e) if e == "unchanged" => {}
+            Err(e) => m.push_str(&format!(" Could not update the field-network site: {e}")),
+        }
+    }
+    Ok(m)
+}
+
+fn ros_check(
+    client: &Client,
+    config: &std::path::Path,
+    req: &lablink_ros::check::CheckRequest,
+) -> RosResult {
+    if !features(config).robotics {
+        return Err(
+            "Robotics mode is an optional feature and is off: turn it on in Settings.".into(),
+        );
+    }
+    let remote = lablink_ros::SshRemote { client };
+    lablink_ros::check::run(client, &remote, req, |_, _| {})
+        .map(Box::new)
+        .map_err(|e| e.to_string())
 }
 
 pub fn parse_version(v: &Value) -> String {
@@ -650,6 +883,53 @@ mod tests {
         .is_some());
         assert!(daemon_build_warning(&json!({"version":lablink_core::VERSION}), None).is_none());
         assert!(daemon_build_warning(&json!({"version":"old-version"}), None).is_some());
+    }
+
+    #[test]
+    fn gated_commands_refuse_while_their_feature_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "networks: []\n").unwrap();
+        // No daemon at this socket: nothing may get as far as asking it.
+        let client = Client::new(dir.path().join("none.sock"));
+        let args = ops::PlanArgs {
+            security: "wpa2".into(),
+            ..Default::default()
+        };
+        let FieldEvent::Started(Err(m)) = field(
+            &client,
+            &cfg,
+            FieldCmd::Start {
+                args: args.clone(),
+                accepted: vec![],
+            },
+        ) else {
+            panic!("start must be refused");
+        };
+        assert!(m.contains("optional feature"), "{m}");
+        assert!(matches!(
+            field(&client, &cfg, FieldCmd::Stop { restore: true }),
+            FieldEvent::Stopped(Err(_))
+        ));
+        assert!(matches!(
+            field(&client, &cfg, FieldCmd::Password),
+            FieldEvent::Password(Err(_))
+        ));
+        assert!(matches!(
+            field(&client, &cfg, FieldCmd::Preflight(args)),
+            FieldEvent::Preflight(_, Err(_))
+        ));
+        let req = lablink_ros::check::CheckRequest {
+            device: "lab/orin".into(),
+            peer: None,
+            active: false,
+            opts: Default::default(),
+        };
+        let Err(m) = ros_check(&client, &cfg, &req) else {
+            panic!("ros check must be refused");
+        };
+        assert!(m.contains("optional feature"), "{m}");
+        assert!(needs_current_daemon(&Cmd::RosCheck(Box::new(req))));
     }
 
     #[test]

@@ -7,12 +7,10 @@
 use crate::{print_json, Fail, R};
 use clap::Subcommand;
 use lablink_core::client::Client;
-use lablink_core::model::ResolveResult;
-use lablink_core::protocol::Request;
 use lablink_core::{exit, printable as p};
-use lablink_ros::diagnose::{self, Input, Report, Side, Verdict};
+use lablink_ros::diagnose::{Report, Verdict};
 use lablink_ros::inspect::{self, Inspection, Options};
-use lablink_ros::{active, RemoteError, SshRemote};
+use lablink_ros::{active, check, RemoteError, SshRemote};
 use serde_json::json;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -126,11 +124,7 @@ fn remote_fail(e: RemoteError) -> Fail {
 /// (daemon down 3, unknown 4, unreachable 5, identity mismatch 6), and the
 /// address LabLink located the device at.
 fn locate(client: &Client, device: &str) -> Result<(String, Option<Ipv4Addr>), Fail> {
-    let r: ResolveResult = client.call_typed(&Request::Resolve {
-        device: device.to_string(),
-        batch: true,
-    })?;
-    Ok((r.name.clone(), r.ip.parse().ok()))
+    Ok(check::locate(client, device)?)
 }
 
 fn check_ranges(common: &Common, spin: Option<u32>) -> Result<Duration, Fail> {
@@ -231,48 +225,26 @@ pub fn cmd_ros(client: &Client, action: RosAction) -> R {
                 spin_s: spin,
                 timeout,
             };
-            let (a, a_ip) = locate(client, &device)?;
-            let report = match peer {
-                None => {
-                    let ia = inspect::inspect(&remote, &a, &opts).map_err(remote_fail)?;
-                    let r = diagnose::diagnose(&Input {
-                        a: Side { ins: &ia, ip: a_ip },
-                        b: None,
-                        active: None,
-                        timeout_ms: timeout.as_millis() as u64,
-                    });
-                    (r, None)
-                }
-                Some(peer) => {
-                    let (b, b_ip) = locate(client, &peer)?;
-                    if b == a {
-                        return Err(Fail::new(
-                            exit::USAGE,
-                            "bad_request",
-                            "--peer must be a different device",
-                        ));
-                    }
-                    let (ia, ib) = inspect::inspect_pair(&remote, &a, &b, &opts);
-                    let (ia, ib) = (ia.map_err(remote_fail)?, ib.map_err(remote_fail)?);
-                    let act_report = act.then(|| {
-                        if !common.json {
-                            eprintln!(
-                                "Running active tests between {} and {} (about 50 s)...",
-                                p(&a),
-                                p(&b)
-                            );
-                        }
-                        active::run(&remote, &ia, &ib, b_ip)
-                    });
-                    let r = diagnose::diagnose(&Input {
-                        a: Side { ins: &ia, ip: a_ip },
-                        b: Some(Side { ins: &ib, ip: b_ip }),
-                        active: act_report.as_ref(),
-                        timeout_ms: timeout.as_millis() as u64,
-                    });
-                    (r, act_report)
-                }
+            let req = check::CheckRequest {
+                device,
+                peer,
+                active: act,
+                opts,
             };
+            let report = check::run(client, &remote, &req, |a, b| {
+                if !common.json {
+                    eprintln!(
+                        "Running active tests between {} and {} (about 50 s)...",
+                        p(a),
+                        p(b)
+                    );
+                }
+            })
+            .map_err(|e| match e {
+                check::CheckError::BadRequest(m) => Fail::new(exit::USAGE, "bad_request", m),
+                check::CheckError::Daemon(e) => Fail::from(e),
+                check::CheckError::Remote(e) => remote_fail(e),
+            })?;
             let (r, act_report) = report;
             if common.json {
                 print_json(&json!({ "schema_version": 1, "report": r, "active": act_report }));

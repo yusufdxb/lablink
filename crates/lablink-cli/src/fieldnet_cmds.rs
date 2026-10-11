@@ -11,14 +11,10 @@ use crate::{print_json, Fail, R};
 use clap::Subcommand;
 use lablink_core::client::Client;
 use lablink_core::exit;
-use lablink_core::model::{AuthState, Color, IdentityState, PortState, StatusReport};
-use lablink_core::protocol::Request;
-use lablink_fieldnet::preflight::{self, Equipment, Level};
-use lablink_fieldnet::state::Security;
+use lablink_fieldnet::preflight::{self, Level};
 use lablink_fieldnet::system::{RealSystem, System};
-use lablink_fieldnet::{nm, Error};
+use lablink_fieldnet::{nm, ops, Error};
 use lablink_setup::{configfile, service};
-use serde::Serialize;
 use serde_json::json;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -202,112 +198,23 @@ fn read_secret_line() -> Result<String, Fail> {
     Ok(psk)
 }
 
-/// The networks of the other (non-roaming) sites, for subnet conflicts.
-fn site_networks(cfg: &lablink_core::Config) -> Vec<(String, ipnet::Ipv4Net)> {
-    cfg.sites
-        .iter()
-        .filter(|s| !s.roaming)
-        .flat_map(|s| {
-            s.networks
-                .iter()
-                .filter_map(move |n| n.cidr.parse().ok().map(|c| (s.id.clone(), c)))
-        })
-        .collect()
-}
-
-/// Registered devices this machine reaches now, from the daemon. `None`
-/// when the daemon cannot be asked.
-fn equipment(client: &Client) -> Option<Vec<Equipment>> {
-    let r: StatusReport = client
-        .call_typed(&Request::Status {
-            device: None,
-            site: None,
-            all: true,
-        })
-        .ok()?;
-    Some(
-        r.devices
-            .iter()
-            .filter(|d| matches!(d.color, Color::Green | Color::Yellow))
-            .filter_map(|d| {
-                Some(Equipment {
-                    name: d.id.clone(),
-                    ip: d.ip.as_deref()?.parse().ok()?,
-                })
-            })
-            .collect(),
-    )
-}
-
-struct Planned {
-    facts: lablink_fieldnet::host::HostFacts,
-    pf: preflight::Preflight,
-}
-
 fn plan(
     sys: &dyn System,
     client: &Client,
     cfg: &lablink_core::Config,
     args: &StartArgs,
-) -> Result<Planned, Fail> {
-    let security =
-        Security::parse(&args.security).map_err(|e| Fail::new(exit::USAGE, "bad_request", e))?;
-    let old = lablink_fieldnet::state::load(&state_dir())
-        .map_err(|e| Fail::new(exit::FAILURE, "state", e))?;
-    let subnet = match &args.subnet {
-        Some(s) => Some(s.parse().map_err(|_| {
-            Fail::new(
-                exit::USAGE,
-                "bad_request",
-                format!("'{s}' is not an IPv4 CIDR"),
-            )
-        })?),
-        None => old.as_ref().and_then(|o| o.subnet.parse().ok()),
-    };
-    if let Some(i) = &args.interface {
-        if !lablink_core::config::valid_interface(i) {
-            return Err(Fail::new(
-                exit::USAGE,
-                "bad_request",
-                format!("'{i}' is not an interface name"),
-            ));
-        }
-    }
-    let ssid = args
-        .ssid
-        .clone()
-        .or_else(|| old.as_ref().map(|o| o.ssid.clone()))
-        .unwrap_or_else(|| lablink_fieldnet::password::default_ssid(sys));
-    let req = preflight::Request {
+) -> Result<ops::Planned, Fail> {
+    let a = ops::PlanArgs {
         interface: args.interface.clone(),
-        ssid,
-        subnet,
-        security,
+        ssid: args.ssid.clone(),
+        subnet: args.subnet.clone(),
+        security: args.security.clone(),
         allow_internet_sharing: args.allow_internet_sharing,
     };
-    let facts = lablink_fieldnet::host::gather(sys);
-    let sites = site_networks(cfg);
-    let equipment = equipment(client);
-    let own = old.as_ref().and_then(|o| o.profile_uuid.clone());
-    let mut pf = preflight::check(
-        &facts,
-        &req,
-        &preflight::Context {
-            sites: &sites,
-            equipment: equipment.as_deref().unwrap_or_default(),
-            own_profile: own.as_deref(),
-        },
-    );
-    if equipment.is_none() && !pf.already_running {
-        pf.findings.push(preflight::Finding {
-            level: Level::Warn,
-            code: "equipment",
-            message: "lablinkd is not running, so LabLink cannot tell which registered devices use this link. Make sure no robot is moving or depending on it.".into(),
-            override_flag: None,
-        });
-        pf.findings.sort_by_key(|f| f.level);
-    }
-    Ok(Planned { facts, pf })
+    ops::plan(sys, client, cfg, &state_dir(), &a).map_err(|e| match e {
+        ops::PlanError::BadRequest(m) => Fail::new(exit::USAGE, "bad_request", m),
+        ops::PlanError::State(m) => Fail::new(exit::FAILURE, "state", m),
+    })
 }
 
 fn print_findings(pf: &preflight::Preflight) {
@@ -480,7 +387,7 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
                 ));
             }
             let started = s.state.as_ref().and_then(|st| st.started_ms);
-            let rows = classify_clients(client, &s.clients, started);
+            let rows = ops::classify_clients(client, &s.clients, started);
             if json {
                 print_json(&json!({ "schema_version": 1, "clients": rows }));
             } else if rows.is_empty() {
@@ -610,108 +517,6 @@ fn update_field_site(path: &Path, r: &nm::StartReport) -> String {
         Err(e) if e == "unchanged" => String::new(),
         Err(e) => format!("Could not update the field-network site: {e}"),
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ClientRow {
-    ip: String,
-    mac: Option<String>,
-    hostname: Option<String>,
-    presence: lablink_fieldnet::clients::Presence,
-    /// discovered-untrusted, registered, ssh-available, ssh-authenticated,
-    /// ssh-unreachable, identity-mismatch or disconnected.
-    state: &'static str,
-    /// The registered device (`site/name`) at this address, proven by its
-    /// pinned host key (never by name, MAC or address).
-    device: Option<String>,
-    address_changed: bool,
-}
-
-fn classify_clients(
-    client: &Client,
-    clients: &[lablink_fieldnet::clients::Client],
-    started_ms: Option<u64>,
-) -> Vec<ClientRow> {
-    let status: Option<StatusReport> = client
-        .call_typed(&Request::Status {
-            device: None,
-            site: None,
-            all: true,
-        })
-        .ok();
-    let devices = status.map(|s| s.devices).unwrap_or_default();
-    let mut rows: Vec<ClientRow> = clients
-        .iter()
-        .map(|c| {
-            let ip = c.ip.to_string();
-            let d = devices
-                .iter()
-                .find(|d| d.ip.as_deref() == Some(ip.as_str()) && d.visiting.is_some());
-            let state = match d {
-                None => "discovered-untrusted",
-                Some(d) if d.identity == IdentityState::Mismatch => "identity-mismatch",
-                Some(d) if d.identity == IdentityState::Verified && d.ssh_auth == AuthState::Ok => {
-                    "ssh-authenticated"
-                }
-                Some(d)
-                    if d.identity == IdentityState::Verified && d.ssh_port == PortState::Open =>
-                {
-                    "ssh-available"
-                }
-                Some(d) if matches!(d.ssh_port, PortState::Closed | PortState::Filtered) => {
-                    "ssh-unreachable"
-                }
-                Some(_) => "registered",
-            };
-            let address_changed = d.is_some_and(|d| changed_since(client, &d.id, started_ms));
-            ClientRow {
-                ip,
-                mac: c.mac.clone(),
-                hostname: c.hostname.clone(),
-                presence: c.presence,
-                state,
-                device: d.map(|d| d.id.clone()),
-                address_changed,
-            }
-        })
-        .collect();
-    // Registered devices visiting the Field Network that are not here now.
-    for d in devices
-        .iter()
-        .filter(|d| d.visiting.is_some() && d.color == Color::Gray)
-    {
-        if !rows
-            .iter()
-            .any(|r| r.device.as_deref() == Some(d.id.as_str()))
-        {
-            rows.push(ClientRow {
-                ip: d.ip.clone().unwrap_or_default(),
-                mac: None,
-                hostname: None,
-                presence: lablink_fieldnet::clients::Presence::Stale,
-                state: "disconnected",
-                device: Some(d.id.clone()),
-                address_changed: false,
-            });
-        }
-    }
-    rows
-}
-
-fn changed_since(client: &Client, id: &str, since: Option<u64>) -> bool {
-    let Some(since) = since else { return false };
-    client
-        .call(&Request::History {
-            device: Some(id.to_string()),
-            limit: 10,
-        })
-        .ok()
-        .and_then(|v| v["events"].as_array().cloned())
-        .is_some_and(|ev| {
-            ev.iter().any(|e| {
-                e["kind"] == "ip_changed" && e["ts_ms"].as_u64().is_some_and(|t| t >= since)
-            })
-        })
 }
 
 fn yes_no(b: bool) -> &'static str {
