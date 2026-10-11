@@ -9,10 +9,12 @@ All notable changes are listed here. The format follows
 Installing 0.3.1 over an earlier 0.3.0 build is no longer a same-version no-op.
 The package does not restart per-user daemons: after upgrading run
 `systemctl --user restart lablinkd` (`lablink version` shows a daemon/CLI
-version difference until you do). Daemon-using commands (`status`, `exec`,
-`ssh`, `doctor`, and others) now also print a stderr warning when the running
-daemon is a different build; nothing is restarted, so open SSH sessions are
-untouched. Reading the configuration retries a swap during its safety check
+version difference until you do). When the running daemon is a different
+build, `resolve`, `ssh`, `exec`, `trust`, `forget`, `set`, `adopt`, `discover`,
+`doctor` and `copy-id` (and the matching GUI actions) are refused with exit 7
+and the restart command, because an old daemon lacks the security fixes in
+this build; `status`, `devices` and `inspect` print a stderr warning instead.
+Nothing is restarted, so open SSH sessions are untouched. Reading the configuration retries a swap during its safety check
 (an atomic save by another LabLink process) instead of failing.
 
 ### Security

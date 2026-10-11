@@ -632,22 +632,29 @@ fn command_name(c: &Cmd) -> &'static str {
 
 fn run(cli: Cli, client: &Client) -> R {
     let socket = client.socket_path().to_path_buf();
-    if matches!(
+    // Security-sensitive: these resolve, pin or trust host keys, or start SSH,
+    // so an older daemon (missing fixes) is refused. The read-only views warn.
+    let gated = matches!(
         &cli.cmd,
-        Cmd::Status { .. }
-            | Cmd::Devices { .. }
-            | Cmd::Inspect { .. }
-            | Cmd::Discover { .. }
+        Cmd::Discover { .. }
             | Cmd::Resolve { .. }
             | Cmd::Ssh { .. }
             | Cmd::Exec { .. }
             | Cmd::Trust { .. }
             | Cmd::Forget { .. }
+            | Cmd::Set { .. }
             | Cmd::Adopt { .. }
             | Cmd::Doctor { .. }
             | Cmd::CopyId { .. }
-    ) {
-        setup_cmds::warn_if_daemon_outdated(client);
+    );
+    if gated
+        || matches!(
+            &cli.cmd,
+            Cmd::Status { .. } | Cmd::Devices { .. } | Cmd::Inspect { .. }
+        )
+    {
+        setup_cmds::check_daemon_build(client, gated)
+            .map_err(|why| Fail::new(exit::REFUSED, "daemon_build_mismatch", why))?;
     }
     match cli.cmd {
         Cmd::Status {

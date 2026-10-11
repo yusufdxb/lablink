@@ -291,6 +291,48 @@ fn daemon_commands_warn_when_the_running_daemon_is_an_older_build() {
     assert!(!String::from_utf8_lossy(&out.stdout).contains("WARNING"));
 }
 
+/// A fake 0.3.0 daemon that answers exactly one request (the ping). Any
+/// second request would find the socket closed (exit 3), so exit 7 proves
+/// the command was refused before it asked the daemon to do anything.
+fn old_daemon_refuses(args: &[&str]) {
+    use std::io::{BufRead, BufReader};
+    let h = Home::new();
+    let socket = h.path().join("old.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+        assert!(request.contains("ping"));
+        stream.write_all(b"{\"ok\":true,\"result\":{\"version\":\"0.3.0\",\"protocol_version\":1,\"pid\":123,\"uptime_s\":0}}\n").unwrap();
+    });
+    let out = h.run(&socket, args);
+    server.join().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(7), "{args:?}: {err}");
+    assert!(err.contains("running lablinkd is 0.3.0"), "{args:?}: {err}");
+    assert!(err.contains("refused"), "{args:?}: {err}");
+    assert!(
+        err.contains("systemctl --user restart lablinkd"),
+        "{args:?}: {err}"
+    );
+}
+
+#[test]
+fn security_sensitive_commands_are_refused_by_an_older_daemon() {
+    for args in [
+        &["resolve", "d"][..],
+        &["exec", "d", "true"],
+        &["ssh", "d"],
+        &["trust", "d", "--fingerprint", "SHA256:x"],
+        &["forget", "d"],
+        &["doctor"],
+        &["discover"],
+    ] {
+        old_daemon_refuses(args);
+    }
+}
+
 #[test]
 fn concurrent_site_adds_preserve_every_acknowledged_change() {
     let h = Home::new();

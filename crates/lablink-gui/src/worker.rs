@@ -227,7 +227,53 @@ fn poll_once(client: &Client) -> Event {
     }
 }
 
+/// Commands that resolve, pin or trust host keys or start SSH through the
+/// daemon: refused against a different daemon build, like the CLI.
+fn needs_current_daemon(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Discover
+            | Cmd::Apply { .. }
+            | Cmd::Run { .. }
+            | Cmd::Adopt { .. }
+            | Cmd::TestSsh(_)
+            | Cmd::TrustPreview(_)
+            | Cmd::TrustPin { .. }
+            | Cmd::Doctor { .. }
+    )
+}
+
+fn refused_event(cmd: Cmd, why: String) -> Event {
+    let f = Fail::msg(why);
+    match cmd {
+        Cmd::Discover => Event::DiscoverDone(Err(f)),
+        Cmd::Apply { device, .. } => Event::Applied(device, Err(f)),
+        Cmd::Run { device, .. } => Event::Ran(device, Err(f)),
+        Cmd::Adopt { ip, name, .. } => Event::Adopted(ip, name, Err(f)),
+        Cmd::TestSsh(device) => Event::TestSsh(device, Err(f)),
+        Cmd::TrustPreview(device) => Event::TrustPreview(device, Err(f)),
+        Cmd::TrustPin { device, .. } => Event::TrustPinned(device, Err(f)),
+        Cmd::Doctor { scope, .. } => Event::Doctor(scope, Err(f)),
+        _ => unreachable!("only commands in needs_current_daemon are refused"),
+    }
+}
+
 fn execute(socket: &PathBuf, cmd: Cmd) -> Event {
+    if needs_current_daemon(&cmd) {
+        let ping = Client::new(socket)
+            .with_timeout(Duration::from_secs(1))
+            .call(&Request::Ping);
+        if let Some(why) = ping
+            .ok()
+            .and_then(|v| lablink_core::daemon_build_refusal(&v))
+        {
+            return refused_event(cmd, why);
+        }
+    }
+    execute_inner(socket, cmd)
+}
+
+fn execute_inner(socket: &PathBuf, cmd: Cmd) -> Event {
     let client = Client::new(socket);
     match cmd {
         Cmd::Inspect(d) => {
@@ -452,8 +498,10 @@ fn daemon_build_warning(v: &Value, client_sha: Option<&str>) -> Option<String> {
     let mismatch = v["version"].as_str() != Some(lablink_core::VERSION)
         || client_sha.is_some_and(|sha| v["git_sha"].as_str() != Some(sha));
     mismatch.then(|| {
-        "The running daemon is a different or unknown build. Restart lablinkd after upgrading."
-            .into()
+        lablink_core::daemon_build_refusal(v).unwrap_or_else(|| {
+            "The running daemon is a different or unknown build. Restart lablinkd after upgrading."
+                .into()
+        })
     })
 }
 
@@ -533,13 +581,19 @@ mod tests {
         let sock = dir.path().join("d.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let t = std::thread::spawn(move || {
-            for cmd in ["resolve", "set"] {
+            for cmd in ["ping", "resolve", "set"] {
                 let (s, _) = listener.accept().unwrap();
                 let mut line = String::new();
                 BufReader::new(&s).read_line(&mut line).unwrap();
                 let req: Value = serde_json::from_str(&line).unwrap();
                 assert_eq!(req["method"], cmd, "{line}");
-                let response = if cmd == "resolve" {
+                let response = if cmd == "ping" {
+                    json!({"ok":true,"result":{
+                        "version": lablink_core::VERSION,
+                        "protocol_version": lablink_core::protocol::PROTOCOL_VERSION,
+                        "git_sha": lablink_core::GIT_SHA,
+                    }})
+                } else if cmd == "resolve" {
                     json!({"ok":false,"error":{"code":"identity_mismatch","message":"host key changed"}})
                 } else {
                     assert_eq!(req["params"]["changes"]["recheck"], true, "{line}");
@@ -596,5 +650,39 @@ mod tests {
         .is_some());
         assert!(daemon_build_warning(&json!({"version":lablink_core::VERSION}), None).is_none());
         assert!(daemon_build_warning(&json!({"version":"old-version"}), None).is_some());
+    }
+
+    #[test]
+    fn sensitive_commands_are_refused_by_an_older_daemon() {
+        assert!(needs_current_daemon(&Cmd::TrustPin {
+            device: "d".into(),
+            confirm: vec![],
+            replace: false
+        }));
+        assert!(needs_current_daemon(&Cmd::Run {
+            device: "d".into(),
+            command: "true".into()
+        }));
+        assert!(!needs_current_daemon(&Cmd::Sites));
+        let why =
+            lablink_core::daemon_build_refusal(&json!({"version":"0.3.0","protocol_version":1}))
+                .unwrap();
+        let Event::Ran(d, Err(f)) = refused_event(
+            Cmd::Run {
+                device: "d".into(),
+                command: "true".into(),
+            },
+            why,
+        ) else {
+            panic!("expected a refused Ran event");
+        };
+        assert_eq!(d, "d");
+        assert!(
+            f.message.contains("running lablinkd is 0.3.0"),
+            "{}",
+            f.message
+        );
+        assert!(f.message.contains("systemctl --user restart lablinkd"));
+        assert!(!f.unavailable);
     }
 }

@@ -294,40 +294,29 @@ pub fn cmd_init(
     Ok(if failed { exit::FAILURE } else { exit::OK })
 }
 
-fn build_status_of(v: &serde_json::Value) -> &'static str {
-    if v["version"].as_str() != Some(lablink_core::VERSION)
-        || v["protocol_version"].as_u64() != Some(PROTOCOL_VERSION as u64)
-    {
-        "different"
-    } else {
-        match (lablink_core::GIT_SHA, v["git_sha"].as_str()) {
-            (Some(a), Some(b)) if a == b => "same",
-            (Some(_), Some(_)) => "different",
-            _ => "unknown",
-        }
-    }
-}
+use lablink_core::daemon_build_status as build_status_of;
 
-/// Warn on stderr when the running daemon is a different build than this
-/// client (typically an old daemon left running after a package upgrade).
-/// Never changes the command's result or stdout, and never restarts anything,
-/// so active SSH sessions are untouched. A daemon that is down or slow is
-/// ignored here: the command reports that itself.
-pub fn warn_if_daemon_outdated(client: &Client) {
+/// Check the running daemon's build before a daemon-using command. Commands
+/// that resolve, pin or trust host keys or start SSH (`gate`) are refused
+/// when the daemon is a different build; read-only views only warn on
+/// stderr. Never restarts anything, so active SSH sessions are untouched. A
+/// daemon that is down or slow is ignored here: the command reports that
+/// itself.
+pub fn check_daemon_build(client: &Client, gate: bool) -> Result<(), String> {
     let Ok(v) = client
         .clone()
         .with_timeout(std::time::Duration::from_secs(1))
         .call(&Request::Ping)
     else {
-        return;
+        return Ok(());
     };
-    if build_status_of(&v) == "different" {
-        eprintln!(
-            "lablink: WARNING: the running lablinkd is {} but this lablink is {}. An old daemon lacks fixes in this build. Run `systemctl --user restart lablinkd` (open SSH sessions are not affected) and check `lablink version`.",
-            v["version"].as_str().unwrap_or("an unknown version"),
-            lablink_core::VERSION
-        );
+    if let Some(why) = lablink_core::daemon_build_refusal(&v) {
+        if gate {
+            return Err(why);
+        }
+        eprintln!("lablink: WARNING: {why}");
     }
+    Ok(())
 }
 
 pub fn cmd_version(client: &Client, json_out: bool) -> R {
