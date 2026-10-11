@@ -42,6 +42,10 @@ pub struct Request {
     pub subnet: Option<Ipv4Net>,
     pub security: Security,
     pub allow_internet_sharing: bool,
+    /// Accept that hotspot clients can be routed to the other networks this
+    /// machine reaches (VPN, containers, LAN), which shared mode's
+    /// forwarding allows unless a firewall stops it.
+    pub allow_routing: bool,
 }
 
 /// A registered device currently reached from this machine (from the
@@ -272,20 +276,26 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
         }
     }
 
-    // Our own SSH session must not ride on the adapter.
-    match facts.session_path() {
-        SessionPath::Local => {}
-        SessionPath::Interface(i) if i == iface => block(
+    // No SSH session into this machine may ride on the adapter, or on a
+    // tunnel that might. An SSH connection is not a rollback path.
+    let at_risk = if pf.already_running {
+        Vec::new()
+    } else {
+        facts.sessions_at_risk(&iface)
+    };
+    for why in &at_risk {
+        block(
             &mut f,
             "remote-session",
-            format!("this command runs over SSH through {iface}; starting the hotspot would cut this session, and an SSH connection is not a rollback path. Run it locally on this machine."),
-        ),
-        SessionPath::Interface(i) => info(&mut f, "remote-session", format!("running over SSH through {i}, which the hotspot does not touch")),
-        SessionPath::Unknown(addr) => block(
-            &mut f,
-            "remote-session",
-            format!("this command runs over SSH (to {addr}) and LabLink cannot tell which interface carries it, so it cannot rule out cutting the session. Run it locally."),
-        ),
+            format!("{why}; starting the hotspot could cut it, and an SSH connection is not a rollback path. Run this at the machine itself, with no SSH session that depends on {iface}."),
+        );
+    }
+    if at_risk.is_empty() {
+        if let SessionPath::Interface(i) = facts.session_path() {
+            if i != iface {
+                info(&mut f, "remote-session", format!("running over SSH through {i}, a physical adapter the hotspot does not touch"));
+            }
+        }
     }
 
     // What the adapter carries now.
@@ -345,14 +355,24 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
         .map(|r| format!("{} ({})", r.dest, r.device))
         .collect();
     if !exposed.is_empty() {
-        warn(
-            &mut f,
-            "forwarding",
-            format!(
-                "NetworkManager's shared mode enables IPv4 forwarding for hotspot clients. This machine also routes to {}; unless your firewall blocks forwarding from {iface}, hotspot clients can reach those networks through it. LabLink does not change firewall rules.",
-                exposed.join(", ")
-            ),
+        let message = format!(
+            "NetworkManager's shared mode enables IPv4 forwarding for hotspot clients. This machine also routes to {}; unless your firewall blocks forwarding from {iface}, hotspot clients can reach those networks through it. LabLink does not change firewall rules.",
+            exposed.join(", ")
         );
+        if req.allow_routing {
+            warn(
+                &mut f,
+                "forwarding",
+                format!("{message} Allowed as requested."),
+            );
+        } else {
+            f.push(Finding {
+                level: Level::Block,
+                code: "forwarding",
+                message,
+                override_flag: Some("--allow-routing"),
+            });
+        }
     }
     if facts.ip_forward == Some(true) {
         info(
@@ -365,20 +385,16 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
     // Sessions and equipment reached over the adapter.
     if !pf.already_running {
         let nets = facts.addresses_on(&iface);
-        let on_iface = |ip: &Ipv4Addr| nets.iter().any(|n| n.addr() == *ip);
-        let inbound_ssh = facts
-            .established
-            .iter()
-            .filter(|c| on_iface(&c.local.0) && c.local.1 == 22)
-            .count();
+        let ssh_port = facts.ssh_session.as_ref().map(|s| s.server_port);
         let others_tcp = facts
             .established
             .iter()
-            .filter(|c| on_iface(&c.local.0) && c.local.1 != 22)
+            .filter(|c| {
+                facts.interface_of_addr(c.local.0) == Some(iface.as_str())
+                    && c.local.1 != 22
+                    && Some(c.local.1) != ssh_port
+            })
             .count();
-        if inbound_ssh > 0 {
-            warn(&mut f, "sessions", format!("{inbound_ssh} SSH session(s) into this machine arrive over {iface} and will drop"));
-        }
         if others_tcp > 0 {
             info(
                 &mut f,
@@ -481,6 +497,9 @@ mod tests {
             subnet: None,
             security: Security::Wpa2,
             allow_internet_sharing: false,
+            // The fixture routes to tailscale and docker networks; the
+            // routing block has its own test.
+            allow_routing: true,
         }
     }
 
@@ -523,6 +542,22 @@ mod tests {
     }
 
     #[test]
+    fn routes_to_other_networks_block_unless_routing_is_explicit() {
+        let mut r = req();
+        r.allow_routing = false;
+        let pf = check(&facts(), &r, &ctx(&[]));
+        let b = pf.blockers();
+        assert_eq!(b.len(), 1, "{b:#?}");
+        assert_eq!(b[0].code, "forwarding");
+        assert_eq!(b[0].override_flag, Some("--allow-routing"));
+        assert!(b[0].message.contains("100.64.0.0/10 (tailscale0)"));
+        // No other routes: nothing to allow.
+        let mut h = facts();
+        h.routes.retain(|r| r.device == "wlan0");
+        assert!(!check(&h, &r, &ctx(&[])).blocked());
+    }
+
+    #[test]
     fn own_ssh_session_over_the_adapter_is_refused_without_override() {
         let mut h = facts();
         h.ssh_session = crate::host::parse_ssh_connection("192.168.8.20 51000 192.168.8.168 22");
@@ -537,15 +572,77 @@ mod tests {
             .blockers()
             .iter()
             .any(|f| f.code == "remote-session"));
-        // A session over another interface is fine.
+        // A session over another physical adapter is fine.
         h.addresses.push(crate::host::Address {
             interface: "eno1".into(),
             net: "10.1.1.1/24".parse().unwrap(),
         });
-        assert!(!check(&h, &req(), &ctx(&[]))
+        let pf = check(&h, &req(), &ctx(&[]));
+        assert!(!pf.blockers().iter().any(|f| f.code == "remote-session"));
+        assert!(codes(&pf, Level::Info).contains(&"remote-session"));
+        // A tunnel may ride on the adapter: refused (tailscale0 holds
+        // 100.101.102.103 in the fixture and the Wi-Fi is its only underlay).
+        h.ssh_session = crate::host::parse_ssh_connection("100.64.0.9 51000 100.101.102.103 22");
+        let b = check(&h, &req(), &ctx(&[]))
+            .blockers()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            b.iter().any(|f| f.code == "remote-session"
+                && f.message.contains("tailscale0")
+                && f.override_flag.is_none()),
+            "{b:#?}"
+        );
+        // So does a reverse tunnel arriving on loopback.
+        h.ssh_session = crate::host::parse_ssh_connection("127.0.0.1 51000 127.0.0.1 22");
+        assert!(check(&h, &req(), &ctx(&[]))
             .blockers()
             .iter()
             .any(|f| f.code == "remote-session"));
+    }
+
+    #[test]
+    fn inbound_ssh_without_ssh_connection_is_refused_when_it_may_be_cut() {
+        // tmux attach, su -, or a stale environment: no $SSH_CONNECTION, but
+        // the connection is in /proc/net/tcp{,6}.
+        let conn = |local: &str, remote: &str| TcpConn {
+            local: (local.parse().unwrap(), 22),
+            remote: (remote.parse().unwrap(), 50000),
+        };
+        let blocked = |h: &HostFacts| {
+            check(h, &req(), &ctx(&[]))
+                .blockers()
+                .iter()
+                .any(|f| f.code == "remote-session")
+        };
+        let mut h = facts();
+        h.established.push(conn("192.168.8.168", "192.168.8.20"));
+        assert!(blocked(&h), "over the adapter");
+        let mut h = facts();
+        h.established.push(conn("100.101.102.103", "100.64.0.9"));
+        assert!(blocked(&h), "through a tunnel");
+        let mut h = facts();
+        h.addresses6
+            .push(("wlan0".into(), "fe80::aa:bbff:fecc:dd01".into()));
+        h.established
+            .push(conn("fe80::aa:bbff:fecc:dd01", "fe80::1"));
+        assert!(blocked(&h), "over IPv6 on the adapter");
+        let mut h = facts();
+        h.addresses.push(crate::host::Address {
+            interface: "eno1".into(),
+            net: "10.1.1.1/24".parse().unwrap(),
+        });
+        h.established.push(conn("10.1.1.1", "10.1.1.2"));
+        assert!(!blocked(&h), "another physical adapter is not touched");
+        // A non-standard sshd port is recognized from our own session.
+        let mut h = facts();
+        h.ssh_session = crate::host::parse_ssh_connection("10.1.1.2 51000 10.1.1.1 2222");
+        h.established.push(TcpConn {
+            local: ("192.168.8.168".parse().unwrap(), 2222),
+            remote: ("192.168.8.20".parse().unwrap(), 50001),
+        });
+        assert!(blocked(&h));
     }
 
     #[test]
@@ -573,11 +670,11 @@ mod tests {
     }
 
     #[test]
-    fn equipment_and_inbound_ssh_over_the_adapter_are_named() {
+    fn equipment_and_inbound_ssh_over_the_adapter_are_named_and_ssh_blocks() {
         let mut h = facts();
         h.established.push(TcpConn {
-            local: (Ipv4Addr::new(192, 168, 8, 168), 22),
-            remote: (Ipv4Addr::new(192, 168, 8, 20), 50000),
+            local: (Ipv4Addr::new(192, 168, 8, 168).into(), 22),
+            remote: (Ipv4Addr::new(192, 168, 8, 20).into(), 50000),
         });
         let eq = vec![
             Equipment {
@@ -594,9 +691,9 @@ mod tests {
         assert!(e.message.contains("orin (192.168.8.31)") && !e.message.contains("far"));
         assert!(e.message.contains("robot"));
         assert!(pf
-            .findings
+            .blockers()
             .iter()
-            .any(|f| f.code == "sessions" && f.level == Level::Warn));
+            .any(|f| f.code == "remote-session" && f.message.contains("192.168.8.20 port 50000")));
     }
 
     #[test]

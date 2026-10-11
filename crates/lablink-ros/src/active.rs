@@ -126,7 +126,7 @@ pub fn pubsub_script(
         return Err("invalid payload".into());
     }
     let echo = format!(
-        "{}ros2 topic echo --once {} std_msgs/msg/String",
+        "{}ros2 topic echo --once --no-daemon {} std_msgs/msg/String",
         env.prelude(),
         shell_quote(t_in)
     );
@@ -151,16 +151,29 @@ pub fn pubsub_script(
     ))
 }
 
-/// Counts probe processes still running. The bracket keeps the pattern
-/// from matching this script's own command line.
+/// Counts probe processes still running, and lists running `ros2 daemon`s
+/// so one the probe left behind can be told from one that was already
+/// there. The brackets keep the patterns from matching this script's own
+/// command line.
 pub fn leftover_script(hex: &str) -> Result<String, String> {
     if hex.len() != 16 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("invalid token".into());
     }
     let (first, rest) = hex.split_at(1);
     Ok(format!(
-        "echo @@ll:left@@\nif command -v pgrep >/dev/null 2>&1; then echo \"count=$(pgrep -fc 'lablink_probe_[{first}]{rest}')\"; else echo unknown; fi\necho {END}\n"
+        "echo @@ll:left@@\nif command -v pgrep >/dev/null 2>&1; then echo \"count=$(pgrep -fc 'lablink_probe_[{first}]{rest}')\"; else echo unknown; fi\necho @@ll:daemon@@\nfor p in /proc/[0-9]*; do c=$(tr '\\0' ' ' 2>/dev/null < \"$p/cmdline\"); case \"$c\" in *_ros2_daemo[n]*) echo \"pid=${{p#/proc/}}\";; esac; done\necho {END}\n"
     ))
+}
+
+/// Daemons running after the probe that were not running before it.
+fn new_daemons(before: &[crate::inspect::Daemon], r: &Result<String, RemoteError>) -> Vec<u32> {
+    section(r, "daemon")
+        .map(|l| crate::inspect::parse_daemons(&l))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| d.pid)
+        .filter(|p| !before.iter().any(|b| b.pid == *p))
+        .collect()
 }
 
 fn rc(lines: &[String]) -> Option<i32> {
@@ -386,8 +399,13 @@ pub fn run(
                 }
             }
             if let Ok(s) = leftover_script(&hex) {
-                for dev in [an, bn] {
+                for (dev, before) in [(an, &a.daemons), (bn, &b.daemons)] {
                     let r = remote.run(dev, &s, Duration::from_secs(15));
+                    for pid in new_daemons(before, &r) {
+                        leftover.push(format!(
+                            "{dev}: a ros2 daemon (pid {pid}) that was not running before the probe is running now"
+                        ));
+                    }
                     let n = section(&r, "left").ok().and_then(|l| {
                         l.iter()
                             .find_map(|x| x.strip_prefix("count=")?.trim().parse::<u32>().ok())
@@ -473,9 +491,12 @@ mod tests {
         assert!(s.contains("echo --once"));
         assert!(s.contains("export ROS_DOMAIN_ID=7"));
         assert!(s.contains("rm -rf \"$d\""));
-        for bad in ["/cmd_vel", "/chatter", "sport", "daemon"] {
+        for bad in ["/cmd_vel", "/chatter", "sport", "ros2 daemon"] {
             assert!(!s.contains(bad));
         }
+        // `topic echo` would otherwise spawn a ros2 daemon that outlives
+        // the probe (`pub` uses a direct node and has no such option).
+        assert!(s.contains("topic echo --once --no-daemon"), "{s}");
         assert!(
             pubsub_script(&q(), "/cmd_vel", "/lablink_probe_x", "p").is_err(),
             "never a robot topic"
@@ -485,6 +506,13 @@ mod tests {
             .contains("timeout -k 2 8 ping -n -c 3 -W 1 -i 0.5 10.42.0.5"));
         let l = leftover_script("0123456789abcdef").unwrap();
         assert!(l.contains("'lablink_probe_[0]123456789abcdef'"), "{l}");
+        assert!(
+            l.contains("*_ros2_daemo[n]*") && !l.contains("_ros2_daemon"),
+            "{l}"
+        );
+        let before = crate::inspect::parse_daemons(&["pid=40 --ros-domain-id 7".to_string()]);
+        let after = ok("@@ll:left@@\ncount=0\n@@ll:daemon@@\npid=40\npid=977");
+        assert_eq!(new_daemons(&before, &after), vec![977]);
         assert!(leftover_script("x'; rm -rf /").is_err());
     }
 

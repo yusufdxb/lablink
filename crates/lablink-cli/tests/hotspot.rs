@@ -109,6 +109,8 @@ impl Env {
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
             .env("LABLINK_SOCKET", self.root.join("run/none.sock"))
+            // An empty /proc: this machine's own connections stay out.
+            .env("LABLINK_TEST_PROC_ROOT", self.root.join("proc"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -156,12 +158,12 @@ fn read(p: &Path) -> String {
 #[test]
 fn the_feature_is_off_by_default_and_gates_every_change() {
     let e = Env::new();
+    // status and stop are not gated: see
+    // turning_the_feature_off_never_strands_a_running_network.
     for args in [
         &["hotspot", "preflight"][..],
         &["hotspot", "start", "--yes"],
-        &["hotspot", "status"],
         &["hotspot", "clients"],
-        &["hotspot", "stop"],
         &["hotspot", "restart"],
         &["hotspot", "password"],
         &["hotspot", "forget", "--yes"],
@@ -384,6 +386,71 @@ fn start_clients_password_stop_forget_end_to_end() {
     assert!(!e.bin().join("profile").exists());
     assert!(!e.state().join("fieldnet.json").exists());
     assert!(!e.argv_log().contains("horse"));
+}
+
+#[test]
+fn turning_the_feature_off_never_strands_a_running_network() {
+    let e = Env::new();
+    enable(&e);
+    let o = e.run(
+        &[
+            "hotspot",
+            "start",
+            "--yes",
+            "--ssid",
+            "LL Test",
+            "--password-stdin",
+            "--json",
+        ],
+        Some(&format!("{PSK}\n")),
+    );
+    assert_eq!(o.status.code(), Some(0), "{}{}", out(&o), err(&o));
+    assert!(e.up());
+    let o = e.run(&["feature", "disable", "field-network"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let o = e.run(&["hotspot", "status", "--json"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert_eq!(json(&o)["status"]["active"], true);
+    let o = e.run(&["hotspot", "stop"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert!(!e.up());
+    let o = e.run(&["hotspot", "restart"], None);
+    assert_eq!(o.status.code(), Some(7), "changes stay gated");
+}
+
+#[test]
+fn stop_is_refused_while_an_ssh_session_rides_on_the_hotspot() {
+    let e = Env::new();
+    enable(&e);
+    let o = e.run(
+        &[
+            "hotspot",
+            "start",
+            "--yes",
+            "--ssid",
+            "LL Test",
+            "--password-stdin",
+            "--json",
+        ],
+        Some(&format!("{PSK}\n")),
+    );
+    assert_eq!(o.status.code(), Some(0), "{}{}", out(&o), err(&o));
+    // A client at 10.77.0.23 is logged in over SSH to 10.77.0.1 (wlan1).
+    let net = e.root.join("proc/net");
+    std::fs::create_dir_all(&net).unwrap();
+    std::fs::write(
+        net.join("tcp"),
+        "  sl  local_address rem_address   st\n   0: 01004D0A:0016 17004D0A:C738 01 0\n",
+    )
+    .unwrap();
+    let o = e.run(&["hotspot", "stop"], None);
+    assert_eq!(o.status.code(), Some(7), "{}{}", out(&o), err(&o));
+    assert!(err(&o).contains("10.77.0.23 port 51000"), "{}", err(&o));
+    assert!(e.up(), "nothing was taken down");
+    std::fs::remove_file(net.join("tcp")).unwrap();
+    let o = e.run(&["hotspot", "stop"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert!(!e.up());
 }
 
 #[test]

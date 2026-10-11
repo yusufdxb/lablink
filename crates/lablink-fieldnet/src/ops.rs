@@ -25,6 +25,7 @@ pub struct PlanArgs {
     /// `wpa2` or `wpa3`.
     pub security: String,
     pub allow_internet_sharing: bool,
+    pub allow_routing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +127,7 @@ pub fn plan(
         subnet,
         security,
         allow_internet_sharing: args.allow_internet_sharing,
+        allow_routing: args.allow_routing,
     };
     let facts = crate::host::gather(sys);
     let sites = site_networks(cfg);
@@ -179,9 +181,12 @@ pub fn classify_clients(
         .iter()
         .map(|c| {
             let ip = c.ip.to_string();
-            let d = devices
-                .iter()
-                .find(|d| d.ip.as_deref() == Some(ip.as_str()) && d.visiting.is_some());
+            // An address alone proves nothing: another client can take a
+            // departed device's address (and MAC). Only a key verdict names
+            // the device.
+            let d = devices.iter().find(|d| {
+                d.ip.as_deref() == Some(ip.as_str()) && d.visiting.is_some() && names_device(d)
+            });
             let address_changed = d.is_some_and(|d| changed_since(client, &d.id, started_ms));
             ClientRow {
                 ip,
@@ -217,9 +222,20 @@ pub fn classify_clients(
     rows
 }
 
+/// A client at a device's address is shown as that device only when the
+/// daemon proved its pinned key there, or caught a different key (a
+/// mismatch, shown as such).
+fn names_device(d: &DeviceStatus) -> bool {
+    matches!(
+        d.identity,
+        IdentityState::Verified | IdentityState::Mismatch
+    )
+}
+
 fn device_state(d: &DeviceStatus) -> &'static str {
     match d {
         d if d.identity == IdentityState::Mismatch => "identity-mismatch",
+        d if d.identity != IdentityState::Verified => "discovered-untrusted",
         d if d.identity == IdentityState::Verified && d.ssh_auth == AuthState::Ok => {
             "ssh-authenticated"
         }
@@ -245,4 +261,73 @@ fn changed_since(client: &Client, id: &str, since: Option<u64>) -> bool {
                 e["kind"] == "ip_changed" && e["ts_ms"].as_u64().is_some_and(|t| t >= since)
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lablink_core::model::{DiscoveryState, NetworkState};
+
+    fn dev(identity: IdentityState, port: PortState, auth: AuthState) -> DeviceStatus {
+        DeviceStatus {
+            name: "orin".into(),
+            id: "lab/orin".into(),
+            site: "lab".into(),
+            site_name: "Lab".into(),
+            site_state: lablink_core::site::SiteState::Active,
+            label: None,
+            color: Color::Green,
+            ip: Some("10.77.0.31".into()),
+            discovery: DiscoveryState::Located,
+            network: NetworkState::Online,
+            ssh_port: port,
+            ssh_auth: auth,
+            identity,
+            latency_ms: None,
+            last_seen_ms: None,
+            username: None,
+            interface: None,
+            network_name: None,
+            via: None,
+            visiting: None,
+            monitoring: true,
+            reasons: vec![],
+            services: vec![],
+            profile: None,
+            capabilities: vec![],
+        }
+    }
+
+    #[test]
+    fn only_a_key_verdict_names_a_client() {
+        use AuthState as A;
+        use IdentityState as I;
+        use PortState as P;
+        for (identity, port, auth, names, state) in [
+            (I::Verified, P::Open, A::Ok, true, "ssh-authenticated"),
+            (I::Verified, P::Open, A::Unknown, true, "ssh-available"),
+            (I::Verified, P::Closed, A::Unknown, true, "ssh-unreachable"),
+            (I::Verified, P::Unknown, A::Unknown, true, "registered"),
+            (I::Mismatch, P::Open, A::Unknown, true, "identity-mismatch"),
+            // Same address, SSH closed or key not seen: not the device.
+            (
+                I::Unverified,
+                P::Open,
+                A::Unknown,
+                false,
+                "discovered-untrusted",
+            ),
+            (
+                I::Unknown,
+                P::Closed,
+                A::Unknown,
+                false,
+                "discovered-untrusted",
+            ),
+        ] {
+            let d = dev(identity, port, auth);
+            assert_eq!(names_device(&d), names, "{identity:?} {port:?}");
+            assert_eq!(device_state(&d), state, "{identity:?} {port:?}");
+        }
+    }
 }

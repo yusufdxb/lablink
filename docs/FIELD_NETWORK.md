@@ -69,25 +69,30 @@ reads.
 | `lablink hotspot capabilities` | Adapters, AP/WPA2/WPA3 support, NetworkManager permissions; on macOS, the Internet Sharing steps | nothing |
 | `lablink hotspot preflight [opts]` | Everything start would check, and what starting would disconnect | nothing |
 | `lablink hotspot start [opts]` | Runs preflight, asks you to accept its warnings, then starts | NetworkManager profile, adapter, LabLink config (site) |
-| `lablink hotspot status` | Whether it runs (NetworkManager's word, not LabLink's record), settings, forwarding, clients | nothing |
+| `lablink hotspot status` | Whether it runs (NetworkManager's word, not LabLink's record), settings, forwarding, other uplinks, clients. Works with the feature off | nothing |
 | `lablink hotspot clients` | Who is on it and what LabLink knows about each | nothing |
 | `lablink hotspot password [--rotate \| --stdin]` | Print the password (read from NetworkManager), or store a new generated one (`--rotate`) or one read from stdin | profile secret (with an option) |
 | `lablink hotspot restart` | Re-apply the running hotspot after a password change | adapter |
-| `lablink hotspot stop [--no-restore]` | Stop it and reconnect the network the adapter had before | adapter |
+| `lablink hotspot stop [--no-restore]` | Stop it and reconnect the network the adapter had before. Works with the feature off, so turning the feature off never strands a running hotspot. Refused while an SSH session depends on the adapter | adapter |
 | `lablink hotspot forget` | Delete LabLink's profile and password. Refused while running | NetworkManager profile |
 
 Start and preflight options: `--interface`, `--ssid`, `--subnet` (private
-IPv4, /22 to /28), `--security wpa2|wpa3`, `--allow-internet-sharing`.
+IPv4, /22 to /28), `--security wpa2|wpa3`, `--allow-internet-sharing`,
+`--allow-routing`.
 `start` also takes `--yes` (accept warnings without asking; blockers are
 never accepted), `--password-stdin` and `--no-site`. Every command takes
 `--json`. Exit codes follow the rest of LabLink: 0 success, 1 failure, 2
-usage, 7 refused (a preflight blocker, or the feature is off).
+usage, 7 refused (a preflight blocker, the feature is off, the findings
+changed while you were answering the prompt, or `stop`/`restart` would cut
+an SSH session).
 
 In the app, the **Field Network** tab shows the same capabilities, status
 and clients. **Check** runs preflight for the settings in the form;
 **Start** is enabled only after a check of exactly those settings found no
-blocker and you ticked every warning. The app checks again just before
-starting and refuses if anything changed.
+blocker and you ticked every warning. The **Internet sharing** and
+**Routing** boxes are the two overrides. The app checks again just before
+starting and refuses if any warning's text changed. With the feature off,
+the tab still shows a running hotspot's status and a **Stop** button.
 
 ## What start does
 
@@ -129,12 +134,12 @@ Each finding has a level (`block`, `warn`, `info`) and a stable code that
 | `adapter` | block / info | No capable adapter, the named one cannot host WPA2, or which of several is used |
 | `security` | block / warn | WPA3 requested on an adapter without SAE (block) or where it cannot be verified (warn) |
 | `ssid` | block | An SSID that is empty, too long, or has characters NetworkManager's editor would misread |
-| `remote-session` | block / info | This command runs over SSH through the adapter, or over SSH whose interface cannot be determined |
+| `remote-session` | block / info | An SSH session (this command's, or any inbound connection to port 22 or this session's SSH port, read from `/proc/net/tcp` and `tcp6`) arrives through the adapter, through a tunnel or other virtual interface, or through an interface LabLink cannot identify. No override. Info when it arrives over another physical adapter |
 | `disconnect` | warn | The adapter leaves its current network while the hotspot runs |
 | `uplink` | warn | That network is this machine's only internet uplink |
 | `internet-sharing` | block / warn | Another uplink exists, so shared mode would NAT clients onto it. Blocked unless `--allow-internet-sharing` |
-| `forwarding` | warn / info | Shared mode enables IPv4 forwarding and this machine routes to other networks (VPN, Docker, LAN) |
-| `sessions` | warn / info | SSH sessions into this machine, or other TCP connections, that arrive over the adapter and will drop |
+| `forwarding` | block / info | Shared mode enables IPv4 forwarding and this machine routes to other networks (VPN, Docker, LAN). Blocked unless `--allow-routing` |
+| `sessions` | info | Other (non-SSH) TCP connections that arrive over the adapter and will drop |
 | `equipment` | warn | Registered devices this machine reaches over the adapter (from the daemon), or the daemon is not running so this is unknown |
 | `subnet` | block | The requested subnet overlaps an attached network, a route in any table, a container bridge, the CGNAT range, or another LabLink site; or no free default exists |
 
@@ -142,11 +147,25 @@ The default subnet is the first free `10.77.x.0/24` to `10.79.x.0/24`.
 
 ### Remote sessions
 
-If you run `lablink hotspot start` over SSH and that session arrives
-through the adapter, starting would cut the session you would need to
-undo it. Preflight refuses, and there is no override: an SSH connection is
-not a rollback path. Run it at the machine. If LabLink cannot tell which
-interface carries your SSH session, it refuses as well.
+Starting, stopping or restarting the hotspot changes the adapter, and an
+SSH session that rides on it would drop, possibly the one you would need to
+undo the change. An SSH connection is not a rollback path, so LabLink
+refuses, with no override, when:
+
+- this command runs over SSH (`SSH_CONNECTION`) and that session arrives
+  through the adapter;
+- that session, or any established inbound SSH connection (port 22, or
+  this session's server port, from `/proc/net/tcp` and `/proc/net/tcp6`),
+  arrives through a tunnel, VPN, bridge or other virtual interface, which
+  may itself ride on the adapter;
+- LabLink cannot tell which interface carries it.
+
+A session over another physical adapter (Ethernet, a second Wi-Fi) is
+noted, not refused. Run the command at the machine itself. LabLink does not
+offer a timed confirm-and-roll-back mode for remote use.
+
+Not detected: sessions over UDP (mosh), and SSH servers on a port other
+than 22 unless this command itself runs over that session.
 
 ### Internet sharing and forwarding
 
@@ -159,10 +178,14 @@ so:
   `--allow-internet-sharing` (the **Internet sharing** box in the app).
 - With other routed networks (a VPN, Docker bridges, a lab LAN), clients
   could reach them unless your firewall blocks forwarding from the hotspot
-  interface. That is a warning, naming the routes.
+  interface. That is a blocker, naming the routes, unless you pass
+  `--allow-routing` (the **Routing** box in the app).
 - `start` and `status` report whether forwarding was off before and is on
   now. NetworkManager may leave it on after the hotspot stops; `status`
   shows it, and turning it off is your decision.
+- If another uplink appears while the hotspot runs (you plug in Ethernet),
+  NetworkManager's NAT may start sharing it. `status` prints a warning
+  naming it.
 
 ## Clients and device states
 
@@ -174,7 +197,7 @@ nothing.
 | State | Meaning |
 |---|---|
 | `discovered-untrusted` | Something with an address on the hotspot. LabLink knows nothing about it and grants it nothing |
-| `registered` | A registered device, proven by its pinned host key, whose SSH state is not known yet |
+| `registered` | A registered device, proven by its pinned host key, whose SSH state is not known yet. Without a key verdict from the daemon, a client stays `discovered-untrusted` even if its name or address matches |
 | `ssh-available` | Registered, identity verified, SSH port open |
 | `ssh-authenticated` | Registered, identity verified, your SSH login works |
 | `ssh-unreachable` | Registered, SSH port closed or filtered |
@@ -297,6 +320,10 @@ The full threat model is in [THREAT_MODEL.md](THREAT_MODEL.md#field-network-and-
   default for that reason. Some older clients cannot join WPA3.
 - Client discovery is passive. A client that has not sent traffic yet may
   not appear for a few seconds.
+- The remote-session guard does not see UDP sessions (mosh) or SSH
+  servers on a non-standard port that this command does not run over.
+- Older LabLink builds reject a config written by this one (the new
+  `features` and roaming-site keys). Downgrading needs those keys removed.
 - DHCP lease details (hostnames) appear only when your user can read
   NetworkManager's lease file.
 - Forwarding that NetworkManager enables may stay enabled after stop.

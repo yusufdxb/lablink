@@ -565,9 +565,10 @@ fn field(client: &Client, config: &std::path::Path, cmd: FieldCmd) -> FieldEvent
     let on = features(config).field_network;
     match cmd {
         FieldCmd::Refresh => {
-            // Capabilities are read-only and shown even with the feature off.
+            // Capabilities and status are read-only and shown even with the
+            // feature off, so a network started earlier can still be stopped.
             let caps = lablink_fieldnet::capabilities(&sys);
-            let status = (on && caps.backend == "networkmanager")
+            let status = (caps.backend == "networkmanager")
                 .then(|| nm::status(&sys, &state_dir).map_err(|e| e.to_string()));
             let clients = match &status {
                 Some(Ok(s)) if s.active => ops::classify_clients(
@@ -584,10 +585,11 @@ fn field(client: &Client, config: &std::path::Path, cmd: FieldCmd) -> FieldEvent
                 clients,
             }))
         }
-        _ if !on => match cmd {
+        // Stop is never gated: turning the feature off must not strand a
+        // running network.
+        _ if !on && !matches!(cmd, FieldCmd::Stop { .. }) => match cmd {
             FieldCmd::Preflight(a) => FieldEvent::Preflight(a, Err(FIELD_OFF.into())),
             FieldCmd::Start { .. } => FieldEvent::Started(Err(FIELD_OFF.into())),
-            FieldCmd::Stop { .. } => FieldEvent::Stopped(Err(FIELD_OFF.into())),
             _ => FieldEvent::Password(Err(FIELD_OFF.into())),
         },
         FieldCmd::Preflight(args) => {
@@ -645,7 +647,7 @@ fn field_start(
     let unseen: Vec<&str> =
         p.pf.warnings()
             .iter()
-            .filter(|w| !accepted.iter().any(|a| a == w.code))
+            .filter(|w| !accepted.contains(&w.message))
             .map(|w| w.message.as_str())
             .collect();
     if !unseen.is_empty() {
@@ -907,10 +909,9 @@ mod tests {
             panic!("start must be refused");
         };
         assert!(m.contains("optional feature"), "{m}");
-        assert!(matches!(
-            field(&client, &cfg, FieldCmd::Stop { restore: true }),
-            FieldEvent::Stopped(Err(_))
-        ));
+        // Stop is deliberately not gated (a network started before the
+        // feature was turned off must stay stoppable); it is not run here
+        // because it would act on this machine's real state.
         assert!(matches!(
             field(&client, &cfg, FieldCmd::Password),
             FieldEvent::Password(Err(_))

@@ -6,7 +6,7 @@ use crate::system::{Cmd, Os, System};
 use ipnet::Ipv4Net;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -94,10 +94,12 @@ impl Route {
     }
 }
 
+/// An established TCP connection. IPv4-mapped IPv6 addresses are shown as
+/// IPv4.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TcpConn {
-    pub local: (Ipv4Addr, u16),
-    pub remote: (Ipv4Addr, u16),
+    pub local: (IpAddr, u16),
+    pub remote: (IpAddr, u16),
 }
 
 /// The session this command runs in, from `$SSH_CONNECTION`.
@@ -108,6 +110,24 @@ pub struct SshSession {
     /// with a `%interface` scope).
     pub server: String,
     pub server_port: u16,
+}
+
+impl SshSession {
+    /// The client's address and port, to recognize this session among the
+    /// established connections.
+    fn client_endpoint(&self) -> Option<(IpAddr, u16)> {
+        let (ip, port) = self.client.split_once(" port ")?;
+        let ip = ip.split('%').next()?.parse::<IpAddr>().ok()?;
+        Some((unmap(ip), port.parse().ok()?))
+    }
+}
+
+/// `::ffff:a.b.c.d` as `a.b.c.d`.
+fn unmap(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    }
 }
 
 /// Which interface carries the SSH session this command runs in.
@@ -130,8 +150,8 @@ pub struct HostFacts {
     pub wifi: Vec<WifiAdapter>,
     pub active: Vec<ActiveConnection>,
     pub addresses: Vec<Address>,
-    /// IPv6 addresses as (interface, address), only to place an SSH
-    /// session that arrived over IPv6.
+    /// IPv6 addresses as (interface, address), only to place SSH sessions
+    /// that arrived over IPv6.
     pub addresses6: Vec<(String, String)>,
     pub routes: Vec<Route>,
     pub ssh_session: Option<SshSession>,
@@ -178,6 +198,76 @@ impl HostFacts {
             Some(i) => SessionPath::Interface(i),
             None => SessionPath::Unknown(s.server.clone()),
         }
+    }
+
+    /// The interface holding a local address, IPv4 or IPv6.
+    pub fn interface_of_addr(&self, ip: IpAddr) -> Option<&str> {
+        match ip {
+            IpAddr::V4(v4) => self.interface_of(v4),
+            IpAddr::V6(v6) => self
+                .addresses6
+                .iter()
+                .find(|(_, a)| a.parse::<Ipv6Addr>().ok() == Some(v6))
+                .map(|(i, _)| i.as_str()),
+        }
+    }
+
+    /// A physical Ethernet or Wi-Fi device, as NetworkManager types it.
+    /// Tunnels (tailscale, WireGuard, VPN), bridges, loopback and unknown
+    /// names are not: their traffic may ride on any adapter.
+    pub fn is_physical(&self, interface: &str) -> bool {
+        self.devices
+            .iter()
+            .any(|d| d.name == interface && (d.kind == "ethernet" || d.kind == "wifi"))
+    }
+
+    /// SSH sessions into this machine that taking `adapter` over would cut,
+    /// or might cut because the path they take cannot be verified: our own
+    /// session (from `$SSH_CONNECTION`) and established inbound connections
+    /// to the SSH port (22, and our own session's port). Each entry says
+    /// why. A session through another physical adapter is not at risk.
+    pub fn sessions_at_risk(&self, adapter: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut own_client = None;
+        if let Some(s) = &self.ssh_session {
+            own_client = s.client_endpoint();
+            match self.session_path() {
+                SessionPath::Local => {}
+                SessionPath::Interface(i) if i == adapter => out.push(format!(
+                    "this command runs over SSH through {adapter}"
+                )),
+                SessionPath::Interface(i) if self.is_physical(&i) => {}
+                SessionPath::Interface(i) => out.push(format!(
+                    "this command runs over SSH through {i}, a tunnel or virtual interface that may itself ride on {adapter}"
+                )),
+                SessionPath::Unknown(addr) => out.push(format!(
+                    "this command runs over SSH (to {addr}) on an interface LabLink cannot identify"
+                )),
+            }
+        }
+        let mut ports = vec![22];
+        if let Some(s) = &self.ssh_session {
+            ports.push(s.server_port);
+        }
+        for c in &self.established {
+            if !ports.contains(&c.local.1) || own_client == Some(c.remote) {
+                continue;
+            }
+            let peer = format!("{} port {}", c.remote.0, c.remote.1);
+            match self.interface_of_addr(c.local.0) {
+                Some(i) if i == adapter => {
+                    out.push(format!("an SSH session from {peer} arrives over {adapter}"))
+                }
+                Some(i) if self.is_physical(i) => {}
+                Some(i) => out.push(format!(
+                    "an SSH session from {peer} arrives through {i}, a tunnel or virtual interface that may itself ride on {adapter}"
+                )),
+                None => out.push(format!(
+                    "an SSH session from {peer} arrives on an interface LabLink cannot identify"
+                )),
+            }
+        }
+        out
     }
 
     pub fn default_routes(&self) -> Vec<&Route> {
@@ -286,7 +376,14 @@ pub fn gather(sys: &dyn System) -> HostFacts {
         Ok(out) if out.ok() => facts.addresses = parse_addresses(&out.stdout),
         _ => notes.push("cannot list addresses (ip -4 addr)".into()),
     }
-    if facts.ssh_session.is_some() {
+    if let Some(t) = sys.read_file(Path::new("/proc/net/tcp")) {
+        facts.established = parse_proc_tcp(&t);
+    }
+    if let Some(t) = sys.read_file(Path::new("/proc/net/tcp6")) {
+        facts.established.extend(parse_proc_tcp(&t));
+    }
+    let v6_in_use = facts.established.iter().any(|c| c.local.0.is_ipv6());
+    if facts.ssh_session.is_some() || v6_in_use {
         match sys.run(&Cmd::new("ip", &["-6", "-o", "addr", "show"])) {
             Ok(out) if out.ok() => facts.addresses6 = parse_addresses6(&out.stdout),
             _ => notes.push("cannot list IPv6 addresses (ip -6 addr)".into()),
@@ -298,9 +395,6 @@ pub fn gather(sys: &dyn System) -> HostFacts {
     )) {
         Ok(out) if out.ok() => facts.routes = parse_routes(&out.stdout),
         _ => notes.push("cannot list routes (ip -4 route)".into()),
-    }
-    if let Some(t) = sys.read_file(Path::new("/proc/net/tcp")) {
-        facts.established = parse_proc_tcp(&t);
     }
     facts.ip_forward = sys
         .read_file(Path::new("/proc/sys/net/ipv4/ip_forward"))
@@ -493,13 +587,27 @@ pub fn parse_routes(text: &str) -> Vec<Route> {
         .collect()
 }
 
-/// Established connections from `/proc/net/tcp` (state 01).
+/// Established connections from `/proc/net/tcp` or `/proc/net/tcp6`
+/// (state 01). Addresses are 32-bit words in host (little-endian) order.
 pub fn parse_proc_tcp(text: &str) -> Vec<TcpConn> {
-    fn endpoint(s: &str) -> Option<(Ipv4Addr, u16)> {
+    fn word(h: &str) -> Option<u32> {
+        u32::from_str_radix(h, 16).ok().map(u32::swap_bytes)
+    }
+    fn endpoint(s: &str) -> Option<(IpAddr, u16)> {
         let (ip, port) = s.split_once(':')?;
-        let ip = u32::from_str_radix(ip, 16).ok()?;
         let port = u16::from_str_radix(port, 16).ok()?;
-        Some((Ipv4Addr::from(ip.swap_bytes()), port))
+        let ip = match ip.len() {
+            8 => IpAddr::V4(Ipv4Addr::from(word(ip)?)),
+            32 => {
+                let mut b = [0u8; 16];
+                for (i, chunk) in b.chunks_mut(4).enumerate() {
+                    chunk.copy_from_slice(&word(ip.get(i * 8..i * 8 + 8)?)?.to_be_bytes());
+                }
+                unmap(IpAddr::V6(Ipv6Addr::from(b)))
+            }
+            _ => return None,
+        };
+        Some((ip, port))
     }
     text.lines()
         .skip(1)
@@ -630,8 +738,23 @@ mod tests {
         let t = "  sl  local_address rem_address   st\n   0: A808A8C0:0016 1408A8C0:C738 01 0\n   1: A808A8C0:0016 1408A8C0:C739 06 0\n";
         let c = parse_proc_tcp(t);
         assert_eq!(c.len(), 1);
-        assert_eq!(c[0].local, (Ipv4Addr::new(192, 168, 8, 168), 22));
-        assert_eq!(c[0].remote, (Ipv4Addr::new(192, 168, 8, 20), 51000));
+        assert_eq!(c[0].local, (Ipv4Addr::new(192, 168, 8, 168).into(), 22));
+        assert_eq!(c[0].remote, (Ipv4Addr::new(192, 168, 8, 20).into(), 51000));
+    }
+
+    #[test]
+    fn proc_tcp6_rows_including_ipv4_mapped() {
+        // fe80::aa:bbff:fecc:dd01 port 22 <- fe80::1 port 51000, and
+        // ::ffff:192.168.8.168 port 22 <- ::ffff:192.168.8.20 port 51001.
+        let t = "  sl  local_address                         remote_address                        st\n   0: 000080FE00000000FFBBAA0001DDCCFE:0016 000080FE000000000000000001000000:C738 01 0\n   1: 0000000000000000FFFF0000A808A8C0:0016 0000000000000000FFFF00001408A8C0:C739 01 0\n";
+        let c = parse_proc_tcp(t);
+        assert_eq!(c.len(), 2);
+        assert_eq!(
+            c[0].local,
+            ("fe80::aa:bbff:fecc:dd01".parse::<IpAddr>().unwrap(), 22)
+        );
+        assert_eq!(c[0].remote, ("fe80::1".parse::<IpAddr>().unwrap(), 51000));
+        assert_eq!(c[1].local, (Ipv4Addr::new(192, 168, 8, 168).into(), 22));
     }
 
     #[test]

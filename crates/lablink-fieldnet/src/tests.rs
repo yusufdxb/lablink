@@ -18,6 +18,7 @@ fn req() -> Request {
         subnet: None,
         security: Security::Wpa2,
         allow_internet_sharing: false,
+        allow_routing: true,
     }
 }
 
@@ -478,6 +479,29 @@ fn restart_reuses_the_profile_and_keeps_the_password() {
         &format!("nmcli --wait 45 connection up uuid {HOME}"),
         "activated\n",
     );
+    // Over SSH through the hotspot's adapter, stop and restart are refused
+    // and nothing is taken down.
+    f.set_env("SSH_CONNECTION", "192.168.8.20 51000 192.168.8.168 22");
+    let n = f.lines().len();
+    for r in [
+        nm::stop(&f, dir.path(), true).map(|_| ()),
+        nm::restart(&f, dir.path()),
+    ] {
+        match r {
+            Err(e @ crate::Error::Refused(_)) => {
+                assert!(e.to_string().contains("over SSH through wlan0"))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(
+        !f.lines()[n..]
+            .iter()
+            .any(|c| c.contains("connection down") || c.contains("connection up")),
+        "{:?}",
+        &f.lines()[n..]
+    );
+    f.clear_env("SSH_CONNECTION");
     let s = nm::stop(&f, dir.path(), true).unwrap();
     assert!(s.was_active);
     assert_eq!(s.restored.as_deref(), Some("Reconnected 'Home WiFi'."));
@@ -627,6 +651,14 @@ fn status_reports_out_of_sync_when_stopped_elsewhere() {
     assert_eq!(s.clients.len(), 1);
     let json = serde_json::to_string(&s).unwrap();
     assert!(!json.contains("Correct-Horse"));
+    assert!(s.uplinks.is_empty(), "{:?}", s.uplinks);
+    // A cable is plugged in while it runs: shared mode NATs clients onto
+    // it, and status says so.
+    f.ok(
+        "ip -4 -o route show table all",
+        "default via 10.1.1.254 dev eno1 proto dhcp metric 100\n10.77.0.0/24 dev wlan0 proto kernel scope link src 10.77.0.1\n",
+    );
+    assert_eq!(nm::status(&f, dir.path()).unwrap().uplinks, vec!["eno1"]);
     // Someone stopped it from the desktop's network menu.
     f.ok(
         "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show --active",

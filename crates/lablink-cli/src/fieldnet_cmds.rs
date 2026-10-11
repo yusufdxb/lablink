@@ -7,6 +7,7 @@
 //! preflight; warnings need `--yes` or a typed confirmation, and blockers
 //! (such as cutting the SSH session that runs the command) refuse.
 
+use crate::output::printable;
 use crate::{print_json, Fail, R};
 use clap::Subcommand;
 use lablink_core::client::Client;
@@ -37,6 +38,11 @@ pub struct StartArgs {
     /// (NetworkManager shared mode NATs them). Off by default.
     #[arg(long)]
     allow_internet_sharing: bool,
+    /// Accept that hotspot clients can be routed to the other networks this machine reaches
+    /// (VPN, containers, LAN): NetworkManager's shared mode turns on IPv4 forwarding. Off by
+    /// default; without it such routes refuse the start.
+    #[arg(long)]
+    allow_routing: bool,
     /// [default: $XDG_CONFIG_HOME/lablink/config.yaml]
     #[arg(long)]
     config: Option<PathBuf>,
@@ -210,6 +216,7 @@ fn plan(
         subnet: args.subnet.clone(),
         security: args.security.clone(),
         allow_internet_sharing: args.allow_internet_sharing,
+        allow_routing: args.allow_routing,
     };
     ops::plan(sys, client, cfg, &state_dir(), &a).map_err(|e| match e {
         ops::PlanError::BadRequest(m) => Fail::new(exit::USAGE, "bad_request", m),
@@ -225,17 +232,28 @@ fn print_findings(pf: &preflight::Preflight) {
             pf.security.label()
         );
     }
+    // Messages quote NetworkManager connection names, which can carry
+    // whatever bytes a Wi-Fi network once advertised as its name.
     for f in &pf.findings {
         let tag = match f.level {
             Level::Block => "REFUSED",
             Level::Warn => "WARNING",
             Level::Info => "note",
         };
+        let m = printable(&f.message);
         match f.override_flag {
-            Some(flag) => println!("  {tag}: {} (accept with {flag})", f.message),
-            None => println!("  {tag}: {}", f.message),
+            Some(flag) => println!("  {tag}: {m} (accept with {flag})"),
+            None => println!("  {tag}: {m}"),
         }
     }
+}
+
+/// What a confirmation covers: every finding, by level, code and text.
+fn findings_key(pf: &preflight::Preflight) -> Vec<(String, &'static str, String)> {
+    pf.findings
+        .iter()
+        .map(|f| (format!("{:?}", f.level), f.code, f.message.clone()))
+        .collect()
 }
 
 fn confirm(pf: &preflight::Preflight, yes: bool) -> bool {
@@ -323,8 +341,26 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
                     .unwrap_err(),
                 ));
             }
+            let prompted = !json && !yes && p.pf.needs_confirmation();
             let confirmed =
                 !json && confirm(&p.pf, yes) || json && (yes || !p.pf.needs_confirmation());
+            // The answer may come minutes later: check again, and start only
+            // if what the user accepted is still exactly what applies.
+            let p = if confirmed && prompted {
+                let again = plan(&sys, client, &cfg, &args)?;
+                if findings_key(&again.pf) != findings_key(&p.pf) {
+                    println!("\nThe checks changed while you were deciding:");
+                    print_findings(&again.pf);
+                    return Err(Fail::new(
+                        exit::REFUSED,
+                        "changed",
+                        "not started: review the new checks and run `lablink hotspot start` again",
+                    ));
+                }
+                again
+            } else {
+                p
+            };
             let r = nm::start(
                 &sys,
                 &state_dir(),
@@ -351,7 +387,7 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
                 if let Some(prev) = &r.previous {
                     println!(
                         "'{}' is disconnected until `lablink hotspot stop`.",
-                        prev.name
+                        printable(&prev.name)
                     );
                 }
                 if r.ip_forward_after == Some(true) && r.ip_forward_before == Some(false) {
@@ -366,8 +402,9 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
             }
             Ok(exit::OK)
         }
-        HotspotAction::Status { json, config } => {
-            require_feature(&config_path(config))?;
+        // Status and stop work with the feature off, so turning it off
+        // never strands a running network.
+        HotspotAction::Status { json, config: _ } => {
             let s = nm::status(&sys, &state_dir()).map_err(fail)?;
             if json {
                 print_json(&json!({ "schema_version": 1, "status": s }));
@@ -416,7 +453,6 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
             Ok(exit::OK)
         }
         HotspotAction::Stop { no_restore, json } => {
-            require_feature(&config_path(None))?;
             let r = nm::stop(&sys, &state_dir(), !no_restore).map_err(fail)?;
             if json {
                 print_json(&json!({ "schema_version": 1, "stopped": r }));
@@ -430,7 +466,7 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
                     }
                 );
                 if let Some(m) = r.restored {
-                    println!("{m}");
+                    println!("{}", printable(&m));
                 }
             }
             Ok(exit::OK)
@@ -624,7 +660,7 @@ fn print_status(s: &nm::Status) {
     );
     println!("  security {}", s.security.unwrap_or("?"));
     if let Some(p) = &st.previous {
-        println!("  restores '{}' when stopped", p.name);
+        println!("  restores '{}' when stopped", printable(&p.name));
     }
     if let Some(f) = s.ip_forward {
         println!(
@@ -635,6 +671,12 @@ fn print_status(s: &nm::Status) {
                     format!(" (was {} before the hotspot)", if b { "on" } else { "off" }),
                 _ => String::new(),
             }
+        );
+    }
+    if !s.uplinks.is_empty() {
+        println!(
+            "  WARNING: hotspot clients can reach the internet through {} (NetworkManager's shared mode NATs them). Stop the hotspot if that is not intended.",
+            s.uplinks.join(", ")
         );
     }
     if s.active {

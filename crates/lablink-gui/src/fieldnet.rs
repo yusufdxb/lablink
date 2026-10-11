@@ -17,6 +17,7 @@ pub struct Form {
     pub subnet: String,
     pub wpa3: bool,
     pub internet: bool,
+    pub routing: bool,
 }
 
 impl Form {
@@ -28,6 +29,7 @@ impl Form {
             subnet: opt(&self.subnet),
             security: if self.wpa3 { "wpa3" } else { "wpa2" }.into(),
             allow_internet_sharing: self.internet,
+            allow_routing: self.routing,
         }
     }
 }
@@ -38,7 +40,9 @@ pub struct FieldPanel {
     pub form: Form,
     /// The last preflight and the form it was run for.
     pub checked: Option<(Form, Result<Box<Preflight>, String>)>,
-    /// Warning codes ticked by the user for the current preflight.
+    /// Warnings ticked by the user for the current preflight, by their full
+    /// text: a warning whose content changes (another connection, more
+    /// devices) must be accepted again.
     pub accepted: Vec<String>,
     pub busy: Option<&'static str>,
     pub message: Option<(bool, String)>,
@@ -136,7 +140,7 @@ pub fn may_start(p: &FieldPanel) -> bool {
         && pf
             .warnings()
             .iter()
-            .all(|w| p.accepted.iter().any(|a| a == w.code))
+            .all(|w| p.accepted.contains(&w.message))
 }
 
 impl FieldPanel {
@@ -235,6 +239,17 @@ impl FieldPanel {
         ui.separator();
         if !snap.feature_on {
             ui.label("The Field Network is an optional feature and is off.");
+            // Turning the feature off never strands a running network.
+            if let Some(Ok(s)) = &snap.status {
+                if s.active {
+                    ui.colored_label(
+                        view::YELLOW,
+                        "It is still running: it was started before the feature was turned off.",
+                    );
+                    status(ui, s);
+                    self.stop_controls(ui, actions);
+                }
+            }
             if ui.button("Turn it on in Settings").clicked() {
                 actions.push(Action::OpenSettings);
             }
@@ -280,6 +295,10 @@ impl FieldPanel {
         ui.strong(format!("Clients ({})", snap.clients.len()));
         clients(ui, snap);
         ui.separator();
+        self.stop_controls(ui, actions);
+    }
+
+    fn stop_controls(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.restore, "Reconnect the previous network");
             if ui
@@ -334,6 +353,12 @@ impl FieldPanel {
             ui.checkbox(
                 &mut self.form.internet,
                 "Let clients reach the internet through this machine (NAT)",
+            );
+            ui.end_row();
+            ui.label("Routing");
+            ui.checkbox(
+                &mut self.form.routing,
+                "Let clients reach the other networks this machine routes to (VPN, containers, LAN)",
             );
             ui.end_row();
         });
@@ -516,6 +541,17 @@ fn status(ui: &mut egui::Ui, s: &lablink_fieldnet::nm::Status) {
                 None => "unknown",
             });
             ui.end_row();
+            if !s.uplinks.is_empty() {
+                ui.label("Internet");
+                ui.colored_label(
+                    view::YELLOW,
+                    format!(
+                        "clients can reach the internet through {} (NAT); stop the network if that is not intended",
+                        s.uplinks.join(", ")
+                    ),
+                );
+                ui.end_row();
+            }
         });
 }
 
@@ -587,19 +623,22 @@ fn findings(ui: &mut egui::Ui, pf: &Preflight, accepted: &mut Vec<String>) {
                     Some("--allow-internet-sharing") => {
                         " (tick Internet sharing above only if you mean to share it)"
                     }
+                    Some("--allow-routing") => {
+                        " (tick Routing above only if clients may reach those networks)"
+                    }
                     _ => "",
                 };
                 ui.colored_label(view::RED, format!("Refused: {}{how}", f.message));
             }
             preflight::Level::Warn => {
-                let mut on = accepted.iter().any(|a| a == f.code);
+                let mut on = accepted.contains(&f.message);
                 if ui
                     .checkbox(&mut on, RichText::new(&f.message).color(view::YELLOW))
                     .changed()
                 {
-                    accepted.retain(|a| a != f.code);
+                    accepted.retain(|a| *a != f.message);
                     if on {
-                        accepted.push(f.code.to_string());
+                        accepted.push(f.message.clone());
                     }
                 }
             }
@@ -674,6 +713,19 @@ mod tests {
         assert!(may_start(&p));
         p.form.ssid = "Other".into();
         assert!(!may_start(&p), "settings changed since the check");
+    }
+
+    #[test]
+    fn an_accepted_warning_whose_content_changed_must_be_accepted_again() {
+        let mut p = FieldPanel::default();
+        let mut w = finding(PLevel::Warn, "equipment");
+        w.message = "1 registered device(s) are reached over wlan0: orin".into();
+        p.checked = Some((p.form.clone(), Ok(pf(vec![w.clone()]))));
+        p.accepted.push(w.message.clone());
+        assert!(may_start(&p));
+        w.message = "2 registered device(s) are reached over wlan0: orin, go2".into();
+        p.checked = Some((p.form.clone(), Ok(pf(vec![w]))));
+        assert!(!may_start(&p), "same code, different content");
     }
 
     #[test]

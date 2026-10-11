@@ -672,6 +672,7 @@ fn run(cli: Cli, client: &Client) -> R {
             | Cmd::Adopt { .. }
             | Cmd::Doctor { .. }
             | Cmd::CopyId { .. }
+            | Cmd::Ros { .. }
     );
     if gated
         || matches!(

@@ -229,6 +229,17 @@ impl System for RealSystem {
     }
 
     fn read_file(&self, path: &Path) -> Option<String> {
+        // Debug builds only: end-to-end tests of the binary point `/proc`
+        // reads at a fixture directory, so this machine's own connections
+        // (an SSH session into the build host) cannot change their outcome.
+        // Release builds always read the real `/proc`.
+        #[cfg(debug_assertions)]
+        if let (Some(root), Ok(rest)) = (
+            std::env::var_os("LABLINK_TEST_PROC_ROOT"),
+            path.strip_prefix("/proc"),
+        ) {
+            return std::fs::read_to_string(Path::new(&root).join(rest)).ok();
+        }
         std::fs::read_to_string(path).ok()
     }
 
@@ -287,6 +298,10 @@ impl FakeSystem {
 
     pub fn set_env(&self, key: &str, value: &str) {
         self.vars.lock().unwrap().insert(key.into(), value.into());
+    }
+
+    pub fn clear_env(&self, key: &str) {
+        self.vars.lock().unwrap().remove(key);
     }
 
     pub fn calls(&self) -> Vec<Cmd> {

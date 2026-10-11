@@ -17,11 +17,15 @@ proof limits in each guide.
 - Field Network ([docs/FIELD_NETWORK.md](docs/FIELD_NETWORK.md)):
   `lablink hotspot capabilities|preflight|start|status|clients|password|restart|stop|forget`.
   A WPA2 (default) or WPA3 hotspot through NetworkManager, offline by
-  default; WEP and open refused. Read-only preflight with blockers (own SSH
-  session over the adapter, another uplink without
-  `--allow-internet-sharing`, subnet conflicts, missing polkit permission)
-  and warnings (what disconnects, forwarding exposure, registered devices
-  and SSH sessions that would lose this machine). NetworkManager checkpoint
+  default; WEP and open refused. Read-only preflight with blockers (an SSH
+  session, this command's or inbound, that rides on the adapter, a tunnel
+  or an unknown interface; another uplink without
+  `--allow-internet-sharing`; routes to other networks without
+  `--allow-routing`; subnet conflicts; missing polkit permission) and
+  warnings (what disconnects, registered devices that would lose this
+  machine). `stop` and `restart` refuse while an SSH session depends on the
+  adapter, and stay available with the feature off; `status` warns about
+  uplinks that appear while the hotspot runs. NetworkManager checkpoint
   rollback when permitted, restore of the previous connection on failure
   and on stop. Passwords go to NetworkManager on stdin only.
 - Roaming sites: the `field-network` site is an overlay on which pinned

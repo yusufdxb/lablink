@@ -23,7 +23,7 @@ appears.
 - **Read-only by default.** `inspect` reads files and `/proc`: it starts no
   ROS process and joins no DDS domain. `nodes`, `topics` and `dds-check`
   (unless `--no-graph`) briefly join the device's domain as a hidden `ros2`
-  CLI node, with `--no-daemon` so no `ros2 daemon` is left behind, under a
+  CLI node, with `--no-daemon` so no `ros2 daemon` is started, under a
   bounded `timeout`. They publish nothing.
 - **Active tests only when you ask** (`--active`, or the second
   confirmation in the app). See [Active tests](#active-tests).
@@ -46,7 +46,8 @@ appears.
 | Parsers (environment, DDS XML, `ip`, graph listings, QoS), the twelve checks and the level rules | Unit tests on recorded output (`crates/lablink-ros/src`) |
 | End to end against real ROS 2 Humble and Jazzy installations | Docker containers (`ros:humble-ros-base`, `ros:jazzy-ros-base`, with iproute2 and ping added) driven through `docker exec` instead of SSH (`crates/lablink-ros/tests/docker_ros.rs`, run with `--ignored`). This is simulation: no robot, no Wi-Fi, no real SSH |
 | CLI argument checks, feature gate, daemon-down behavior | `crates/lablink-cli/tests/ros.rs` |
-| A real robot computer (Jetson), real SSH, real Wi-Fi or a Field Network | **Not tested** |
+| Real OpenSSH, a real daemon and config-pinned host keys | One manual run (not an automated test) against two ROS 2 Humble containers running `sshd`, with a named publisher and subscriber: both devices VERIFIED by possession proof; `inspect`, `nodes`, `topics` correct; passive `dds-check` level 2 (discovery seen one way), level 3 on a rerun; `--active` level 4, all six probes PASS, no probe process left, the existing nodes kept running. This run predates the `--no-daemon` subscriber and the daemon leftover check, which are unit-tested and checked in a shell but not re-run end to end |
+| A real robot computer (Jetson), real Wi-Fi or a Field Network | **Not tested** |
 
 ## Requirements on the device
 
@@ -145,8 +146,11 @@ nothing else:
   no robot uses, `/lablink_probe_<random hex>`, in the devices' own domain
   and RMW.
 
-Every command runs under `timeout -k`. Afterwards LabLink checks both
-devices for leftover probe processes and reports any it finds. The probe
+Every command runs under `timeout -k`; the subscriber runs with
+`--no-daemon` (`ros2 topic echo` would otherwise start a `ros2 daemon`).
+Afterwards LabLink checks both devices for leftover probe processes, and
+for a `ros2 daemon` that was not running before the probe, and reports any
+it finds. The probe
 never reads or writes an existing topic and never starts, stops or
 commands a robot. It does join the robot's DDS domain for a few seconds, so
 run it when nothing safety-relevant depends on the network being quiet.

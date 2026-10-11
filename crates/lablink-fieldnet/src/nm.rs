@@ -563,6 +563,7 @@ pub fn stop(sys: &dyn System, state_dir: &Path, restore: bool) -> Result<StopRep
     };
     let was_active = is_active(sys, &uuid)?;
     if was_active {
+        refuse_cutting_sessions(sys, &st.interface, "stopping")?;
         run_ok(
             sys,
             &nmcli(&["--wait", "20", "connection", "down", "uuid", &uuid])
@@ -580,6 +581,20 @@ pub fn stop(sys: &dyn System, state_dir: &Path, restore: bool) -> Result<StopRep
         was_active,
         restored,
     })
+}
+
+/// Stopping or restarting the hotspot drops everything on its adapter. An
+/// SSH session that rides on it (or might) is refused the same way start
+/// refuses it: the operator would be cut off with no way back.
+fn refuse_cutting_sessions(sys: &dyn System, iface: &str, action: &str) -> Result<(), Error> {
+    let at_risk = host::gather(sys).sessions_at_risk(iface);
+    if at_risk.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Refused(format!(
+        "{action} the Field Network would cut {iface}, and {}. Run this at the machine itself.",
+        at_risk.join("; ")
+    )))
 }
 
 pub fn is_active(sys: &dyn System, uuid: &str) -> Result<bool, Error> {
@@ -610,6 +625,7 @@ pub fn restart(sys: &dyn System, state_dir: &Path) -> Result<(), Error> {
             "the Field Network is not running; use `lablink hotspot start`".into(),
         ));
     }
+    refuse_cutting_sessions(sys, &st.interface, "restarting")?;
     run_ok(
         sys,
         &nmcli(&[
@@ -698,6 +714,10 @@ pub struct Status {
     pub gateway: Option<Ipv4Addr>,
     pub security: Option<&'static str>,
     pub ip_forward: Option<bool>,
+    /// While it runs: other devices holding a default route. Shared mode
+    /// NATs hotspot clients onto them, so an uplink that appeared after the
+    /// start (a USB tether, a cable) shares this machine's internet.
+    pub uplinks: Vec<String>,
     pub clients: Vec<crate::clients::Client>,
 }
 
@@ -713,6 +733,7 @@ pub fn status(sys: &dyn System, state_dir: &Path) -> Result<Status, Error> {
         ip_forward: sys
             .read_file(Path::new("/proc/sys/net/ipv4/ip_forward"))
             .map(|t| t.trim() == "1"),
+        uplinks: Vec::new(),
         clients: Vec::new(),
     };
     let Some(st) = st else { return Ok(s) };
@@ -724,6 +745,20 @@ pub fn status(sys: &dyn System, state_dir: &Path) -> Result<Status, Error> {
         s.gateway = Some(crate::subnet::gateway(&net));
         if s.active {
             s.clients = crate::clients::list(sys, &st.interface, &net);
+        }
+    }
+    if s.active {
+        if let Ok(out) = sys.run(&Cmd::new(
+            "ip",
+            &["-4", "-o", "route", "show", "table", "all"],
+        )) {
+            let mut devs: Vec<String> = host::parse_routes(&out.stdout)
+                .into_iter()
+                .filter(|r| r.is_default() && r.table == "main" && r.device != st.interface)
+                .map(|r| r.device)
+                .collect();
+            devs.dedup();
+            s.uplinks = devs;
         }
     }
     Ok(s)

@@ -5,8 +5,13 @@
 //! Linux with NetworkManager hosts it (WPA2-Personal by default, WPA3 as
 //! an opt-in, never WEP or open). macOS gets capability detection and a
 //! guided Internet Sharing workflow. Nothing here runs as root, starts a
-//! service, changes firewall rules or sysctls, or talks to the internet;
-//! every change goes through NetworkManager's own polkit-checked API.
+//! service, writes firewall rules or sysctls itself, or talks to the
+//! internet; every change goes through NetworkManager's own polkit-checked
+//! API. NetworkManager's shared mode, which the hotspot uses for DHCP, does
+//! turn on IPv4 forwarding and add a NAT rule for the hotspot subnet while
+//! it runs: the preflight refuses when that would reach another uplink or
+//! routed network unless the user allows it, and `status` reports an
+//! uplink that appears later.
 //!
 //! The site side (a roaming `field-network` site whose visiting devices
 //! are recognized by their pinned host key) lives in `lablink-core` and
