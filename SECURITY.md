@@ -170,6 +170,17 @@ LabLink is a policy layer over OpenSSH and the operating system:
   its computer) are identified only by spoofable signals (address, MAC);
   their status is a reachability indication, not an identity.
 
+- `exec` runs the remote command without a terminal. Ctrl-C, SIGTERM and
+  `--timeout` stop LabLink's local ssh, but LabLink cannot prove the remote
+  command stopped and a command that writes no output may keep running. The
+  CLI says so. Bound long commands on the device (`timeout 60 cmd`).
+- After suspend/resume between two sites that share an address, a possession
+  proof started at the first site can finish at the second and show a lab
+  device RED ("key replay") until you return; it fails closed.
+- A machine that offers only key types you did not pin is refused but shown
+  as UNPINNED with generic trust advice instead of MISMATCH.
+- After a daemon restart, a relay that presents a device's genuine key can
+  hold its address until that relay stops answering (availability only).
 - mDNS traffic can consume substantial CPU during a sustained UDP flood.
   Disable mDNS (`--no-mdns` or `daemon.mdns: false`) on exposed networks.
 - Runtime settings and newly adopted devices are persisted in batches within

@@ -582,26 +582,37 @@ impl Config {
         // The configuration names the programs LabLink runs and the keys it
         // trusts, so a file another user could have written is refused, and
         // so is anything that cannot be resolved to a file (`/dev/stdin` on
-        // a pipe, `<(...)`).
-        let checked = crate::paths::trusted_metadata(path).map_err(|why| {
-            refuse(if why.starts_with("cannot check") {
-                format!("refusing the configuration: {why}")
-            } else {
-                format!("refusing a configuration other users can change: {why}")
-            })
-        })?;
-        if !checked.is_file() {
-            return Err(refuse("not a regular file".into()));
-        }
-        // Read the very file that was checked, not whatever the path names by
-        // the time it is opened.
-        let mut file = std::fs::File::open(path).map_err(io)?;
-        let opened = file.metadata().map_err(io)?;
-        if (opened.dev(), opened.ino()) != (checked.dev(), checked.ino()) {
-            return Err(refuse(
-                "the file was replaced while it was being checked".into(),
-            ));
-        }
+        // a pipe, `<(...)`). LabLink replaces the file atomically while it
+        // writes, so a swap between the check and the open is retried a few
+        // times; every attempt checks the file it then reads, and a path
+        // that keeps changing is still refused.
+        let mut attempts = 0;
+        let (mut file, opened) = loop {
+            attempts += 1;
+            let checked = crate::paths::trusted_metadata(path).map_err(|why| {
+                refuse(if why.starts_with("cannot check") {
+                    format!("refusing the configuration: {why}")
+                } else {
+                    format!("refusing a configuration other users can change: {why}")
+                })
+            })?;
+            if !checked.is_file() {
+                return Err(refuse("not a regular file".into()));
+            }
+            // Read the very file that was checked, not whatever the path
+            // names by the time it is opened.
+            let file = std::fs::File::open(path).map_err(io)?;
+            let opened = file.metadata().map_err(io)?;
+            if (opened.dev(), opened.ino()) == (checked.dev(), checked.ino()) {
+                break (file, opened);
+            }
+            if attempts >= 5 {
+                return Err(refuse(
+                    "the file was replaced while it was being checked".into(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
         let len = opened.len();
         if len > MAX_CONFIG_BYTES {
             return Err(refuse(format!(

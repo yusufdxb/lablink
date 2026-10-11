@@ -1281,8 +1281,14 @@ fn resolve_target(
             format!("'{}' is offline (last known address {}); `lablink status {}` for details, or pass --force to try anyway", shown(&r), r.ip, shown(&r)),
         ));
     }
-    let mut t = Target::from_resolve(&r)
-        .map_err(|e| Fail::new(exit::IDENTITY_MISMATCH, "identity_mismatch", e))?;
+    let mut t = Target::from_resolve(&r).map_err(|e| {
+        // Only a real key mismatch is exit 6; an unusable local path is a refusal.
+        if r.identity == lablink_core::model::IdentityState::Mismatch {
+            Fail::new(exit::IDENTITY_MISMATCH, "identity_mismatch", e)
+        } else {
+            Fail::new(exit::REFUSED, "refused", e)
+        }
+    })?;
     if let Some(u) = user {
         if !lablink_core::config::valid_username(&u) {
             return Err(Fail::new(
@@ -1410,6 +1416,7 @@ fn cmd_exec(
     } else {
         128 + out.signal.unwrap_or(0)
     };
+    let interrupted = !out.timed_out && out.signal.is_some_and(|s| s == 2 || s == 15);
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let failure = (code == exit::SSH_ERROR && !out.timed_out)
         .then(|| lablink_ssh::classify_ssh_failure(&stderr));
@@ -1462,6 +1469,8 @@ fn cmd_exec(
     if json {
         let status = if out.timed_out {
             "timeout"
+        } else if interrupted {
+            "interrupted"
         } else if code == 0 {
             "ok"
         } else if code == exit::SSH_ERROR {
@@ -1479,6 +1488,7 @@ fn cmd_exec(
             "status": status,
             "exit_code": code,
             "timed_out": out.timed_out,
+            "remote_may_still_run": out.timed_out || interrupted,
             "duration_ms": out.duration.as_millis() as u64,
             "stdout": String::from_utf8_lossy(&out.stdout),
             "stderr": stderr,
@@ -1492,6 +1502,12 @@ fn cmd_exec(
         eprintln!(
             "lablink: command timed out after {timeout}s on {}: the local ssh was stopped, \
              but the remote command may still be running (bound it on the device, e.g. `timeout {timeout} <cmd>`)",
+            shown(&r)
+        );
+    } else if interrupted {
+        eprintln!(
+            "lablink: interrupted: the local ssh was stopped, \
+             but the remote command may still be running on {}",
             shown(&r)
         );
     } else if r.shared_name {

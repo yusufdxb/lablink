@@ -4,7 +4,12 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.1] - 2026-10-10
+
+Installing 0.3.1 over an earlier 0.3.0 build is no longer a same-version no-op.
+The package does not restart per-user daemons: after upgrading run
+`systemctl --user restart lablinkd` (`lablink version` shows a daemon/CLI
+version difference until you do).
 
 ### Security
 
@@ -31,6 +36,16 @@ All notable changes are listed here. The format follows
 
 ### Fixed
 
+- `exec` interrupted by Ctrl-C or SIGTERM says that the local ssh was stopped
+  and the remote command may still be running (JSON `status` `interrupted`,
+  `remote_may_still_run`). LabLink cannot prove the remote command stopped:
+  `exec` runs without a terminal.
+- A state directory path containing `"`, `%`, `$` or `\` is reported as a
+  refusal (exit 7), not as a host key mismatch (exit 6), and `doctor` no
+  longer reports a false identity mismatch for it.
+- The daemon `ready` log line escapes control characters in paths.
+- Reading `config.yaml` while another LabLink process replaces it is retried
+  instead of failing with "the file was replaced while it was being checked".
 - Partial key scans leave a device unverified and retry without a false
   identity-mismatch alarm.
 - Configuration edits are serialized and stale GUI/import snapshots refused.
@@ -166,4 +181,5 @@ Earlier in the 0.3.0 cycle:
 - LabLink no longer starts, restarts or stops a systemd user service whose
   manager runs with a different home or config directory.
 
+[0.3.1]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.1
 [0.3.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.0

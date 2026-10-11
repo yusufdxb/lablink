@@ -616,7 +616,10 @@ fn session(
     };
     let t = match Target::from_resolve(&r) {
         Ok(t) => t,
-        Err(_) => return Outcome::Mismatch(mismatch_text(&who)),
+        Err(_) if r.identity == lablink_core::model::IdentityState::Mismatch => {
+            return Outcome::Mismatch(mismatch_text(&who));
+        }
+        Err(e) => return Outcome::SessionFailed(format!("{who}{e}")),
     };
     // Automated sessions only reach machines whose host key LabLink pinned:
     // never OpenSSH's own (prompting or trust-on-first-use) policy.

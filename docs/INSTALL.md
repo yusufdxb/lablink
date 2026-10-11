@@ -27,7 +27,7 @@ they match the release's Git tag and `BUILDINFO`.
 ## Debian package
 
 ```bash
-sudo apt install ./lablink_0.3.0_amd64.deb
+sudo apt install ./lablink_0.3.1_amd64.deb
 ```
 
 Installs:
@@ -63,8 +63,8 @@ rm -rf ~/.config/lablink ~/.local/state/lablink
 ## Tarball (no root)
 
 ```bash
-tar xzf lablink-0.3.0-x86_64-linux.tar.gz
-cd lablink-0.3.0-x86_64-linux
+tar xzf lablink-0.3.1-x86_64-linux.tar.gz
+cd lablink-0.3.1-x86_64-linux
 ./install.sh                 # or: ./install.sh /opt/lablink  (any prefix you can write)
 ```
 

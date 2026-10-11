@@ -5932,15 +5932,15 @@ limitations under the License.
 ## Apache License 2.0
 
 Used by:
-- lablink-cli 0.3.0
-- lablink-core 0.3.0
-- lablink-daemon 0.3.0
-- lablink-discovery 0.3.0
-- lablink-doctor 0.3.0
-- lablink-gui 0.3.0
-- lablink-platform 0.3.0
-- lablink-setup 0.3.0
-- lablink-ssh 0.3.0
+- lablink-cli 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-core 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-daemon 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-discovery 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-doctor 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-gui 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-platform 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-setup 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-ssh 0.3.1 (https://github.com/yusufdxb/lablink)
 - accesskit 0.24.1 (https://github.com/AccessKit/accesskit)
 - arboard 3.6.1 (https://github.com/1Password/arboard)
 - color 0.3.3 (https://github.com/linebender/color)
@@ -7673,4 +7673,4 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-<!-- Cargo.lock sha256: 93d8a733f97d7c20d1427d861de7c2224f18a9a0792f50f2bad0f181e85fd0f8 -->
+<!-- Cargo.lock sha256: 277b718cc6252e2c058235a34d506eba3742fee42e2de547c7c63975feddf3e6 -->

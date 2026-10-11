@@ -27,6 +27,10 @@ struct Env {
 }
 
 fn setup(extra_devices: &str) -> Env {
+    setup_in(extra_devices, "state")
+}
+
+fn setup_in(extra_devices: &str, state_name: &str) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let ssh = dir.path().join("fake-ssh");
     std::fs::write(&ssh, FAKE_SSH).unwrap();
@@ -42,7 +46,7 @@ fn setup(extra_devices: &str) -> Env {
         "ssh:\n  binary: {}\nnetworks:\n  - name: lab\n    cidr: 10.9.0.0/24\ndevices:\n  - name: jetson-a\n    usernames: [ops]\n    expected_ips: [10.9.0.31]\n    host_key_fingerprints: [\"{fp}\"]\n{extra_devices}",
         ssh.display()
     ));
-    let state = dir.path().join("state");
+    let state = dir.path().join(state_name);
     let daemon = TestDaemon::start(cfg, net.clone(), state, true).unwrap();
     let args_file = dir.path().join("ssh-args");
     Env {
@@ -337,6 +341,68 @@ fn exec_timeout_is_124_and_kills_the_command() {
     let v = json(&o);
     assert_eq!(v["status"], "timeout");
     assert_eq!(v["timed_out"], true);
+}
+
+#[test]
+fn interrupted_exec_does_not_claim_the_remote_command_stopped() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    for as_json in [false, true] {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_lablink"));
+        c.args(["exec", "jetson-a", "sleep 30"])
+            .env("NO_COLOR", "1")
+            .env("LABLINK_CONFIG", "/nonexistent/lablink/config.yaml")
+            .env("LABLINK_SOCKET", &e.daemon.socket)
+            .env("FAKE_SSH_ARGS", &e.args_file)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if as_json {
+            c.arg("--json");
+        }
+        let child = c.spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let t = Instant::now();
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap();
+        let o = child.wait_with_output().unwrap();
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        assert_eq!(code(&o), 128 + 15);
+        if as_json {
+            let v = json(&o);
+            assert_eq!(v["status"], "interrupted");
+            assert_eq!(v["remote_may_still_run"], true);
+        } else {
+            let err = String::from_utf8_lossy(&o.stderr);
+            assert!(err.contains("remote command may still be running"), "{err}");
+            assert!(
+                !err.contains("terminated") && !err.contains("killed"),
+                "{err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_unreadable_state_path_is_a_refusal_not_a_host_key_mismatch() {
+    let e = setup_in("", "st\"ate%x");
+    let t = Instant::now();
+    let o = loop {
+        let o = lablink(Some(&e), &["exec", "jetson-a", "true", "--json"]);
+        if code(&o) != exit::DEVICE_UNREACHABLE || t.elapsed() > Duration::from_secs(15) {
+            break o;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(
+        code(&o),
+        exit::REFUSED,
+        "{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    let v = json(&o);
+    assert_eq!(v["error"]["code"], "refused");
 }
 
 #[test]

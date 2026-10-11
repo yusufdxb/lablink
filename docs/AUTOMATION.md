@@ -52,7 +52,7 @@ whether its identity is verified, and whether SSH login works.
 
    The JSON result contains `exit_code` (the remote command's own exit code),
    `stdout`, `stderr`, `status` (`ok` | `remote_error` | `ssh_error` |
-   `timeout`), `duration_ms`, and `identity_pinned`.
+   `timeout` | `interrupted`), `remote_may_still_run` (true after a timeout or an interruption), `duration_ms`, and `identity_pinned`.
 
    `--timeout`, Ctrl-C and SIGTERM stop LabLink's local ssh. `exec` runs
    the command without a terminal, so the device does not signal it when
@@ -133,7 +133,7 @@ All `--json` outputs carry `"schema_version": 1`. Fields are only ever added.
 ```json
 {
   "schema_version": 1,
-  "daemon": {"version": "0.3.0", "pid": 4242, "uptime_s": 24},
+  "daemon": {"version": "0.3.1", "pid": 4242, "uptime_s": 24},
   "devices": [
     {
       "name": "jetson-a", "id": "site-alpha/jetson-a", "site": "site-alpha",

@@ -286,8 +286,8 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
         });
     }
     tracing::info!(
-        socket = %paths.socket.display(),
-        state_dir = %paths.state_dir.display(),
+        socket = %lablink_core::printable(&paths.socket.display().to_string()),
+        state_dir = %lablink_core::printable(&paths.state_dir.display().to_string()),
         devices = cfg.device_count(),
         startup_ms = t0.elapsed().as_millis() as u64,
         "lablinkd ready"

@@ -198,15 +198,15 @@ user unit, bash completion, a menu entry and an icon; pulls in the OpenSSH
 client; nothing starts until you run setup):
 
 ```bash
-sudo apt install ./lablink_0.3.0_amd64.deb
+sudo apt install ./lablink_0.3.1_amd64.deb
 ```
 
 **Tarball** (any x86_64 Linux with glibc 2.31 or newer, installs into
 `~/.local`, no root):
 
 ```bash
-tar xzf lablink-0.3.0-x86_64-linux.tar.gz
-cd lablink-0.3.0-x86_64-linux && ./install.sh
+tar xzf lablink-0.3.1-x86_64-linux.tar.gz
+cd lablink-0.3.1-x86_64-linux && ./install.sh
 ```
 
 Then run `lablink init` or open **LabLink** from the applications menu.
