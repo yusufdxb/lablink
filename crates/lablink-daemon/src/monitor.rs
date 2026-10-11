@@ -292,9 +292,28 @@ pub async fn check_device(state: &State, name: &str) {
         return;
     };
 
-    let mut report = liveness(state, &plan, primary).await;
+    // A device visiting the Field Network keeps its home address until a
+    // Field Network address proves to be it (key-checked failover below);
+    // the home address itself is never probed from here.
+    let current = state.reg().device(name).and_then(|d| d.rec.current_ip);
+    let off_plan = current.filter(|c| !plan.candidates.contains(c));
+    let (mut report, skip) = match off_plan {
+        Some(cur) => (
+            ProbeReport {
+                ip: cur,
+                up: false,
+                port: None,
+                rtt: None,
+                method: "none",
+                detail: Some("not on the Field Network".into()),
+                icmp_answered: None,
+            },
+            0,
+        ),
+        None => (liveness(state, &plan, primary).await, 1),
+    };
     if !report.up {
-        for &alt in plan.candidates.iter().skip(1).take(4) {
+        for &alt in plan.candidates.iter().skip(skip).take(4) {
             let ar = liveness(state, &plan, alt).await;
             if !ar.up {
                 continue;

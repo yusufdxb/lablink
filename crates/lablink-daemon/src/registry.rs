@@ -915,13 +915,72 @@ impl Registry {
         self.devices.keys().cloned().collect()
     }
 
-    /// Devices that are monitored and whose site is not AWAY.
+    /// Devices that are monitored and whose site is not AWAY (or that are
+    /// visiting an active Field Network).
     pub fn monitored_names(&self) -> Vec<String> {
         self.devices
             .values()
-            .filter(|d| d.monitoring() && self.site_engaged(&d.site))
+            .filter(|d| d.monitoring() && self.device_engaged(d))
             .map(|d| d.id.clone())
             .collect()
+    }
+
+    /// The ACTIVE roaming site (a Field Network), if any.
+    fn roaming_active(&self) -> Option<&lablink_core::config::SiteConfig> {
+        self.cfg
+            .sites
+            .iter()
+            .find(|s| s.roaming && self.site_state(&s.id) == SiteState::Active)
+    }
+
+    /// `ip` lies on one of the active roaming site's networks.
+    fn in_roaming_net(&self, ip: IpAddr) -> bool {
+        self.roaming_active().is_some_and(|r| {
+            r.networks
+                .iter()
+                .any(|n| lablink_core::net::parse_cidr(&n.cidr).is_ok_and(|net| net.contains(&ip)))
+        })
+    }
+
+    /// A device of an AWAY site that may join the active Field Network: it
+    /// has a pinned host key LabLink can prove (or is reached through such
+    /// a device), and is not in a security stop. It keeps its home site;
+    /// on the Field Network it is recognized by its host key alone.
+    pub fn visiting(&self, d: &Device) -> bool {
+        let Some(r) = self.roaming_active() else {
+            return false;
+        };
+        if d.site == r.id
+            || self.site_state(&d.site) != SiteState::Away
+            || d.identity == IdentityState::Mismatch
+        {
+            return false;
+        }
+        match d.cfg.via.as_deref() {
+            None => !d.usable_pins().is_empty(),
+            Some(via) => self.devices.get(&device_id(&d.site, via)).is_some_and(|g| {
+                g.cfg.via.is_none()
+                    && g.identity != IdentityState::Mismatch
+                    && !g.usable_pins().is_empty()
+            }),
+        }
+    }
+
+    /// LabLink works with this device now: its site is engaged, or it is
+    /// visiting the active Field Network.
+    pub fn device_engaged(&self, d: &Device) -> bool {
+        self.site_engaged(&d.site) || self.visiting(d)
+    }
+
+    /// The site state that governs this device's checks and colors: a
+    /// visiting device is treated like one of an unconfirmed site
+    /// (monitored, but unreachable is never RED).
+    pub fn device_site_state(&self, d: &Device) -> SiteState {
+        if self.visiting(d) {
+            SiteState::Unknown
+        } else {
+            self.site_state(&d.site)
+        }
     }
 
     /// LabLink works with the devices of this site now (ACTIVE, or not yet
@@ -941,7 +1000,7 @@ impl Registry {
     pub fn engaged(&self, id: &str) -> bool {
         self.devices
             .get(id)
-            .is_some_and(|d| d.monitoring() && self.site_engaged(&d.site))
+            .is_some_and(|d| d.monitoring() && self.device_engaged(d))
     }
 
     /// Ids of the sites that are not AWAY.
@@ -967,12 +1026,28 @@ impl Registry {
 
     /// Identities to match sightings against: devices of engaged sites only,
     /// so an address reused at another site is never attributed to an AWAY
-    /// site's device.
+    /// site's device. A device visiting the Field Network is matched by its
+    /// pinned host key alone: MACs, hostnames and configured addresses are
+    /// easy to claim on a shared hotspot and never place it there, and only
+    /// its addresses on the Field Network count as its own.
     fn known_identities(&self) -> Vec<KnownIdentity> {
         self.devices
             .values()
-            .filter(|d| self.site_engaged(&d.site))
-            .map(Device::known_identity)
+            .filter_map(|d| {
+                if self.site_engaged(&d.site) {
+                    Some(d.known_identity())
+                } else if self.visiting(d) && d.cfg.via.is_none() {
+                    let mut k = d.known_identity();
+                    k.macs.clear();
+                    k.names.clear();
+                    k.static_ips.clear();
+                    k.current_ip = k.current_ip.filter(|ip| self.in_roaming_net(*ip));
+                    k.previous_ips.retain(|ip| self.in_roaming_net(*ip));
+                    Some(k)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -1084,7 +1159,7 @@ impl Registry {
     pub fn devices_at(&self, ip: IpAddr) -> Vec<String> {
         self.devices
             .values()
-            .filter(|d| d.rec.current_ip == Some(ip) && self.site_engaged(&d.site))
+            .filter(|d| d.rec.current_ip == Some(ip) && self.device_engaged(d))
             .map(|d| d.id.clone())
             .collect()
     }
@@ -1093,9 +1168,10 @@ impl Registry {
 
     pub fn plan(&self, name: &str, now: u64) -> Option<CheckPlan> {
         let d = self.devices.get(name)?;
-        if !d.monitoring() || !self.site_engaged(&d.site) {
+        if !d.monitoring() || !self.device_engaged(d) {
             return None;
         }
+        let visiting = !self.site_engaged(&d.site);
         let mut candidates: Vec<IpAddr> = Vec::new();
         let mut push = |ip: IpAddr| {
             if !candidates.contains(&ip) {
@@ -1132,6 +1208,16 @@ impl Registry {
         let via = self.route_via(d);
         let (candidates, hostnames_to_resolve) = if via.is_some() {
             (d.cfg.expected_ip_addrs(), Vec::new())
+        } else if visiting {
+            // On the Field Network only: never its home-site addresses, and
+            // no name lookups (any hotspot client can answer for a name).
+            (
+                candidates
+                    .into_iter()
+                    .filter(|ip| self.in_roaming_net(*ip))
+                    .collect(),
+                Vec::new(),
+            )
         } else {
             (candidates, hostnames_to_resolve)
         };
@@ -1938,9 +2024,7 @@ impl Registry {
                 .devices
                 .values()
                 .filter(|d| {
-                    d.rec.current_ip == Some(ip)
-                        && !d.identity_recheck
-                        && self.site_engaged(&d.site)
+                    d.rec.current_ip == Some(ip) && !d.identity_recheck && self.device_engaged(d)
                 })
                 .filter(|d| {
                     let known: BTreeSet<String> = d
@@ -2365,7 +2449,7 @@ impl Registry {
         } else {
             d.auth
         };
-        let site_state = self.site_state(&d.site);
+        let site_state = self.device_site_state(d);
         let input = ColorInput {
             monitoring: d.monitoring(),
             site: site_state,
@@ -2430,10 +2514,17 @@ impl Registry {
                         .and_then(|a| a.interface.clone())
                 })
             }),
-            network_name: ip.and_then(|i| self.network_name_for(Some(&d.site), i)),
+            network_name: ip.and_then(|i| {
+                self.network_name_for(Some(&d.site), i)
+                    .or_else(|| self.network_name_for(None, i))
+            }),
             via: self
                 .route_via(d)
                 .map(|_| d.cfg.via.clone().unwrap_or_default()),
+            visiting: self
+                .visiting(d)
+                .then(|| self.roaming_active().map(|r| r.id.clone()))
+                .flatten(),
             monitoring: d.monitoring(),
             reasons,
             services: d
@@ -2485,7 +2576,7 @@ impl Registry {
         Ok(self
             .devices
             .values()
-            .filter(|d| all || self.site_engaged(&d.site))
+            .filter(|d| all || self.device_engaged(d))
             .map(|d| d.id.clone())
             .collect())
     }
@@ -2698,7 +2789,7 @@ impl Registry {
             ));
         }
         let ip = d.rec.current_ip.ok_or_else(|| {
-            if self.site_state(&d.site) == SiteState::Away {
+            if self.device_site_state(d) == SiteState::Away {
                 ApiError::new(
                     ErrorCode::Unreachable,
                     format!(
@@ -2803,7 +2894,7 @@ impl Registry {
             id: d.id.clone(),
             site_name: self.site_name(&d.site),
             shared_name: self.label_of(&d.id) != d.cfg.name,
-            site_away: self.site_state(&d.site) == SiteState::Away,
+            site_away: self.device_site_state(d) == SiteState::Away,
             ip: ip.to_string(),
             port: d.cfg.ssh_port,
             ssh_host: d.ssh_host(self.cfg.sites.len() > 1),
@@ -3748,7 +3839,9 @@ impl Registry {
                     && d.proven_ms >= self.gateways_since_ms
                     && d.healthy()
                     && self.route_via(d).is_none()
-                    && d.rec.current_ip.is_some_and(|ip| self.is_attached_ip(ip))
+                    && d.rec.current_ip.is_some_and(|ip| {
+                        self.is_attached_ip(ip) && !self.foreign_on_roaming(&d.site, ip)
+                    })
             })
             .map(|d| KeySighting {
                 site: d.site.clone(),
@@ -3760,6 +3853,10 @@ impl Registry {
             if now.saturating_sub(*ts) <= KEY_SIGHTING_TTL_MS
                 && *ts >= self.gateways_since_ms
                 && self.is_attached_ip(*ip)
+                && !self
+                    .devices
+                    .get(id)
+                    .is_some_and(|d| self.foreign_on_roaming(&d.site, *ip))
             {
                 if let Some(d) = self.devices.get(id) {
                     v.push(KeySighting {
@@ -3773,17 +3870,24 @@ impl Registry {
         v
     }
 
+    /// A device of another site seen on the active Field Network: that
+    /// says where the device is (carried along), not where you are, so it
+    /// is never evidence for its home site.
+    fn foreign_on_roaming(&self, site: &str, ip: IpAddr) -> bool {
+        self.in_roaming_net(ip) && self.roaming_active().is_some_and(|r| r.id != site)
+    }
+
     /// Remember pinned host keys presented by devices of sites that are not
     /// engaged (they are evidence for that site; nothing is attached).
     fn note_key_sightings(&mut self, obs: &Observation, now: u64) {
         let Some(ip) = obs.ip else { return };
-        if obs.host_keys.is_empty() {
+        if obs.host_keys.is_empty() || self.in_roaming_net(ip) {
             return;
         }
         let hits: Vec<String> = self
             .devices
             .values()
-            .filter(|d| !self.site_engaged(&d.site))
+            .filter(|d| !self.device_engaged(d))
             .filter(|d| {
                 let pins = d.pinned_fingerprints();
                 obs.host_keys.iter().any(|k| pins.contains(&k.fingerprint))
@@ -3837,6 +3941,12 @@ impl Registry {
             self.invalidate_scan_memos();
         }
         let mut wake = Vec::new();
+        let was_visiting: BTreeSet<String> = self
+            .devices
+            .values()
+            .filter(|d| self.visiting(d))
+            .map(|d| d.id.clone())
+            .collect();
         for d in &decisions {
             let old = self.decisions.get(&d.site).map(|o| (o.state, o.confidence));
             if old.map(|o| o.0) != Some(d.state) {
@@ -3884,6 +3994,26 @@ impl Registry {
             }
         }
         self.decisions = decisions.into_iter().map(|d| (d.site.clone(), d)).collect();
+        let visiting: BTreeSet<String> = self
+            .devices
+            .values()
+            .filter(|d| self.visiting(d))
+            .map(|d| d.id.clone())
+            .collect();
+        for id in was_visiting.difference(&visiting) {
+            if !self
+                .devices
+                .get(id)
+                .is_some_and(|d| self.site_engaged(&d.site))
+            {
+                self.park_device(id);
+            }
+        }
+        for id in visiting.difference(&was_visiting) {
+            if self.devices.get(id).is_some_and(Device::monitoring) && !wake.contains(id) {
+                wake.push(id.clone());
+            }
+        }
         self.assessments = assessments
             .into_iter()
             .map(|a| (a.site.clone(), a))
@@ -3970,7 +4100,21 @@ impl Registry {
     /// state (so nothing stale turns RED later) but keep identity pins,
     /// addresses and any security finding.
     fn park_site(&mut self, site: &str) {
-        for d in self.devices.values_mut().filter(|d| d.site == site) {
+        let ids: Vec<String> = self
+            .devices
+            .values()
+            .filter(|d| d.site == site)
+            .map(|d| d.id.clone())
+            .collect();
+        for id in ids {
+            self.park_device(&id);
+        }
+    }
+
+    /// Stop treating one device as present: its states return to unknown
+    /// (never its pins, identity record or adoption).
+    fn park_device(&mut self, id: &str) {
+        if let Some(d) = self.devices.get_mut(id) {
             d.net.reset();
             d.port.reset();
             d.auth = AuthState::Unknown;

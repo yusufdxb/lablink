@@ -249,6 +249,10 @@ pub struct DeviceStatus {
     /// Gateway device used to reach this one, when not directly attached.
     #[serde(default)]
     pub via: Option<String>,
+    /// The roaming site (Field Network) this device is visiting while its
+    /// own site is AWAY: recognized there by its pinned host key alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visiting: Option<String>,
     pub monitoring: bool,
     pub reasons: Vec<String>,
     #[serde(default)]

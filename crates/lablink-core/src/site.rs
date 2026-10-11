@@ -457,7 +457,58 @@ impl Decision {
 
 /// Decide every site's state from the assessments and the mode.
 /// `assessments` must be in the same order as `sites`.
+///
+/// A roaming site (a Field Network) is an overlay and does not take part in
+/// choosing between the other sites: it is ACTIVE while one of its own
+/// networks is attached (at least weak evidence), or when chosen by hand.
+/// Choosing a roaming site by hand parks every other site, as before;
+/// choosing an ordinary site by hand leaves the overlay to its evidence.
 pub fn decide(sites: &[SiteConfig], assessments: &[Assessment], mode: &SiteMode) -> Vec<Decision> {
+    let manual_roaming = match mode {
+        SiteMode::Manual(id) => sites
+            .iter()
+            .any(|s| s.roaming && s.id.eq_ignore_ascii_case(id)),
+        SiteMode::Auto => false,
+    };
+    if manual_roaming || !sites.iter().any(|s| s.roaming) {
+        return decide_fixed(sites, assessments, mode);
+    }
+    let (fixed, fixed_a): (Vec<SiteConfig>, Vec<Assessment>) = sites
+        .iter()
+        .zip(assessments)
+        .filter(|(s, _)| !s.roaming)
+        .map(|(s, a)| (s.clone(), a.clone()))
+        .unzip();
+    let mut fixed_d = decide_fixed(&fixed, &fixed_a, mode).into_iter();
+    sites
+        .iter()
+        .zip(assessments)
+        .map(|(s, a)| {
+            if !s.roaming {
+                return fixed_d.next().expect("one decision per ordinary site");
+            }
+            let on = s.auto_detect && a.confidence != Confidence::None;
+            Decision {
+                site: s.id.clone(),
+                state: if on {
+                    SiteState::Active
+                } else {
+                    SiteState::Away
+                },
+                confidence: a.confidence,
+                selected_by: SelectedBy::Auto,
+                contested: false,
+            }
+        })
+        .collect()
+}
+
+/// The choice between ordinary sites: one ACTIVE site, ties UNKNOWN.
+fn decide_fixed(
+    sites: &[SiteConfig],
+    assessments: &[Assessment],
+    mode: &SiteMode,
+) -> Vec<Decision> {
     let away = |s: &SiteConfig, c: Confidence| Decision {
         site: s.id.clone(),
         state: SiteState::Away,
@@ -650,6 +701,88 @@ mod tests {
             .map(|s| assess(s, &SiteKnowledge::default(), sig, keys))
             .collect();
         decide(sites, &a, &SiteMode::Auto)
+    }
+
+    fn field(cidr: &str) -> SiteConfig {
+        let mut s = site("field-network", cidr, None);
+        s.roaming = true;
+        s
+    }
+
+    fn two_attached(a: &str, b: &str) -> LocalSignals {
+        let mut s = attached(a);
+        s.attached.push(Attached {
+            interface: "wlan0".into(),
+            net: b.parse().unwrap(),
+        });
+        s
+    }
+
+    #[test]
+    fn roaming_site_is_an_overlay_that_never_parks_the_site_you_are_at() {
+        let sites = [
+            site("home", "192.168.8.0/24", None),
+            site("lab", "10.20.0.0/24", None),
+            field("10.77.0.0/24"),
+        ];
+        // At home with the hotspot up: home ACTIVE and the overlay ACTIVE.
+        let d = run(&sites, &two_attached("192.168.8.0/24", "10.77.0.0/24"), &[]);
+        assert_eq!(d[0].state, SiteState::Active, "{d:?}");
+        assert_eq!(d[1].state, SiteState::Away);
+        assert_eq!(d[2].state, SiteState::Active);
+        assert!(d[0].scan_permission().is_ok() && d[2].scan_permission().is_ok());
+        // Hotspot only (in the field, no uplink): the overlay alone.
+        let d = run(&sites, &attached("10.77.0.0/24"), &[]);
+        assert_eq!(d[2].state, SiteState::Active);
+        assert!(d[..2].iter().all(|x| x.state == SiteState::Away), "{d:?}");
+        // Hotspot down: the overlay is AWAY and home decides as before.
+        let d = run(&sites, &attached("192.168.8.0/24"), &[]);
+        assert_eq!(d[0].state, SiteState::Active);
+        assert_eq!(d[2].state, SiteState::Away);
+    }
+
+    #[test]
+    fn hints_alone_never_activate_a_roaming_site() {
+        let mut f = field("10.77.0.0/24");
+        f.networks[0].ssid = Some("LabLink-Field".into());
+        let sites = [site("home", "192.168.8.0/24", None), f];
+        let mut sig = attached("192.168.8.0/24");
+        sig.ssids.push(("wlan0".into(), "LabLink-Field".into()));
+        let d = run(&sites, &sig, &[]);
+        assert_eq!(d[1].state, SiteState::Away, "an SSID is a hint only");
+        assert_eq!(d[0].state, SiteState::Active);
+    }
+
+    #[test]
+    fn a_single_networkless_site_stays_active_next_to_a_field_network() {
+        let sites = [SiteConfig::new("default", "Default"), field("10.77.0.0/24")];
+        let d = run(&sites, &LocalSignals::default(), &[]);
+        assert_eq!(d[0].state, SiteState::Active);
+        assert_eq!(d[0].selected_by, SelectedBy::OnlySite);
+        assert_eq!(d[1].state, SiteState::Away);
+    }
+
+    #[test]
+    fn manual_choice_with_a_roaming_site() {
+        let sites = [
+            site("home", "192.168.8.0/24", None),
+            site("lab", "10.20.0.0/24", None),
+            field("10.77.0.0/24"),
+        ];
+        let sig = two_attached("192.168.8.0/24", "10.77.0.0/24");
+        let a: Vec<Assessment> = sites
+            .iter()
+            .map(|s| assess(s, &SiteKnowledge::default(), &sig, &[]))
+            .collect();
+        // Choosing the field network by hand parks every other site.
+        let d = decide(&sites, &a, &SiteMode::Manual("field-network".into()));
+        assert_eq!(d[2].state, SiteState::Active);
+        assert!(d[..2].iter().all(|x| x.state == SiteState::Away));
+        // Choosing the lab by hand keeps the overlay on its own evidence.
+        let d = decide(&sites, &a, &SiteMode::Manual("lab".into()));
+        assert_eq!(d[1].state, SiteState::Active);
+        assert_eq!(d[0].state, SiteState::Away);
+        assert_eq!(d[2].state, SiteState::Active);
     }
 
     #[test]

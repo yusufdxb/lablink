@@ -182,6 +182,7 @@ pub mod tests_support {
             interface: None,
             network_name: None,
             via: None,
+            visiting: None,
             monitoring: true,
             reasons: vec![],
             services: vec![],

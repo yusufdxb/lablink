@@ -67,6 +67,7 @@ impl TryFrom<RawConfig> for Config {
                 id: DEFAULT_SITE_ID.into(),
                 name: DEFAULT_SITE_NAME.into(),
                 auto_detect: true,
+                roaming: false,
                 networks: r.networks,
                 devices: r.devices,
                 checks: r.checks,
@@ -95,6 +96,13 @@ pub struct SiteConfig {
     /// false, the site is only used when chosen by hand.
     #[serde(default = "yes")]
     pub auto_detect: bool,
+    /// A temporary network you carry with you (a LabLink Field Network
+    /// hotspot). It is an overlay: ACTIVE whenever one of its networks is
+    /// attached, without taking part in choosing between the other sites,
+    /// and pinned devices of AWAY sites that join it are recognized by
+    /// their host key alone (they keep their home site, no duplicate).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub roaming: bool,
     #[serde(default)]
     pub networks: Vec<NetworkConfig>,
     #[serde(default)]
@@ -112,6 +120,7 @@ impl SiteConfig {
             id: id.into(),
             name: name.into(),
             auto_detect: true,
+            roaming: false,
             networks: vec![],
             devices: vec![],
             checks: BTreeMap::new(),
@@ -132,6 +141,50 @@ pub struct Preferences {
     /// path); empty means `$TERMINAL`, then a list of common emulators.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal: Option<String>,
+    /// Optional features, off unless turned on (`lablink feature enable`).
+    #[serde(skip_serializing_if = "Features::is_default")]
+    pub features: Features,
+}
+
+/// Optional, feature-gated parts of LabLink. Both are client-side only
+/// (the CLI and the app): the daemon never acts on them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct Features {
+    /// Field Network: create and manage a temporary WPA2/WPA3 hotspot
+    /// through NetworkManager (`lablink hotspot`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub field_network: bool,
+    /// Robotics: read-only ROS 2 and DDS diagnostics over SSH
+    /// (`lablink ros`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub robotics: bool,
+}
+
+impl Features {
+    pub const NAMES: [&'static str; 2] = ["field-network", "robotics"];
+
+    pub fn is_default(&self) -> bool {
+        self == &Features::default()
+    }
+
+    pub fn get(&self, name: &str) -> Option<bool> {
+        match name {
+            "field-network" => Some(self.field_network),
+            "robotics" => Some(self.robotics),
+            _ => None,
+        }
+    }
+
+    /// Set a feature by name; false when the name is unknown.
+    pub fn set(&mut self, name: &str, on: bool) -> bool {
+        match name {
+            "field-network" => self.field_network = on,
+            "robotics" => self.robotics = on,
+            _ => return false,
+        }
+        true
+    }
 }
 
 impl Preferences {
@@ -747,6 +800,7 @@ impl Config {
             }
             validate_site(self, site, &at, &mut errs);
         }
+        validate_roaming(&self.sites, &mut errs);
 
         if let Some(t) = &self.preferences.terminal {
             if !valid_program(t) {
@@ -960,6 +1014,49 @@ impl Config {
 
 /// Validation of one site: names, identity signals and gateways are unique
 /// within the site (other sites may reuse the same private addresses).
+/// A roaming site (Field Network) is an overlay: at most one, with at
+/// least one network, none of which overlaps another site's networks (else
+/// it would be ACTIVE wherever that site is, and its visiting rules would
+/// apply at home).
+fn validate_roaming(sites: &[SiteConfig], errs: &mut Vec<String>) {
+    let roaming: Vec<&SiteConfig> = sites.iter().filter(|s| s.roaming).collect();
+    if roaming.len() > 1 {
+        errs.push(format!(
+            "only one site may be roaming (found {})",
+            roaming
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    for r in roaming {
+        if r.networks.is_empty() {
+            errs.push(format!(
+                "site '{}' is roaming but has no networks: a roaming site is ACTIVE only while one of its networks is attached",
+                r.id
+            ));
+        }
+        for n in &r.networks {
+            let Ok(rn) = net::parse_cidr(&n.cidr) else {
+                continue;
+            };
+            for o in sites.iter().filter(|o| o.id != r.id) {
+                for on in &o.networks {
+                    if let Ok(onet) = net::parse_cidr(&on.cidr) {
+                        if rn.contains(&onet.network()) || onet.contains(&rn.network()) {
+                            errs.push(format!(
+                                "roaming site '{}' network {} overlaps {} of site '{}': choose a range no other site uses",
+                                r.id, n.cidr, on.cidr, o.id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn validate_site(cfg: &Config, site: &SiteConfig, at_site: &str, errs: &mut Vec<String>) {
     let d = &cfg.daemon;
     let mut net_names = BTreeSet::new();
@@ -1734,6 +1831,46 @@ mod site_tests {
             Err(e) => vec![e.to_string()],
             Ok(_) => vec![],
         }
+    }
+
+    #[test]
+    fn roaming_site_rules() {
+        let base = "sites:\n  - id: home\n    name: Home\n    networks:\n      - name: lan\n        cidr: 192.168.8.0/24\n";
+        let ok = format!("{base}  - id: field-network\n    name: Field Network\n    roaming: true\n    networks:\n      - name: hotspot\n        cidr: 10.77.0.0/24\n        active_scan: true\n");
+        let c = Config::parse(&ok, "t").unwrap();
+        assert!(c.site("field-network").unwrap().roaming);
+        assert!(!c.site("home").unwrap().roaming);
+        let out = c.to_yaml();
+        assert_eq!(out.matches("roaming").count(), 1, "false is never written");
+        let overlap = format!("{base}  - id: field-network\n    name: Field Network\n    roaming: true\n    networks:\n      - name: hotspot\n        cidr: 192.168.8.0/25\n");
+        let e = Config::parse(&overlap, "t").unwrap_err().to_string();
+        assert!(e.contains("overlaps"), "{e}");
+        let empty =
+            format!("{base}  - id: field-network\n    name: Field Network\n    roaming: true\n");
+        let e = Config::parse(&empty, "t").unwrap_err().to_string();
+        assert!(e.contains("has no networks"), "{e}");
+        let two = format!("{ok}  - id: field-two\n    name: Field Two\n    roaming: true\n    networks:\n      - name: hotspot\n        cidr: 10.78.0.0/24\n");
+        let e = Config::parse(&two, "t").unwrap_err().to_string();
+        assert!(e.contains("only one site may be roaming"), "{e}");
+    }
+
+    #[test]
+    fn features_are_off_by_default_and_round_trip() {
+        let c = Config::parse("", "t").unwrap();
+        assert!(!c.preferences.features.field_network && !c.preferences.features.robotics);
+        let c = Config::parse("preferences:\n  features:\n    robotics: true\n", "t").unwrap();
+        assert!(c.preferences.features.robotics);
+        assert!(!c.preferences.features.field_network);
+        let out = c.to_yaml();
+        assert!(
+            out.contains("robotics: true") && !out.contains("field_network"),
+            "{out}"
+        );
+        assert!(Config::parse("preferences:\n  features:\n    teleport: true\n", "t").is_err());
+        let mut f = Features::default();
+        assert!(f.set("field-network", true) && f.field_network);
+        assert!(!f.set("nope", true));
+        assert_eq!(f.get("robotics"), Some(false));
     }
 
     const TWO_SITES: &str = "sites:\n  - id: site-alpha\n    name: Site Alpha\n    networks:\n      - name: lab\n        cidr: 192.168.50.0/24\n        active_scan: true\n    devices:\n      - name: jetson\n        expected_ips: [192.168.50.10]\n      - name: robot-a\n        ssh: false\n        via: jetson\n        expected_ips: [10.42.0.2]\n    checks:\n      jetson: [disk]\n  - id: site-beta\n    name: Site Beta\n    auto_detect: false\n    networks:\n      - name: lab\n        cidr: 192.168.50.0/24\n        gateway: 192.168.50.1\n        gateway_mac: 02:00:00:00:00:b1\n        ssid: ExampleNet\n        interface: wlan0\n    devices:\n      - name: jetson\n        expected_ips: [192.168.50.10]\n";

@@ -252,6 +252,7 @@ pub fn plan(current: &Config, doc: &ExportDoc, opts: ImportOptions) -> Result<Im
             }
             let mut site = SiteConfig::new(&src.id, &src.name);
             site.auto_detect = src.auto_detect;
+            site.roaming = src.roaming;
             cfg.sites.push(site);
             changes.push(format!("site {} ('{}'): added", src.id, src.name));
         }
@@ -261,16 +262,20 @@ pub fn plan(current: &Config, doc: &ExportDoc, opts: ImportOptions) -> Result<Im
             .position(|s| s.id.eq_ignore_ascii_case(&src.id))
             .expect("present");
         let sid = cfg.sites[si].id.clone();
-        if cfg.sites[si].name != src.name || cfg.sites[si].auto_detect != src.auto_detect {
+        if cfg.sites[si].name != src.name
+            || cfg.sites[si].auto_detect != src.auto_detect
+            || cfg.sites[si].roaming != src.roaming
+        {
             if opts.replace {
                 cfg.sites[si].name = src.name.clone();
                 cfg.sites[si].auto_detect = src.auto_detect;
+                cfg.sites[si].roaming = src.roaming;
                 changes.push(format!(
-                    "site {sid}: name and auto-detection taken from the file"
+                    "site {sid}: name, auto-detection and roaming taken from the file"
                 ));
             } else {
                 skipped.push(format!(
-                    "site {sid}: kept your name '{}' and auto-detection (use --replace)",
+                    "site {sid}: kept your name '{}', auto-detection and roaming (use --replace)",
                     cfg.sites[si].name
                 ));
             }
@@ -462,6 +467,7 @@ mod tests {
                 interface: None,
                 network_name: None,
                 via: None,
+                visiting: None,
                 monitoring: true,
                 reasons: vec![],
                 services: vec![],
