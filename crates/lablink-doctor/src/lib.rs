@@ -668,6 +668,99 @@ fn session(
     Outcome::SessionFailed(format!("{who}{why}"))
 }
 
+/// Why [`run_pinned_script`] did not return the script's output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteError {
+    /// The device's host key does not match its pinned identity (security stop).
+    Mismatch(String),
+    /// No registered device has this name.
+    Unknown(String),
+    /// The device is not located or unreachable.
+    NotLocated(String),
+    /// The session did not finish within its time limit.
+    TimedOut(String),
+    /// The host key is not pinned, so no automated session is started.
+    NotPinned(String),
+    /// The session failed or timed out.
+    Failed(String),
+}
+
+impl std::fmt::Display for RemoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoteError::Mismatch(m)
+            | RemoteError::Unknown(m)
+            | RemoteError::TimedOut(m)
+            | RemoteError::NotLocated(m)
+            | RemoteError::NotPinned(m)
+            | RemoteError::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Run a fixed, read-only `sh` script on a registered device through the
+/// same path as the doctor: the daemon's `Resolve` (which refuses identity
+/// mismatches), a pinned host key (required: never trust-on-first-use),
+/// batch mode and an overall `timeout`. Returns stdout. The script must be
+/// built only from fixed templates and validated, shell-quoted parameters.
+pub fn run_pinned_script(
+    client: &Client,
+    device: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<String, RemoteError> {
+    let r: ResolveResult = match client.call_typed(&Request::Resolve {
+        device: device.to_string(),
+        batch: true,
+    }) {
+        Ok(r) => r,
+        Err(ClientError::Api(a)) => {
+            return Err(match a.code {
+                ErrorCode::IdentityMismatch => RemoteError::Mismatch(mismatch_text("")),
+                ErrorCode::DeviceNotFound => RemoteError::Unknown(a.message),
+                ErrorCode::Unreachable => RemoteError::NotLocated(a.message),
+                _ => RemoteError::Failed(a.message),
+            })
+        }
+        Err(e) => return Err(RemoteError::Failed(e.to_string())),
+    };
+    let t = match Target::from_resolve(&r) {
+        Ok(t) => t,
+        Err(_) if r.identity == lablink_core::model::IdentityState::Mismatch => {
+            return Err(RemoteError::Mismatch(mismatch_text("")));
+        }
+        Err(e) => return Err(RemoteError::Failed(e)),
+    };
+    if r.host_key_alias.is_none() {
+        return Err(RemoteError::NotPinned(format!(
+            "host key not pinned: check the fingerprint and run `lablink trust {}` first",
+            r.name
+        )));
+    }
+    let args = build_args(
+        &t,
+        &Mode::Exec {
+            command: format!("sh -c {}", shell_quote(script)),
+            batch: true,
+        },
+        &lablink_ssh::automated_session_args(),
+    );
+    let out = run_captured(&t.binary, &args, timeout, OutputMode::Capture, true)
+        .map_err(|e| RemoteError::Failed(format!("cannot run {}: {e}", t.binary)))?;
+    if out.timed_out {
+        return Err(RemoteError::TimedOut(format!(
+            "timed out after {}s",
+            timeout.as_secs()
+        )));
+    }
+    if out.exit_code == Some(255) {
+        return Err(RemoteError::Failed(
+            classify_ssh_failure(&String::from_utf8_lossy(&out.stderr)).describe(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// The reachability check of a network-only device, from the daemon's state.
 pub fn network_item(d: &DeviceStatus) -> Item {
     use lablink_core::model::NetworkState as N;

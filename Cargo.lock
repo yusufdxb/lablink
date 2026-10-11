@@ -1310,6 +1310,7 @@ dependencies = [
  "lablink-daemon",
  "lablink-doctor",
  "lablink-fieldnet",
+ "lablink-ros",
  "lablink-setup",
  "lablink-ssh",
  "libc",
@@ -1405,6 +1406,18 @@ name = "lablink-platform"
 version = "0.3.1"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "lablink-ros"
+version = "0.3.1"
+dependencies = [
+ "ipnet",
+ "lablink-core",
+ "lablink-doctor",
+ "lablink-ssh",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

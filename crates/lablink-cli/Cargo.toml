@@ -19,6 +19,7 @@ lablink-ssh.workspace = true
 lablink-doctor.workspace = true
 lablink-setup.workspace = true
 lablink-fieldnet.workspace = true
+lablink-ros.workspace = true
 ipnet.workspace = true
 clap.workspace = true
 serde.workspace = true

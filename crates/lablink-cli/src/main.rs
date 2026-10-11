@@ -8,6 +8,7 @@
 mod complete;
 mod fieldnet_cmds;
 mod output;
+mod ros_cmds;
 mod setup_cmds;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -377,6 +378,12 @@ enum Cmd {
         #[command(subcommand)]
         action: fieldnet_cmds::HotspotAction,
     },
+    /// Robotics mode: read-only ROS 2 and DDS diagnostics of registered
+    /// devices over SSH (optional feature; no ROS needed on this machine).
+    Ros {
+        #[command(subcommand)]
+        action: ros_cmds::RosAction,
+    },
     /// Optional features (field-network, robotics): list, enable, disable.
     Feature {
         #[command(subcommand)]
@@ -581,7 +588,8 @@ fn main() {
             | Cmd::Feature {
                 action: fieldnet_cmds::FeatureAction::List { json: true, .. }
             }
-    ) || matches!(&cli.cmd, Cmd::Hotspot { action } if fieldnet_cmds::json_mode(action));
+    ) || matches!(&cli.cmd, Cmd::Hotspot { action } if fieldnet_cmds::json_mode(action))
+        || matches!(&cli.cmd, Cmd::Ros { action } if ros_cmds::json_mode(action));
     let code = match run(cli, &client) {
         Ok(c) => c,
         Err(f) => {
@@ -642,6 +650,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::Completions { .. } => "completions",
         Cmd::InstallCompletions => "install-completions",
         Cmd::Hotspot { .. } => "hotspot",
+        Cmd::Ros { .. } => "ros",
         Cmd::Feature { .. } => "feature",
         Cmd::Complete { .. } => "__complete",
     }
@@ -1274,6 +1283,7 @@ fn run(cli: Cli, client: &Client) -> R {
             complete::install().map_err(|e| Fail::new(exit::FAILURE, "completions", e))
         }
         Cmd::Hotspot { action } => fieldnet_cmds::cmd_hotspot(client, action),
+        Cmd::Ros { action } => ros_cmds::cmd_ros(client, action),
         Cmd::Feature { action } => fieldnet_cmds::cmd_feature(action),
         Cmd::Complete { .. } => Ok(exit::OK),
     }

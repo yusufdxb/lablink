@@ -158,7 +158,7 @@ pub fn json_mode(a: &HotspotAction) -> bool {
     )
 }
 
-fn config_path(p: Option<PathBuf>) -> PathBuf {
+pub(crate) fn config_path(p: Option<PathBuf>) -> PathBuf {
     p.unwrap_or_else(lablink_core::paths::default_config_path)
 }
 
