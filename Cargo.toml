@@ -7,6 +7,7 @@ members = [
     "crates/lablink-discovery",
     "crates/lablink-doctor",
     "crates/lablink-setup",
+    "crates/lablink-fieldnet",
     "crates/lablink-daemon",
     "crates/lablink-cli",
     "crates/lablink-gui",
@@ -28,6 +29,7 @@ lablink-discovery = { path = "crates/lablink-discovery" }
 lablink-platform = { path = "crates/lablink-platform" }
 lablink-doctor = { path = "crates/lablink-doctor" }
 lablink-setup = { path = "crates/lablink-setup" }
+lablink-fieldnet = { path = "crates/lablink-fieldnet" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"

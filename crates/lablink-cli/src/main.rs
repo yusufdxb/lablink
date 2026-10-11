@@ -6,6 +6,7 @@
 //! `docs/AUTOMATION.md` and defined in `lablink_core::exit`.
 
 mod complete;
+mod fieldnet_cmds;
 mod output;
 mod setup_cmds;
 
@@ -370,6 +371,17 @@ enum Cmd {
     },
     /// Install shell completion for the current user (no root needed).
     InstallCompletions,
+    /// Field Network: a temporary WPA2/WPA3 Wi-Fi network hosted by this
+    /// machine (optional feature, Linux with NetworkManager; guided on macOS).
+    Hotspot {
+        #[command(subcommand)]
+        action: fieldnet_cmds::HotspotAction,
+    },
+    /// Optional features (field-network, robotics): list, enable, disable.
+    Feature {
+        #[command(subcommand)]
+        action: fieldnet_cmds::FeatureAction,
+    },
     /// Internal: print completion candidates (used by the completion script).
     #[command(hide = true, name = "__complete")]
     Complete {
@@ -566,7 +578,10 @@ fn main() {
             | Cmd::Ping { json: true }
             | Cmd::Doctor { json: true, .. }
             | Cmd::Version { json: true }
-    );
+            | Cmd::Feature {
+                action: fieldnet_cmds::FeatureAction::List { json: true, .. }
+            }
+    ) || matches!(&cli.cmd, Cmd::Hotspot { action } if fieldnet_cmds::json_mode(action));
     let code = match run(cli, &client) {
         Ok(c) => c,
         Err(f) => {
@@ -626,6 +641,8 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::UninstallService => "uninstall-service",
         Cmd::Completions { .. } => "completions",
         Cmd::InstallCompletions => "install-completions",
+        Cmd::Hotspot { .. } => "hotspot",
+        Cmd::Feature { .. } => "feature",
         Cmd::Complete { .. } => "__complete",
     }
 }
@@ -1256,6 +1273,8 @@ fn run(cli: Cli, client: &Client) -> R {
         Cmd::InstallCompletions => {
             complete::install().map_err(|e| Fail::new(exit::FAILURE, "completions", e))
         }
+        Cmd::Hotspot { action } => fieldnet_cmds::cmd_hotspot(client, action),
+        Cmd::Feature { action } => fieldnet_cmds::cmd_feature(action),
         Cmd::Complete { .. } => Ok(exit::OK),
     }
 }
