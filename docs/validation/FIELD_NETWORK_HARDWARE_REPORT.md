@@ -4,6 +4,35 @@ Branch `feat/field-network` at `6af72f8` (base: public v0.3.1, `ffde75c`,
 unchanged). Campaign date: 2026-10-11. Nothing was merged, pushed, tagged
 or published.
 
+> **Addendum, 2026-10-12.** The body of this report records the
+> 2026-10-11 campaign and is unchanged. Later work on the same branch
+> changes four of its findings; nothing below has been run on physical
+> hardware either.
+>
+> - **F1 and blocker 3 (wired uplink).** The hotspot is now isolated by
+>   default: the profile carries `priority 0 iif <adapter> prohibit`
+>   routing rules (IPv4 and IPv6) that NetworkManager installs and removes
+>   with the connection, so clients reach this machine and each other and
+>   nothing behind it, whatever the firewall, NAT, forwarding sysctls or
+>   later routes and VPNs do. A wired uplink no longer blocks a start, and
+>   `--allow-routing` no longer exists. `lablinkd` re-checks the rules
+>   every two seconds and stops the hotspot when they are missing. Verified
+>   in simulation only ([Isolation evidence](../FIELD_NETWORK.md#isolation-evidence)).
+> - **New requirement.** An isolated start also needs a one-line
+>   NetworkManager drop-in (`no-resolv`) so the hotspot's DNS does not
+>   forward queries outside ([Isolation](../FIELD_NETWORK.md#isolation)).
+> - **Blocker 5 (no checkpoint).** A `.pkla` granting only
+>   `checkpoint-rollback` to the one user enables checkpoints without root
+>   or blanket sudo ([Permissions](../FIELD_NETWORK.md#permissions)). Still
+>   optional.
+> - **Configuration.** The workstation's config, including its `wake:`
+>   entries, validates with this branch (a copy was checked; the installed
+>   file was not changed).
+>
+> Blockers 1, 2, 4, 6 and 7 stand. In section 11, the expected result of
+> step B3 is now "blocked" with no flags, and `--allow-routing` no longer
+> applies.
+
 Evidence categories used throughout:
 
 | Category | Meaning |

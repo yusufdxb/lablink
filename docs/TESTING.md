@@ -39,7 +39,7 @@ Kinds:
 | lablink-doctor | unit | check planning, script generation and parsing, verdict and exit codes (AWAY devices ignored), network-only devices, profile check selection, site scope |
 | lablink-setup | unit + localhost | interface classification with the daemon scan rule, config writes (0700 directory, 0600 exclusive temp file, validate, backup, atomic), init with a site and merging a site into an existing config, export/import hardening, support-bundle redaction (adversarial: IPv4/IPv6, MACs, fingerprints, `.local` names, home paths, tokens, names inside dotted host-key aliases), the bundle never clobbers files, the packaged unit equals the generated one, service actions refused when the systemd user manager belongs to another configuration |
 | lablink-daemon | integration (simulated) | Field Network overlay: a pinned device visiting the roaming site keeps its home record (no duplicate); hotspot clients claiming a visitor's name or MAC never move it or mark it failed |
-| lablink-fieldnet | unit (scripted fake) | every OS call goes through a scripted `System` fake (no radio, root or NetworkManager): host-fact parsers (`nmcli` terse output, `iw`, `/proc/net/tcp` and `tcp6` including IPv4-mapped rows, `SSH_CONNECTION`); preflight blockers and warnings (own or inbound SSH session over the adapter, a tunnel or an unknown interface, another uplink without `--allow-internet-sharing`, routes to other networks without `--allow-routing`, equipment over the adapter, WPA3 unverifiable, subnet conflicts with sites, VPN routes and bridges, missing NetworkManager or polkit permission, single vs second adapter, already running); start creates a WPA2 profile with the password only on stdin; a blocked or unconfirmed preflight changes nothing; failed activation restores the previous connection; checkpoint guards activation; an insecure profile, or one visible to other users, read back is refused and never activated; nothing is created without a plain login name; restart, password read-back, forget refused while running; stop and restart refused while an SSH session rides on the adapter; status out of sync, late uplinks and late routes to other networks (VPN tables included); only a key verdict names a client; passwords (length, alphabet, randomness) and SSIDs that cannot inject editor lines; state file private and secret-free; real child processes scrub the secret from stderr and time out; macOS guidance never claims a hotspot |
+| lablink-fieldnet | unit (scripted fake) | every OS call goes through a scripted `System` fake (no radio, root or NetworkManager): host-fact parsers (`nmcli` terse output, `iw`, `/proc/net/tcp` and `tcp6` including IPv4-mapped rows, `SSH_CONNECTION`); preflight blockers and warnings (own or inbound SSH session over the adapter, a tunnel or an unknown interface, isolation that cannot be guaranteed (priority-0 rules, stacked interfaces, bridges, XDP, ingress qdiscs), DNS relay without the drop-in, sharing-mode warnings for uplinks and routed networks, equipment over the adapter, WPA3 unverifiable, subnet conflicts with sites, VPN routes and bridges, missing NetworkManager or polkit permission, single vs second adapter, already running); start creates a WPA2 profile with the password only on stdin; a blocked or unconfirmed preflight changes nothing; failed activation restores the previous connection; checkpoint guards activation; an insecure profile, or one visible to other users, read back is refused and never activated; nothing is created without a plain login name; restart, password read-back, forget refused while running; stop and restart refused while an SSH session rides on the adapter; start stops the hotspot when the kernel rules cannot be verified; the `lablinkd` watchdog (idle, verified, stopped, stop failed); status out of sync, isolation and DNS state, and late uplinks and routes in sharing mode (VPN tables included); only a key verdict names a client; passwords (length, alphabet, randomness) and SSIDs that cannot inject editor lines; state file private and secret-free; real child processes scrub the secret from stderr and time out; macOS guidance never claims a hotspot |
 | lablink-ros | unit (fake remote) | environment from shell files, session and processes (and their consensus), domain/RMW/distro/path validators, Cyclone and Fast DDS XML (interfaces, peers, discovery, garbage input), `ip` and graph parsers; phase-1 script is read-only, phase 2 uses `--no-daemon`, timeouts and validated parameters; the twelve checks and levels over canned devices (healthy pair reaches level 3 and never 4 without the probe, one-way discovery, domain mismatch, shell vs nodes, Cyclone bound to a missing or wrong interface, Humble ignoring the discovery range, QoS conflicts, active results driving levels 1 and 4, missing `ip`); active probe scripts bounded, on their own topic, subscriber on `--no-daemon`, and a new `ros2 daemon` reported as a leftover; `check` request validation; graph snapshots; DDS Security private keys, passwords and PINs redacted from reports, text and JSON |
 | lablink-ros | container (opt-in) | `docker_ros`: real ROS 2 Humble and Jazzy containers on one Docker network, driven through `docker exec` instead of SSH: inspection, graph queries, dds-check of same-distribution and mixed pairs, and the active probe with leftover check. Simulation: no robot, Wi-Fi or SSH. `cargo test -p lablink-ros --test docker_ros -- --ignored --nocapture` (needs Docker and the `ros:humble-ros-base` and `ros:jazzy-ros-base` images; the test installs iproute2 and ping, which those images lack) |
 | lablink-cli | integration (simulated + fake programs) | `hotspot`: feature off by default and gating every change while `status` and `stop` stay available, stop refused while an SSH session rides on the hotspot, `feature list/enable/disable`, `capabilities` read-only and ungated, insecure or invalid requests are usage errors before anything runs, preflight refusals exit 7 and change nothing, start/clients/password/stop/forget end to end against fake `nmcli`; `ros`: off by default, argument validation before anything runs, daemon down is exit 3 with no connection, help states the level-4 rule |
@@ -91,13 +91,32 @@ LABLINK_SOAK_SECS=600 cargo test -p lablink-daemon --release --test daemon soak 
 scripts/soak.sh ~/.config/lablink/config.yaml /tmp/lablink-soak 1800 60
 ```
 
-Simulated Wi-Fi (manual, not automated): the Field Network was exercised
-with real NetworkManager, `wpa_supplicant`, `hostapd` and `dnsmasq` on
-Linux `mac80211_hwsim` radios, each radio moved into its own
-network-isolated container, with simulated LAN, internet and VPN networks
-behind the host. What it showed, and what it cannot show, is listed in
-[FIELD_NETWORK.md](FIELD_NETWORK.md#simulated-validation). It needs root to
-load the module and move radios, so it is not part of the suite or CI.
+Simulated Wi-Fi (manual, not automated): `tests/hwsim/run.sh OUT_DIR
+[SCENARIO...]` runs real NetworkManager 1.36, `wpa_supplicant`, `dnsmasq`
+and polkit 0.105 (`tests/hwsim/Dockerfile`, Ubuntu 22.04) on Linux
+`mac80211_hwsim` radios, each moved into its own network-isolated
+container: the hotspot host (with a simulated Ethernet uplink and lab LAN
+managed by NetworkManager), two clients, and a "wan" container that plays
+the uplink, the internet, the LAN and a WireGuard VPN and counts every
+probe packet that reaches it in its raw table. No physical interface is
+touched; the script snapshots the host's links, addresses, rules, routes
+and loaded modules before and after and fails if they differ. It needs
+root (Docker and `modprobe`), so it is not part of the suite or CI.
+
+| Scenario | What it shows |
+|---|---|
+| `raw_control` | Without the rules, shared mode forwards probes to every network behind the host (proves the harness sees a leak) |
+| `raw_isolated` | With the rules: host reachable, client to client works, zero probes out, rules gone after deactivation |
+| `raw_late_changes` | A WireGuard VPN with a policy rule, new routes and tables, hostile priority-0 rules, sysctl toggles and blanket MASQUERADE after activation leak nothing; deleting the rules (negative control) does |
+| `raw_nm_restart` | NetworkManager stopped (SIGTERM) and killed (SIGKILL) under a running hotspot, and restarted |
+| `raw_window` | The rules are in the kernel before the access point accepts clients (repeated activations, flood from a client) |
+| `raw_dns` | The hotspot's dnsmasq forwards queries upstream without the `no-resolv` drop-in and refuses them with it |
+| `lablink_permissions` | As an unprivileged user: preflight blocks without polkit grants and passes with the four-action `.pkla`; checkpoint created; another user cannot see or stop the hotspot |
+| `lablink_isolated` | `lablink hotspot start` as that user: the same probes, DNS and late changes as the raw scenarios, `status`, sharing mode as a positive control, stop |
+| `lablink_monitor` | The real `lablinkd` watchdog stops the hotspot after the IPv4 rule, the IPv6 rule is deleted or an ingress qdisc is attached, with the time it took and the packets forwarded meanwhile |
+
+Results and their limits are in
+[FIELD_NETWORK.md](FIELD_NETWORK.md#simulated-validation).
 
 ## Clean-room install test (`scripts/cleanroom.sh`)
 

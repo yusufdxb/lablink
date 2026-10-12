@@ -21,9 +21,9 @@ applies until you turn it on.
 |---|---|
 | Preflight, start, stop, restore, rollback, password handling, client classification, profile verification | Unit and integration tests against a scripted fake of `nmcli`, `ip` and `/proc` (`crates/lablink-fieldnet/src/tests.rs`, `crates/lablink-cli/tests/hotspot.rs`) |
 | Visiting devices recognized by pinned host key only | Daemon integration tests on a simulated network (`crates/lablink-daemon/tests/field_network.rs`) |
-| `capabilities` and `preflight` on a real Linux host (NetworkManager, one Wi-Fi adapter, Ethernet uplink, a VPN and Docker) | Run read-only. Output matched the host: AP and WPA2 reported, WPA3 "cannot verify" without `iw`, start refused because Ethernet would be NATed |
-| Start, WPA2 and WPA3 authentication, DHCP, client-to-host and client-to-client traffic, stop and restore, restart, password rotation, activation failure with and without a checkpoint, NetworkManager rolling a checkpoint back after LabLink was killed, isolation with and without shared mode, late-route warnings, `forget`, downgrade | **Simulation only.** Real NetworkManager, `wpa_supplicant`, `hostapd` and `dnsmasq` driving simulated radios (Linux `mac80211_hwsim`) inside network-isolated containers, with simulated LAN, internet and VPN networks behind the host. See [Simulated validation](#simulated-validation) |
-| Starting a hotspot on a real adapter, a real client joining, real DHCP leases, real rollback | **Not tested.** No hotspot has been started on a real adapter during development. Simulated radios do not show driver, firmware, channel or regulatory limits |
+| `capabilities` and `preflight` on a real Linux host (NetworkManager, one Wi-Fi adapter, Ethernet uplink, a VPN and Docker) | Run read-only with an earlier build, which refused to start because Ethernet would be NATed. The isolated default replaced that refusal; preflight with this build has not been run on that host |
+| Start, WPA2 and WPA3 authentication, DHCP, client-to-host and client-to-client traffic, stop and restore, restart, password rotation, activation failure with and without a checkpoint, NetworkManager rolling a checkpoint back after LabLink was killed, isolation (IPv4 and IPv6, against a simulated Ethernet uplink, LAN and VPN, including routes, rules and a VPN added after start), DNS refusal, the `lablinkd` watchdog, NetworkManager stopped or killed under a running hotspot, unprivileged use with polkit grants, `forget`, downgrade | **Simulation only.** Real NetworkManager, `wpa_supplicant`, `hostapd`, `dnsmasq` and polkit driving simulated radios (Linux `mac80211_hwsim`) inside network-isolated containers, with simulated LAN, internet and VPN networks behind the host. See [Simulated validation](#simulated-validation) and [Isolation evidence](#isolation-evidence) |
+| Starting a hotspot on a real adapter, a real client joining, real DHCP leases, real rollback, isolation on real hardware | **Not tested.** No hotspot has been started on a real adapter during development. Simulated radios do not show driver, firmware, channel or regulatory limits |
 | macOS | **Not tested on a Mac.** Only the parsers and guidance are tested, against recorded command output |
 
 Treat the Field Network as experimental until you have run the
@@ -38,16 +38,57 @@ hardware. The simulated runs do not change that.
   point, WPA2, WPA3, 2.4 GHz and 5 GHz). WPA3
   needs SAE in AP mode, which LabLink can only verify when `iw` is
   installed.
-- Polkit permission for your user to control networking
-  (`org.freedesktop.NetworkManager.network-control`) and, the first time,
-  to create a connection profile of its own (`settings.modify.own`). A
-  local desktop session's user normally has both. LabLink never asks for root,
+- Polkit permissions for your user, below. LabLink never asks for root,
   never runs `sudo`, and never installs a privileged helper. If polkit
-  says `auth` (would prompt), preflight refuses and tells you which
-  permission is missing.
-- Optional: the `checkpoint-rollback` permission. With it, NetworkManager
-  itself undoes the change if activation does not complete within 120 s
-  (see [Restoring the previous network](#restoring-the-previous-network)).
+  says `auth` (would prompt) or `no`, preflight refuses and names the
+  missing permission.
+- For isolated mode (the default): a one-time dnsmasq drop-in installed by
+  an administrator, and `lablinkd` running ([Isolation](#isolation)).
+
+### Permissions
+
+| NetworkManager polkit action | Needed for | Default for a local active session |
+|---|---|---|
+| `org.freedesktop.NetworkManager.network-control` | Bringing the hotspot (and the previous connection) up and down; `lablinkd` stopping it | yes (also inactive sessions; `auth_admin` with no session) |
+| `org.freedesktop.NetworkManager.settings.modify.own` | Creating or changing a profile restricted to your user (first start, password changes) | yes (`auth_self_keep` with no session) |
+| `org.freedesktop.NetworkManager.wifi.share.protected` | Activating a WPA2/WPA3 access point | yes (`no` for inactive sessions or none) |
+| `org.freedesktop.NetworkManager.checkpoint-rollback` | Optional: NetworkManager's own rollback if activation does not complete | `auth_admin_keep` (so LabLink skips it) |
+
+`nmcli general permissions` shows what your user has. A user at the
+machine's desktop normally has the first three. `lablinkd` as a systemd
+user service gets the same answers while that desktop session is active.
+Over SSH, or with no session, polkit uses the stricter "any" column and
+preflight refuses.
+
+To also get the checkpoint, grant just that action to just your user. On
+polkit 0.105 (Ubuntu 22.04 and older), as root, in
+`/etc/polkit-1/localauthority/50-local.d/50-lablink-field-network.pkla`:
+
+    [LabLink Field Network checkpoint for alice]
+    Identity=unix-user:alice
+    Action=org.freedesktop.NetworkManager.checkpoint-rollback
+    ResultAny=no
+    ResultInactive=no
+    ResultActive=yes
+
+On polkit 0.106 and later (JavaScript rules: Fedora, Arch, Debian 12, Ubuntu 23.10 and later), in
+`/etc/polkit-1/rules.d/50-lablink-field-network.rules`:
+
+    polkit.addRule(function (action, subject) {
+        if (action.id == "org.freedesktop.NetworkManager.checkpoint-rollback" &&
+            subject.user == "alice" && subject.local && subject.active) {
+            return polkit.Result.YES;
+        }
+    });
+
+The simulated runs exercised the `.pkla` form (with all four actions, as
+`ResultAny`, because the test container has no login sessions); the
+JavaScript form has not been tested.
+
+Do not grant `settings.modify.system`, do not add your user to a group
+with blanket NetworkManager rights, and do not run the app as root: none
+of that is needed. Checkpoint rollback covers every device listed in the
+checkpoint, which LabLink limits to the hotspot adapter.
 
 ## Turning it on
 
@@ -79,7 +120,7 @@ reads.
 
 Start and preflight options: `--interface`, `--ssid`, `--subnet` (private
 IPv4, /22 to /28), `--security wpa2|wpa3`, `--allow-internet-sharing`,
-`--allow-routing`.
+`--allow-dns-relay`.
 `start` also takes `--yes` (accept warnings without asking; blockers are
 never accepted), `--password-stdin` and `--no-site`. Every command takes
 `--json`. Exit codes follow the rest of LabLink: 0 success, 1 failure, 2
@@ -90,8 +131,9 @@ an SSH session).
 In the app, the **Field Network** tab shows the same capabilities, status
 and clients. **Check** runs preflight for the settings in the form;
 **Start** is enabled only after a check of exactly those settings found no
-blocker and you ticked every warning. The **Internet sharing** and
-**Routing** boxes are the two overrides. The app checks again just before
+blocker and you ticked every warning. The **Internet sharing** box
+switches to the sharing mode; **DNS relay** accepts the DNS relay
+blocker. The app checks again just before
 starting and refuses if any warning's text changed. With the feature off,
 the tab still shows a running hotspot's status and a **Stop** button.
 
@@ -101,7 +143,10 @@ the tab still shows a running hotspot's status and a **Stop** button.
 2. **Profile.** LabLink creates one NetworkManager profile, "LabLink Field
    Network" (autoconnect off), or updates the one it made before. Mode
    `ap`; key management `wpa-psk` (WPA2, CCMP) or `sae` (WPA3, PMF
-   required); IPv4 `shared`, IPv6 disabled. The profile belongs to your
+   required); IPv4 `shared`, IPv6 disabled. Unless you chose internet
+   sharing, the profile also carries two routing rules,
+   `priority 0 iif <adapter> prohibit` for IPv4 and for IPv6
+   ([Isolation](#isolation)). The profile belongs to your
    user (`connection.permissions user:<you>`): other local users cannot
    see, activate, edit or read the password of it, and creating it needs
    polkit's `settings.modify.own`, not `settings.modify.system`. LabLink
@@ -113,20 +158,25 @@ the tab still shows a running hotspot's status and a **Stop** button.
    store. LabLink keeps only the profile's UUID.
 4. **Verify.** The profile is read back. Anything other than WPA2/WPA3 with
    a password (open, WEP, a missing key), a password not kept in
-   NetworkManager's own store, or a profile visible to anyone but you
-   (no permissions, or other users listed) is refused and never activated.
+   NetworkManager's own store, a profile visible to anyone but you
+   (no permissions, or other users listed), or missing or different
+   isolation rules is refused and never activated.
 5. **Record.** `fieldnet.json` (mode 0600, in LabLink's state directory)
    notes the previous connection on the adapter, the subnet and whether
    IPv4 forwarding was on.
 6. **Checkpoint** (when polkit allows it without a prompt).
 7. **Activate** with a bounded wait, then confirm the profile is active on
-   the adapter with the gateway address up. On failure, the checkpoint is
-   rolled back, or LabLink reconnects the previous connection itself.
+   the adapter with the gateway address up, and (isolated mode) that the
+   kernel holds both isolation rules first in line. On failure, the
+   checkpoint is rolled back, or LabLink stops the hotspot and reconnects
+   the previous connection itself.
 8. **Site.** The `field-network` site in your config is added or updated
    with the hotspot's subnet (skip with `--no-site`).
 
 DHCP comes from NetworkManager's own dnsmasq instance, bound to the hotspot
 only. LabLink runs no DHCP server, opens no port, and starts no service.
+While the hotspot runs, `lablinkd` re-checks the isolation every two
+seconds ([Isolation](#isolation)).
 
 ## Preflight findings
 
@@ -137,15 +187,17 @@ Each finding has a level (`block`, `warn`, `info`) and a stable code that
 |---|---|---|
 | `unsupported-os` | block | macOS (use Internet Sharing) or an OS without NetworkManager support |
 | `networkmanager` | block | NetworkManager or `nmcli` missing or not running |
-| `permission` | block | Polkit would need administrator authorization |
+| `permission` | block | Polkit would need administrator authorization for `network-control`, `settings.modify.own` (first start) or `wifi.share.protected` |
 | `adapter` | block / info | No capable adapter, the named one cannot host WPA2, or which of several is used |
 | `security` | block / warn | WPA3 requested on an adapter without SAE (block) or where it cannot be verified (warn) |
 | `ssid` | block | An SSID that is empty, too long, or has characters NetworkManager's editor would misread |
 | `remote-session` | block / info | An SSH session (this command's, or any inbound connection to port 22 or this session's SSH port, read from `/proc/net/tcp` and `tcp6`) arrives through the adapter, through a tunnel or other virtual interface, or through an interface LabLink cannot identify. No override. Info when it arrives over another physical adapter |
 | `disconnect` | warn | The adapter leaves its current network while the hotspot runs |
 | `uplink` | warn | That network is this machine's only internet uplink |
-| `internet-sharing` | block / warn | Another uplink exists, so shared mode would NAT clients onto it. Blocked unless `--allow-internet-sharing` |
-| `forwarding` | block / info | Shared mode enables IPv4 forwarding and this machine routes to other networks (VPN, Docker, LAN). Blocked unless `--allow-routing` |
+| `isolation` | block / info | Block: the isolation cannot be guaranteed (another priority-0 routing rule, unreadable rules, an interface stacked on the adapter, the adapter in a bridge, an XDP program or a tc ingress/clsact qdisc on it, or unreadable qdiscs). No override. Info: the networks the rule keeps clients off |
+| `dns-relay` | block / warn | The hotspot's DNS server would forward clients' queries to this machine's resolvers (no `no-resolv` drop-in), or the drop-ins cannot be read. Blocked unless `--allow-dns-relay` |
+| `internet-sharing` | warn | Sharing mode only: clients will reach the internet through the named uplinks |
+| `forwarding` | warn / info | Sharing mode: every routed network (VPN, Docker, LAN) is reachable. Isolated mode: shared mode will turn IPv4 forwarding on (warn when it was off; it stays on after stop) |
 | `sessions` | info | Other (non-SSH) TCP connections that arrive over the adapter and will drop |
 | `equipment` | warn | Registered devices this machine reaches over the adapter (from the daemon), or the daemon is not running so this is unknown |
 | `subnet` | block | The requested subnet overlaps an attached network, a route in any table, a container bridge, the CGNAT range, or another LabLink site; or no free default exists |
@@ -174,37 +226,90 @@ offer a timed confirm-and-roll-back mode for remote use.
 Not detected: sessions over UDP (mosh), and SSH servers on a port other
 than 22 unless this command itself runs over that session.
 
-### Internet sharing and forwarding
+### Isolation
 
-NetworkManager's shared mode turns on IPv4 forwarding and masquerades the
-hotspot subnet. LabLink does not change firewall rules or sysctls itself,
-so:
+Isolated mode is the default. Hotspot clients reach this machine and each
+other, and nothing else: not the internet, the LAN, a VPN or a container
+network behind this machine, whether it existed at start or appears later.
 
-- With another uplink (Ethernet, a second Wi-Fi), clients could reach the
-  internet through this machine. That is a blocker unless you pass
-  `--allow-internet-sharing` (the **Internet sharing** box in the app).
-- With other routed networks (a VPN, Docker bridges, a lab LAN), clients
-  could reach them unless your firewall blocks forwarding from the hotspot
-  interface. That is a blocker, naming the routes, unless you pass
-  `--allow-routing` (the **Routing** box in the app).
-- `start` and `status` report whether forwarding was off before and is on
-  now. NetworkManager may leave it on after the hotspot stops; `status`
-  shows it, and turning it off is your decision.
-- If another uplink appears while the hotspot runs (you plug in Ethernet),
-  NetworkManager's NAT may start sharing it. `status` prints a warning
-  naming it.
-- If a route to another network appears while the hotspot runs (a VPN
-  connects, a container network starts), clients can be forwarded to it.
-  `status` names those routes, from every routing table, with a warning
-  (`routed` in `--json`). It warns; it does not block or stop the hotspot,
-  and LabLink does not add firewall rules. Stop the hotspot if that is not
-  intended.
+How. NetworkManager's shared mode still provides DHCP (its own dnsmasq)
+and still turns on IPv4 forwarding and NAT. The profile adds two routing
+rules that NetworkManager installs when it activates the hotspot and
+removes when it deactivates it:
 
-In the simulated runs, an isolated start (no other uplink or routes) left
-clients able to reach only this machine. With `--allow-internet-sharing`
-and `--allow-routing`, clients reached the simulated LAN, internet and VPN
-through NetworkManager's masquerading, as warned. A VPN route added after
-start was reachable by clients and reported by `status`.
+    priority 0 iif <adapter> prohibit      (IPv4)
+    priority 0 iif <adapter> prohibit      (IPv6)
+
+The kernel consults routing rules in priority order, and `0: lookup local`
+(this machine's own addresses) comes first. A packet that arrives from the
+hotspot and is for this machine is delivered by `lookup local`. Any other
+packet from the hotspot hits the `prohibit` rule before any routing table
+is read, so it cannot be forwarded: the sender gets an ICMP "administratively
+prohibited" error. This happens in routing, before the firewall's FORWARD
+chain and NAT, so firewall rule order, a firewall that accepts all
+forwarding, `MASQUERADE` rules, `ip_forward=1` and new routes in any table
+do not matter. A rule added later at the same priority sorts after
+LabLink's. IPv6 is also disabled on the adapter (the IPv6 rule is the
+guarantee; that is a second layer).
+
+What LabLink checks and when:
+
+- **Preflight** refuses (no override) if the isolation cannot be
+  guaranteed: an existing priority-0 rule other than `lookup local`
+  (it would sort before LabLink's), rules it cannot read, an interface
+  stacked on the adapter (macvlan, VLAN), the adapter in a bridge, an XDP
+  program or a tc ingress/clsact qdisc on it, or qdiscs it cannot read.
+- **Start, restart** read the profile back (the rules must be exactly
+  LabLink's) and, after activation, the kernel's rules: each family's rule
+  must be the first rule after `lookup local`. Otherwise LabLink stops the
+  hotspot (or NetworkManager rolls back the checkpoint) and reports a
+  failure.
+- **While it runs**, `lablinkd` repeats the check every two seconds and
+  stops the hotspot (`nmcli connection down`) when it fails, logging why.
+  It does not spare SSH sessions over the hotspot: isolation comes first.
+  Without a running `lablinkd`, nothing watches; `status` still checks
+  when you run it.
+- **`status`** reports `isolation verified` and the networks kept off, or
+  `ISOLATION NOT VERIFIED` with the reason.
+
+DNS. NetworkManager's dnsmasq for the hotspot forwards client queries to
+this machine's resolvers by default, which is a path to the outside
+(queries and answers, so also a covert channel). LabLink refuses an
+isolated start unless a NetworkManager drop-in stops that. Install it once,
+as an administrator (it applies to every NetworkManager shared connection
+on this machine):
+
+    echo no-resolv | sudo tee /etc/NetworkManager/dnsmasq-shared.d/lablink-no-upstream.conf
+
+It takes effect at the next activation. Clients then get `REFUSED` for
+names on the outside. `--allow-dns-relay` accepts forwarding instead.
+
+What it does not cover:
+
+- Clients reach every address of this machine, not just the hotspot
+  gateway (`lookup local` includes the Ethernet, VPN and Docker
+  addresses). Any service listening on all interfaces is reachable from
+  the hotspot, as on any network you join.
+- IPv4 forwarding stays on after the hotspot stops if shared mode turned
+  it on; `start` and `status` say so.
+- Root can delete the rules. `lablinkd` then stops the hotspot within
+  about two seconds plus the time `nmcli` takes; packets sent in that
+  window are forwarded (the simulated runs measured it, see below).
+- When NetworkManager stops cleanly it removes the rules and tears the
+  hotspot down. In one simulated run 2 small TCP segments (40 bytes, from
+  connections already open) were forwarded during that teardown; a second
+  run forwarded none. If NetworkManager is killed, the rules and the
+  access point stay and isolation holds; restarting NetworkManager then
+  may fail to bring the hotspot back while its orphaned dnsmasq holds the
+  address (reboot or stop that dnsmasq as root).
+
+### Internet sharing
+
+`--allow-internet-sharing` (the **Internet sharing** box in the app) is a
+separate mode: no isolation rules, NetworkManager's NAT onto every uplink,
+and clients can reach every network this machine routes to. Preflight
+warns, naming the uplinks and routed networks, and `status` warns about
+routes that appear later. LabLink does not add firewall rules in this mode.
 
 ## Clients and device states
 
@@ -328,8 +433,10 @@ with `lablink status` and `lablink ros` from either machine.
 - The profile is restricted to your user, so other local accounts cannot
   list it, bring it up or down, or read its password through
   NetworkManager. Root can.
-- Internet sharing is off unless you ask. LabLink does not change firewall
-  rules, sysctls or routes.
+- Hotspot clients are isolated unless you ask for internet sharing: the
+  only change beyond the hotspot itself is two routing rules carried by
+  LabLink's NetworkManager profile, which NetworkManager adds and removes
+  with it. LabLink does not change firewall rules or sysctls.
 - Hotspot clients get nothing from LabLink: there is no API to talk to,
   and an unknown client is never trusted. A client can still reach any
   service this machine exposes on all interfaces (SSH, for example), as
@@ -355,6 +462,8 @@ The full threat model is in [THREAT_MODEL.md](THREAT_MODEL.md#field-network-and-
 - DHCP lease details (hostnames) appear only when your user can read
   NetworkManager's lease file.
 - Forwarding that NetworkManager enables may stay enabled after stop.
+- Isolated mode needs a root-installed dnsmasq drop-in once
+  ([Isolation](#isolation)), and `lablinkd` running to watch the rules.
 
 ## Simulated validation
 
@@ -380,10 +489,73 @@ interface was touched.
 | Activation failure | With a checkpoint, NetworkManager restored the previous network. Without one, LabLink reconnected it |
 | LabLink killed after activation | NetworkManager rolled the checkpoint back by itself, in under two minutes |
 | Remote-session guard | `stop` refused while an SSH session arrived over the hotspot |
-| Isolation | Described under [Internet sharing and forwarding](#internet-sharing-and-forwarding) |
+| Isolation | See [Isolation evidence](#isolation-evidence) |
 | WPA3 | A WPA3 (SAE, PMF required) hotspot accepted a WPA3 client; a WPA2-only client could not join |
 | Another local user | Could not list the profile or read its password |
 | `forget` | Refused without `--yes`; deleted the profile after stop |
+
+### Isolation evidence
+
+Same simulated setup, run with `tests/hwsim/run.sh` (see
+[TESTING.md](TESTING.md)) on 2026-10-12. The host side of the simulation
+is NetworkManager-managed: an Ethernet uplink with a default route (IPv4
+and IPv6), a lab LAN, and, where noted, a WireGuard VPN added later with a
+policy rule. A container behind those networks counts, in its raw table,
+every probe packet that reaches it. Each probe round is TCP and ICMP from a
+hotspot client to seven addresses: the uplink gateway, an internet host,
+the LAN, the VPN peer, and three IPv6 equivalents. The script compared
+the host's links, addresses, rules, routes and modules before and after
+every run; they were identical each time.
+
+| Case | Probe packets that reached other networks |
+|---|---|
+| Shared mode without the rules (positive control, proves the counter sees a leak) | 37 (IPv4); 55 with IPv6 enabled |
+| Rules in place, raw NetworkManager profile | 0 |
+| After a WireGuard VPN with a policy rule appeared | 0 |
+| After new routes (more specific, other table, new default) | 0 |
+| After hostile priority-0 rules were added | 0 |
+| After toggling forwarding sysctls and re-enabling IPv6 on the hotspot | 0 |
+| After a blanket `MASQUERADE` rule | 0 |
+| Rules deleted by root (negative control) | 55 |
+| `lablink hotspot start` as an unprivileged user (default, isolated) | 0 |
+| Same, after a VPN, new routes, a new table and a hostile priority-0 rule | 0 |
+| `lablink hotspot start --allow-internet-sharing` (positive control) | 37 |
+| NetworkManager stopped (SIGTERM): hotspot torn down, rules removed | 0 (2 TCP segments in an earlier run) |
+| NetworkManager killed (SIGKILL): rules and access point stay; clients get ICMP "administratively prohibited" | 0, and 0 after the restart |
+
+In the isolated cases the client still reached this machine (on the
+hotspot gateway and on its uplink address) and the other client (ICMP,
+TCP and IPv6 link-local), and DNS queries for outside names got `REFUSED`
+with the drop-in. Without the drop-in, the client resolved an outside name
+through the host, which is why `start` requires it. After `stop`, no
+`prohibit` rule was left.
+
+`lablinkd`'s watchdog, with a client sending about 100 IPv4 UDP packets a
+second to the uplink, after root broke isolation:
+
+| Breach | Hotspot down after | Flood packets forwarded meanwhile |
+|---|---|---|
+| IPv4 rule deleted | 1.87 s | 142 |
+| IPv6 rule deleted | 1.18 s | 0 (the flood was IPv4 only, so this says nothing about IPv6 leakage) |
+| tc ingress qdisc added on the adapter | 1.18 s | 0 |
+
+Activation window: eight activations of the isolated profile while a
+client tried to flood. NetworkManager installed both rules about 16 ms
+after activation started. No client packet reached the host or another
+network in any run, but the client also never got a packet to the host
+during an activation, so these runs do not prove that the rules beat the
+first client packet. The first activation failed ("IP configuration could
+not be reserved") because the dnsmasq orphaned by the SIGKILL case still
+held the address.
+
+Permissions, as an unprivileged user under polkit 0.105: without grants,
+`network-control`, `settings.modify.own` and `checkpoint-rollback` needed
+authentication and `wifi.share.protected` was refused, and preflight
+listed them as blockers (exit 7). With the four-action `.pkla` in
+[Permissions](#permissions), preflight passed, `start` created a
+checkpoint and verified isolation, another user saw no profile and could
+not stop the hotspot (`uid 1001 has no permission`), and `stop` then
+`forget --yes` left no LabLink profile.
 
 ## Downgrading and recovery
 
@@ -442,8 +614,8 @@ yourself and keep what you observe.
 3. Make sure no robot is moving or depending on the laptop's current
    network.
 4. Run `lablink hotspot preflight` at the laptop (not over SSH). Read every
-   warning. If it refuses because of another uplink, unplug it or decide
-   to pass `--allow-internet-sharing`.
+   warning. Another uplink (Ethernet) stays up and stays off limits to
+   clients; pass `--allow-internet-sharing` only if you want clients on it.
 5. Start it: `lablink hotspot start`. Accept the warnings you understand.
    Note the SSID and subnet it prints.
 6. Show the password with `lablink hotspot password` and join the Jetson
@@ -463,10 +635,13 @@ yourself and keep what you observe.
 
 | Symptom | Check |
 |---|---|
-| `permission` blocker | `nmcli general permissions`: `network-control` and `settings.modify.own` must say `yes`. Polkit usually grants them only to a local, active login session, not over SSH or from a service |
+| `permission` blocker | `nmcli general permissions`: `network-control`, `settings.modify.own` and `wifi.share.protected` must say `yes`. NetworkManager's default policy grants `wifi.share.protected` only to a local, active session; see [Permissions](#permissions) |
 | Activation fails or times out | The adapter may not support AP mode on the chosen band while connected; try a second adapter, or stop the client connection first |
 | Clients cannot join a WPA3 hotspot | Use the default `--security wpa2` |
 | Clients join but get no address | `journalctl -u NetworkManager` for dnsmasq errors; another DHCP server on the machine may hold port 67 |
 | A registered device stays `discovered-untrusted` | Its pin is not provable yet. `lablink status <name>` and `lablink doctor <name>` explain why |
 | `status` says out of sync | Something else stopped or started the profile, or a start was interrupted; `lablink hotspot stop` reconciles |
-| `status` warns that clients can be routed somewhere | A VPN, container network or uplink appeared after start. Stop the hotspot, or block forwarding from the hotspot interface in your firewall |
+| `isolation` blocker | Preflight names the cause: remove the other priority-0 rule, the stacked interface, bridge, XDP program or ingress qdisc, or use the sharing mode knowingly |
+| `dns-relay` blocker | Install the `no-resolv` drop-in ([Isolation](#isolation)) |
+| `lablinkd` stopped the hotspot | Its log names the failed check. Something removed a rule or attached a bypass; find out what before starting again |
+| `status` warns that clients can be routed somewhere | Sharing mode only: a VPN, container network or uplink appeared after start. Stop the hotspot, or block forwarding from the hotspot interface in your firewall |
