@@ -642,33 +642,43 @@ fn print_capabilities(c: &lablink_fieldnet::Capabilities) {
 }
 
 fn print_status(s: &nm::Status) {
+    print!("{}", status_text(s));
+}
+
+/// What `hotspot status` prints, one line per fact.
+fn status_text(s: &nm::Status) -> String {
+    use std::fmt::Write;
+    let mut o = String::new();
     let Some(st) = &s.state else {
-        println!("No Field Network set up yet: `lablink hotspot preflight`, then `lablink hotspot start`.");
-        return;
+        let _ = writeln!(o, "No Field Network set up yet: `lablink hotspot preflight`, then `lablink hotspot start`.");
+        return o;
     };
-    println!(
+    let _ = writeln!(
+        o,
         "Field Network '{}': {}",
         printable(&st.ssid),
         if s.active { "running" } else { "stopped" }
     );
     if s.out_of_sync && s.active {
         // Also what an interrupted `lablink hotspot start` leaves behind.
-        println!("  (LabLink has no record of starting it: it was started elsewhere, or a LabLink start was interrupted, which NetworkManager rolls back within 2 minutes if LabLink took a checkpoint)");
+        let _ = writeln!(o, "  (LabLink has no record of starting it: it was started elsewhere, or a LabLink start was interrupted, which NetworkManager rolls back within 2 minutes if LabLink took a checkpoint)");
     } else if s.out_of_sync {
-        println!("  (it was stopped outside LabLink)");
+        let _ = writeln!(o, "  (it was stopped outside LabLink)");
     }
-    println!(
+    let _ = writeln!(
+        o,
         "  adapter {}  subnet {}  this machine {}",
         st.interface,
         st.subnet,
         s.gateway.map(|g| g.to_string()).unwrap_or_default()
     );
-    println!("  security {}", s.security.unwrap_or("?"));
+    let _ = writeln!(o, "  security {}", s.security.unwrap_or("?"));
     if let (Some(p), true) = (&st.previous, s.active) {
-        println!("  restores '{}' when stopped", printable(&p.name));
+        let _ = writeln!(o, "  restores '{}' when stopped", printable(&p.name));
     }
     if let Some(f) = s.ip_forward {
-        println!(
+        let _ = writeln!(
+            o,
             "  IPv4 forwarding {}{}",
             if f { "on" } else { "off" },
             match st.ip_forward_before {
@@ -679,23 +689,25 @@ fn print_status(s: &nm::Status) {
         );
     }
     if !s.uplinks.is_empty() {
-        println!(
+        let _ = writeln!(o,
             "  WARNING: hotspot clients can reach the internet through {} (NetworkManager's shared mode NATs them). Stop the hotspot if that is not intended.",
             printable(&s.uplinks.join(", "))
         );
     }
     if !s.routed.is_empty() {
-        println!(
+        let _ = writeln!(o,
             "  WARNING: hotspot clients can be routed to {} (NetworkManager's shared mode forwards and NATs them; LabLink does not change firewall rules). Stop the hotspot if that is not intended.",
             printable(&s.routed.join(", "))
         );
     }
     if s.active {
-        println!(
+        let _ = writeln!(
+            o,
             "  {} client(s) (details: `lablink hotspot clients`)",
             s.clients.len()
         );
     }
+    o
 }
 
 pub fn cmd_feature(action: FeatureAction) -> R {
@@ -752,4 +764,83 @@ fn set_feature(name: &str, on: bool, config: Option<PathBuf>) -> R {
         println!("Next: `lablink hotspot capabilities`, then `lablink hotspot preflight`.");
     }
     Ok(exit::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lablink_fieldnet::state::{FieldState, Previous, Security};
+
+    fn status(active: bool, recorded_active: bool) -> nm::Status {
+        nm::Status {
+            configured: true,
+            active,
+            out_of_sync: active != recorded_active,
+            state: Some(FieldState {
+                version: 1,
+                profile_uuid: Some("u".into()),
+                interface: "wlan0".into(),
+                ssid: "LabLink-TEST".into(),
+                subnet: "10.77.0.0/24".into(),
+                security: Security::Wpa2,
+                previous: Some(Previous {
+                    uuid: "h".into(),
+                    name: "home".into(),
+                    device: "wlan0".into(),
+                }),
+                active: recorded_active,
+                started_ms: None,
+                ip_forward_before: Some(false),
+            }),
+            gateway: Some("10.77.0.1".parse().unwrap()),
+            security: Some("WPA2-Personal (CCMP)"),
+            ip_forward: Some(true),
+            uplinks: Vec::new(),
+            routed: Vec::new(),
+            clients: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn status_names_the_network_it_restores_only_while_running() {
+        let t = status_text(&status(true, true));
+        assert!(t.contains("'LabLink-TEST': running"), "{t}");
+        assert!(t.contains("restores 'home' when stopped"), "{t}");
+        assert!(
+            t.contains("IPv4 forwarding on (was off before the hotspot)"),
+            "{t}"
+        );
+
+        let t = status_text(&status(false, false));
+        assert!(t.contains("': stopped"), "{t}");
+        assert!(
+            !t.contains("restores"),
+            "nothing to restore while stopped: {t}"
+        );
+        assert!(!t.contains("outside LabLink"), "{t}");
+
+        let t = status_text(&status(false, true));
+        assert!(t.contains("(it was stopped outside LabLink)"), "{t}");
+        assert!(!t.contains("restores"), "{t}");
+
+        let t = status_text(&status(true, false));
+        assert!(t.contains("a LabLink start was interrupted"), "{t}");
+        assert!(t.contains("restores 'home'"), "{t}");
+    }
+
+    #[test]
+    fn status_warns_about_late_routes_and_escapes_names() {
+        let mut s = status(true, true);
+        s.routed = vec!["100.64.0.0/10 (tailscale0)".into()];
+        s.state.as_mut().unwrap().previous.as_mut().unwrap().name = "home\u{202e}x".into();
+        let t = status_text(&s);
+        assert!(
+            t.contains("WARNING: hotspot clients can be routed to 100.64.0.0/10 (tailscale0)"),
+            "{t}"
+        );
+        assert!(!t.contains('\u{202e}'), "bidi control escaped: {t}");
+        assert!(status_text(&status(true, true))
+            .lines()
+            .all(|l| !l.contains("WARNING")));
+    }
 }
