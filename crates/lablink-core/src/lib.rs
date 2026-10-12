@@ -25,18 +25,32 @@ pub mod time;
 pub use config::Config;
 
 /// `s` with control characters shown escaped, for text that may hold
-/// something LabLink did not write (a path, ssh output): it can never move
-/// the cursor, rewrite a line or start a line that looks like LabLink's own.
+/// something LabLink did not write (a path, ssh output, a hotspot client's
+/// name): it can never move the cursor, rewrite a line or start a line that
+/// looks like LabLink's own. Bidirectional and invisible formatting
+/// characters are escaped too, so text cannot be reordered on screen (a
+/// right-to-left override making `exe.txt` read as `txt.exe`) or hide in
+/// zero-width characters.
 pub fn printable(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_control() {
+            if c.is_control() || is_format_char(c) {
                 c.escape_default().to_string()
             } else {
                 c.to_string()
             }
         })
         .collect()
+}
+
+/// Bidirectional controls (U+061C, U+200E/F, U+202A-202E, U+2066-2069) and
+/// invisible characters (zero-width space and joiners, word joiner and the
+/// invisible operators, byte-order mark).
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 /// LabLink release version (all binaries share it).
@@ -99,5 +113,27 @@ mod daemon_build_tests {
             let other = json!({"version":VERSION,"protocol_version":protocol::PROTOCOL_VERSION,"git_sha":"zzz"});
             assert!(daemon_build_refusal(&other).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod printable_tests {
+    use super::printable;
+
+    #[test]
+    fn bidi_and_invisible_characters_are_escaped() {
+        // A right-to-left override would show "jetson-\u{202e}txt.exe" as
+        // "jetson-exe.txt".
+        assert_eq!(printable("a\u{202e}txt.exe"), "a\\u{202e}txt.exe");
+        for c in [
+            '\u{061c}', '\u{200b}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202d}', '\u{2066}',
+            '\u{2069}', '\u{2060}', '\u{feff}',
+        ] {
+            let p = printable(&format!("x{c}y"));
+            assert!(!p.contains(c) && p.starts_with("x\\u{"), "{c:?} -> {p}");
+        }
+        assert_eq!(printable("x\x1b[2Ky\n"), "x\\u{1b}[2Ky\\n");
+        // Ordinary non-ASCII text is kept.
+        assert_eq!(printable("café ロボット ü"), "café ロボット ü");
     }
 }

@@ -432,7 +432,7 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
             } else {
                 for r in &rows {
                     println!(
-                        "{:<15}  {:<19}  {:<20}  {}{}",
+                        "{:<15}  {:<19}  {:<20}  {}{}{}",
                         r.ip,
                         crate::output::printable(r.mac.as_deref().unwrap_or("-")),
                         r.state,
@@ -441,6 +441,11 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
                         ),
                         if r.address_changed {
                             "  (address changed)"
+                        } else {
+                            ""
+                        },
+                        if r.presence == lablink_fieldnet::clients::Presence::LeaseOnly {
+                            "  (DHCP lease only: may have left)"
                         } else {
                             ""
                         }
@@ -643,14 +648,14 @@ fn print_status(s: &nm::Status) {
     };
     println!(
         "Field Network '{}': {}",
-        st.ssid,
+        printable(&st.ssid),
         if s.active { "running" } else { "stopped" }
     );
-    if s.out_of_sync {
-        println!(
-            "  (it was {} outside LabLink)",
-            if s.active { "started" } else { "stopped" }
-        );
+    if s.out_of_sync && s.active {
+        // Also what an interrupted `lablink hotspot start` leaves behind.
+        println!("  (LabLink has no record of starting it: it was started elsewhere, or a LabLink start was interrupted, which NetworkManager rolls back within 2 minutes if LabLink took a checkpoint)");
+    } else if s.out_of_sync {
+        println!("  (it was stopped outside LabLink)");
     }
     println!(
         "  adapter {}  subnet {}  this machine {}",
@@ -659,7 +664,7 @@ fn print_status(s: &nm::Status) {
         s.gateway.map(|g| g.to_string()).unwrap_or_default()
     );
     println!("  security {}", s.security.unwrap_or("?"));
-    if let Some(p) = &st.previous {
+    if let (Some(p), true) = (&st.previous, s.active) {
         println!("  restores '{}' when stopped", printable(&p.name));
     }
     if let Some(f) = s.ip_forward {
@@ -676,7 +681,13 @@ fn print_status(s: &nm::Status) {
     if !s.uplinks.is_empty() {
         println!(
             "  WARNING: hotspot clients can reach the internet through {} (NetworkManager's shared mode NATs them). Stop the hotspot if that is not intended.",
-            s.uplinks.join(", ")
+            printable(&s.uplinks.join(", "))
+        );
+    }
+    if !s.routed.is_empty() {
+        println!(
+            "  WARNING: hotspot clients can be routed to {} (NetworkManager's shared mode forwards and NATs them; LabLink does not change firewall rules). Stop the hotspot if that is not intended.",
+            printable(&s.routed.join(", "))
         );
     }
     if s.active {

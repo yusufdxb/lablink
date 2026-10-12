@@ -7,6 +7,7 @@
 use crate::view::{self, Level};
 use crate::worker::RosResult;
 use eframe::egui::{self, RichText};
+use lablink_core::printable;
 use lablink_ros::check::CheckRequest;
 use lablink_ros::diagnose::{Check, Report, Verdict};
 use lablink_ros::inspect::Options;
@@ -216,7 +217,10 @@ impl RosPanel {
                                 view::level_color(verdict_level(p.verdict)),
                                 verdict_word(p.verdict),
                             );
-                            ui.label(format!("{} {} -> {}: {}", p.name, p.from, p.to, p.summary));
+                            ui.label(printable(&format!(
+                                "{} {} -> {}: {}",
+                                p.name, p.from, p.to, p.summary
+                            )));
                         });
                         if self.details {
                             ui.indent(("probe", &p.name, &p.from), |ui| {
@@ -227,7 +231,7 @@ impl RosPanel {
                                     p.timeout_ms
                                 ));
                                 for e in &p.evidence {
-                                    ui.monospace(e);
+                                    ui.monospace(printable(e));
                                 }
                             });
                         }
@@ -301,7 +305,7 @@ fn report(ui: &mut egui::Ui, r: &Report, details: bool) {
                     view::level_color(verdict_level(s.verdict)),
                     verdict_word(s.verdict),
                 );
-                ui.label(&s.detail);
+                ui.label(printable(&s.detail));
                 ui.end_row();
             }
         });
@@ -322,25 +326,25 @@ fn check_row(ui: &mut egui::Ui, c: &Check, details: bool) {
             RichText::new(format!("{:<11}", verdict_word(c.verdict))).monospace(),
         );
         ui.strong(c.title);
-        ui.label(&c.summary);
+        ui.label(printable(&c.summary));
     });
     if let Some(h) = c.hint.as_ref().filter(|_| c.verdict != Verdict::Pass) {
         ui.indent(("hint", c.id), |ui| {
-            ui.weak(format!("fix: {h}"));
+            ui.weak(format!("fix: {}", printable(h)));
         });
     }
     if details {
         ui.indent(("ev", c.id), |ui| {
             ui.weak(format!(
                 "method: {}; endpoints: {}; interfaces: {}; domain: {}; timeout: {}",
-                c.method,
-                list(&c.endpoints),
-                list(&c.interfaces),
+                printable(&c.method),
+                printable(&list(&c.endpoints)),
+                printable(&list(&c.interfaces)),
                 c.domain.map_or("-".to_string(), |d| d.to_string()),
                 c.timeout_ms.map_or("-".to_string(), |t| format!("{t} ms"))
             ));
             for e in &c.evidence {
-                ui.monospace(e);
+                ui.monospace(printable(e));
             }
         });
     }

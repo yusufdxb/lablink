@@ -18,6 +18,7 @@ case "$*" in
 "-t general permissions")
   echo "org.freedesktop.NetworkManager.checkpoint-rollback:auth"
   echo "org.freedesktop.NetworkManager.network-control:yes"
+  echo "org.freedesktop.NetworkManager.settings.modify.own:yes"
   echo "org.freedesktop.NetworkManager.settings.modify.system:yes" ;;
 "-t -f DEVICE,TYPE,STATE,CONNECTION device")
   if up; then echo "wlan1:wifi:connected:LabLink Field Network"; else echo "wlan1:wifi:disconnected:"; fi
@@ -38,9 +39,9 @@ case "$*" in
 "-t -f 802-11-wireless.mode connection show uuid @UUID@")
   [ -e "$D/profile" ] || exit 10; echo "802-11-wireless.mode:ap" ;;
 "-t -f connection.interface-name,"*" connection show uuid @UUID@")
-  printf 'connection.interface-name:wlan1\nconnection.autoconnect:no\n802-11-wireless.ssid:LL Test\n802-11-wireless.mode:ap\n'
+  printf 'connection.interface-name:wlan1\nconnection.permissions:user:%s\nconnection.autoconnect:no\n802-11-wireless.ssid:LL Test\n802-11-wireless.mode:ap\n' "$(/usr/bin/id -un)"
   printf '802-11-wireless-security.key-mgmt:wpa-psk\n802-11-wireless-security.proto:rsn\n802-11-wireless-security.pairwise:ccmp\n'
-  printf '802-11-wireless-security.group:ccmp\nipv4.method:shared\nipv4.addresses:10.77.0.1/24\n' ;;
+  printf '802-11-wireless-security.group:ccmp\nipv4.method:shared\nipv4.addresses:10.77.0.1/24\n802-11-wireless-security.psk-flags:0\n' ;;
 "--wait 45 connection up uuid @UUID@ ifname wlan1") : > "$D/up"; echo "Connection successfully activated" ;;
 "--wait "*" connection down uuid @UUID@") /bin/rm -f "$D/up" ;;
 "-s -g 802-11-wireless-security.psk connection show uuid @UUID@")

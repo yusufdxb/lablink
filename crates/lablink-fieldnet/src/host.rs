@@ -542,6 +542,22 @@ pub fn parse_addresses6(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Networks other than the hotspot's that this machine routes to, as
+/// "dest (device)": what NetworkManager's shared mode (IPv4 forwarding and
+/// NAT) lets hotspot clients reach. Every table counts (Tailscale uses
+/// table 52, wg-quick its own); default routes are uplinks, listed apart.
+pub fn routed_elsewhere(routes: &[Route], iface: &str) -> Vec<String> {
+    let mut v: Vec<String> = routes
+        .iter()
+        .filter(|r| {
+            !r.is_default() && r.device != iface && r.device != "lo" && !r.dest.addr().is_loopback()
+        })
+        .map(|r| format!("{} ({})", r.dest, r.device))
+        .collect();
+    v.dedup();
+    v
+}
+
 /// `ip -4 -o route show table all`.
 pub fn parse_routes(text: &str) -> Vec<Route> {
     const TYPES: [&str; 10] = [
@@ -644,7 +660,7 @@ pub(crate) fn script_host(f: &crate::system::FakeSystem) {
     f.ok("nmcli -t -f RUNNING,VERSION general", "running:1.36.6\n");
     f.ok(
         "nmcli -t general permissions",
-        "org.freedesktop.NetworkManager.checkpoint-rollback:auth\norg.freedesktop.NetworkManager.network-control:yes\norg.freedesktop.NetworkManager.settings.modify.system:yes\n",
+        "org.freedesktop.NetworkManager.checkpoint-rollback:auth\norg.freedesktop.NetworkManager.network-control:yes\norg.freedesktop.NetworkManager.settings.modify.own:yes\norg.freedesktop.NetworkManager.settings.modify.system:yes\n",
     );
     f.ok(
         "nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device",

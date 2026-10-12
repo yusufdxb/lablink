@@ -4,10 +4,24 @@
 //! `dds-check --active` (with an explicit `--peer`) sends traffic of its
 //! own, on a unique probe topic.
 
-use crate::{print_json, Fail, R};
+use crate::{Fail, R};
 use clap::Subcommand;
 use lablink_core::client::Client;
-use lablink_core::{exit, printable as p};
+use lablink_core::exit;
+use lablink_ros::redact::{redact_json, redact_secrets};
+
+/// Remote text for the terminal: DDS secrets removed, then control and
+/// bidirectional-format characters escaped.
+fn p(s: &str) -> String {
+    lablink_core::printable(&redact_secrets(s))
+}
+
+/// JSON output with DDS secrets removed from every string.
+fn print_json(v: &serde_json::Value) {
+    let mut v = v.clone();
+    redact_json(&mut v);
+    crate::print_json(&v);
+}
 use lablink_ros::diagnose::{Report, Verdict};
 use lablink_ros::inspect::{self, Inspection, Options};
 use lablink_ros::{active, check, RemoteError, SshRemote};

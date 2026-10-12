@@ -24,7 +24,7 @@ fn req() -> Request {
 
 fn profile_show(ssid: &str, key_mgmt: &str) -> String {
     format!(
-        "connection.interface-name:wlan0\nconnection.autoconnect:no\n802-11-wireless.ssid:{ssid}\n802-11-wireless.mode:ap\n802-11-wireless-security.key-mgmt:{key_mgmt}\n802-11-wireless-security.proto:rsn\n802-11-wireless-security.pairwise:ccmp\n802-11-wireless-security.group:ccmp\nipv4.method:shared\nipv4.addresses:10.77.0.1/24\n"
+        "connection.interface-name:wlan0\nconnection.permissions:user:tester\nconnection.autoconnect:no\n802-11-wireless.ssid:{ssid}\n802-11-wireless.mode:ap\n802-11-wireless-security.key-mgmt:{key_mgmt}\n802-11-wireless-security.proto:rsn\n802-11-wireless-security.pairwise:ccmp\n802-11-wireless-security.group:ccmp\nipv4.method:shared\nipv4.addresses:10.77.0.1/24\n802-11-wireless-security.psk-flags:0\n"
     )
 }
 
@@ -123,6 +123,8 @@ fn start_creates_a_wpa2_profile_with_the_password_only_on_stdin() {
         "ipv4.addresses 10.77.0.1/24",
         "ipv6.method disabled",
         "connection.autoconnect no",
+        "connection.permissions user:tester",
+        "802-11-wireless-security.psk-flags 0",
     ] {
         assert!(line.contains(want), "{want} missing from {line}");
     }
@@ -308,7 +310,7 @@ fn checkpoint_guards_activation_when_permitted() {
     let f = working_host();
     f.ok(
         "nmcli -t general permissions",
-        "org.freedesktop.NetworkManager.checkpoint-rollback:yes\norg.freedesktop.NetworkManager.network-control:yes\norg.freedesktop.NetworkManager.settings.modify.system:yes\n",
+        "org.freedesktop.NetworkManager.checkpoint-rollback:yes\norg.freedesktop.NetworkManager.network-control:yes\norg.freedesktop.NetworkManager.settings.modify.own:yes\norg.freedesktop.NetworkManager.settings.modify.system:yes\n",
     );
     f.ok("busctl --system --allow-interactive-authorization=no call org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager GetDeviceByIpIface s wlan0", "o \"/org/freedesktop/NetworkManager/Devices/3\"\n");
     f.ok("busctl --system --allow-interactive-authorization=no call org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager CheckpointCreate aouu 1 /org/freedesktop/NetworkManager/Devices/3 120 0", "o \"/org/freedesktop/NetworkManager/Checkpoint/7\"\n");
@@ -405,6 +407,83 @@ fn an_insecure_profile_is_refused_and_never_activated() {
     .unwrap_err();
     assert!(e.to_string().contains("not configured securely"), "{e}");
     assert!(!f.lines().iter().any(|l| l.contains("connection up")));
+}
+
+#[test]
+fn a_profile_visible_to_other_users_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = working_host();
+    for perms in ["", "user:tester,user:mallory", "user:mallory"] {
+        f.ok(
+            "nmcli -t -f connection.interface-name",
+            &profile_show("LabLink-TEST", "wpa-psk").replace(
+                "connection.permissions:user:tester",
+                &format!("connection.permissions:{perms}"),
+            ),
+        );
+        let facts = gather(&f);
+        let pf = preflight::check(
+            &facts,
+            &req(),
+            &Context {
+                sites: &[],
+                equipment: &[],
+                own_profile: None,
+            },
+        );
+        let e = nm::start(
+            &f,
+            dir.path(),
+            &facts,
+            &pf,
+            &nm::StartOptions {
+                psk: Some("Correct-Horse_42!"),
+                confirmed: true,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("connection.permissions"),
+            "{perms}: {e}"
+        );
+    }
+    assert!(!f.lines().iter().any(|l| l.contains("connection up")));
+}
+
+#[test]
+fn without_a_plain_login_name_nothing_is_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut f = working_host();
+    f.user = None;
+    let facts = gather(&f);
+    let pf = preflight::check(
+        &facts,
+        &req(),
+        &Context {
+            sites: &[],
+            equipment: &[],
+            own_profile: None,
+        },
+    );
+    let e = nm::start(
+        &f,
+        dir.path(),
+        &facts,
+        &pf,
+        &nm::StartOptions {
+            psk: Some("Correct-Horse_42!"),
+            confirmed: true,
+        },
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("login name"), "{e}");
+    assert!(
+        !f.lines()
+            .iter()
+            .any(|l| l.contains("connection add") || l.contains("connection modify")),
+        "{:?}",
+        f.lines()
+    );
 }
 
 #[test]
@@ -658,7 +737,22 @@ fn status_reports_out_of_sync_when_stopped_elsewhere() {
         "ip -4 -o route show table all",
         "default via 10.1.1.254 dev eno1 proto dhcp metric 100\n10.77.0.0/24 dev wlan0 proto kernel scope link src 10.77.0.1\n",
     );
-    assert_eq!(nm::status(&f, dir.path()).unwrap().uplinks, vec!["eno1"]);
+    let s = nm::status(&f, dir.path()).unwrap();
+    assert_eq!(s.uplinks, vec!["eno1"]);
+    assert!(
+        s.routed.is_empty(),
+        "the hotspot's own subnet is not elsewhere: {:?}",
+        s.routed
+    );
+    // A VPN comes up while it runs, routes only (no default), in its own
+    // table: forwarding reaches it too, and status says so.
+    f.ok(
+        "ip -4 -o route show table all",
+        "100.64.0.0/10 dev tailscale0 table 52\n10.77.0.0/24 dev wlan0 proto kernel scope link src 10.77.0.1\nlocal 10.77.0.1 dev wlan0 table local proto kernel scope host src 10.77.0.1\n",
+    );
+    let s = nm::status(&f, dir.path()).unwrap();
+    assert!(s.uplinks.is_empty());
+    assert_eq!(s.routed, vec!["100.64.0.0/10 (tailscale0)"]);
     // Someone stopped it from the desktop's network menu.
     f.ok(
         "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show --active",

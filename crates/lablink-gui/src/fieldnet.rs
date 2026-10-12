@@ -7,6 +7,7 @@
 use crate::view::{self, Level};
 use crate::worker::{FieldEvent, FieldSnapshot};
 use eframe::egui::{self, RichText};
+use lablink_core::printable;
 use lablink_fieldnet::ops::PlanArgs;
 use lablink_fieldnet::preflight::{self, Preflight};
 
@@ -547,7 +548,18 @@ fn status(ui: &mut egui::Ui, s: &lablink_fieldnet::nm::Status) {
                     view::YELLOW,
                     format!(
                         "clients can reach the internet through {} (NAT); stop the network if that is not intended",
-                        s.uplinks.join(", ")
+                        printable(&s.uplinks.join(", "))
+                    ),
+                );
+                ui.end_row();
+            }
+            if !s.routed.is_empty() {
+                ui.label("Other networks");
+                ui.colored_label(
+                    view::YELLOW,
+                    format!(
+                        "clients can be routed to {} (forwarding and NAT); stop the network if that is not intended",
+                        printable(&s.routed.join(", "))
                     ),
                 );
                 ui.end_row();
@@ -585,16 +597,25 @@ fn clients(ui: &mut egui::Ui, snap: &FieldSnapshot) {
                         ui.monospace(&r.ip);
                         ui.colored_label(view::level_color(client_level(r.state)), r.state);
                         let who = match (&r.device, &r.hostname) {
-                            (Some(d), _) => d.clone(),
-                            (None, Some(h)) => format!("asks to be called '{h}' (unverified)"),
+                            (Some(d), _) => printable(d),
+                            (None, Some(h)) => {
+                                format!("asks to be called '{}' (unverified)", printable(h))
+                            }
                             (None, None) => String::new(),
                         };
-                        ui.label(if r.address_changed {
+                        let who = if r.address_changed {
                             format!("{who} (address changed)")
                         } else {
                             who
-                        });
-                        ui.monospace(r.mac.as_deref().unwrap_or("-"));
+                        };
+                        ui.label(
+                            if r.presence == lablink_fieldnet::clients::Presence::LeaseOnly {
+                                format!("{who} (DHCP lease only: may have left)")
+                            } else {
+                                who
+                            },
+                        );
+                        ui.monospace(printable(r.mac.as_deref().unwrap_or("-")));
                         ui.end_row();
                     }
                 });

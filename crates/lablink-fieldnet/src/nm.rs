@@ -51,11 +51,21 @@ fn run_ok(sys: &dyn System, cmd: &Cmd) -> Result<String, Error> {
 }
 
 /// Settings of the profile, as nmcli arguments (no secrets).
-fn settings(iface: &str, ssid: &str, subnet: &Ipv4Net, security: Security) -> Vec<String> {
+fn settings(
+    iface: &str,
+    ssid: &str,
+    subnet: &Ipv4Net,
+    security: Security,
+    user: &str,
+) -> Vec<String> {
     let gw = crate::subnet::gateway(subnet);
     let mut s: Vec<String> = vec![
         "connection.interface-name".into(),
         iface.into(),
+        // Only this user can see, activate or edit the profile, and adding
+        // it needs polkit settings.modify.own, not settings.modify.system.
+        "connection.permissions".into(),
+        format!("user:{user}"),
         "connection.autoconnect".into(),
         "no".into(),
         "802-11-wireless.ssid".into(),
@@ -84,6 +94,9 @@ fn settings(iface: &str, ssid: &str, subnet: &Ipv4Net, security: Security) -> Ve
         format!("{gw}/{}", subnet.prefix_len()),
         "ipv6.method".into(),
         "disabled".into(),
+        // Stored by NetworkManager in its root-only keyfile, not an agent.
+        "802-11-wireless-security.psk-flags".into(),
+        "0".into(),
     ];
     s.shrink_to_fit();
     s
@@ -124,13 +137,14 @@ pub fn verify_profile(
     ssid: &str,
     subnet: &Ipv4Net,
     security: Security,
+    user: &str,
 ) -> Result<(), Error> {
     let out = run_ok(
         sys,
         &nmcli(&[
             "-t",
             "-f",
-            "connection.interface-name,connection.autoconnect,802-11-wireless.ssid,802-11-wireless.mode,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,ipv4.method,ipv4.addresses",
+            "connection.interface-name,connection.permissions,connection.autoconnect,802-11-wireless.ssid,802-11-wireless.mode,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,ipv4.method,ipv4.addresses,802-11-wireless-security.psk-flags",
             "connection",
             "show",
             "uuid",
@@ -144,6 +158,7 @@ pub fn verify_profile(
     let gw = crate::subnet::gateway(subnet);
     let want = [
         ("connection.interface-name", iface.to_string()),
+        ("connection.permissions", format!("user:{user}")),
         ("connection.autoconnect", "no".into()),
         ("802-11-wireless.ssid", ssid.to_string()),
         ("802-11-wireless.mode", "ap".into()),
@@ -156,6 +171,7 @@ pub fn verify_profile(
         ("802-11-wireless-security.group", "ccmp".into()),
         ("ipv4.method", "shared".into()),
         ("ipv4.addresses", format!("{gw}/{}", subnet.prefix_len())),
+        ("802-11-wireless-security.psk-flags", "0".into()),
     ];
     let wrong: Vec<String> = want
         .iter()
@@ -179,6 +195,7 @@ pub fn verify_profile(
 
 /// Create LabLink's profile (or update the existing one) and return its
 /// UUID. `psk`: a new password to store; `None` keeps the stored one.
+#[allow(clippy::too_many_arguments)]
 fn ensure_profile(
     sys: &dyn System,
     existing: Option<&str>,
@@ -187,8 +204,9 @@ fn ensure_profile(
     subnet: &Ipv4Net,
     security: Security,
     psk: Option<&str>,
+    user: &str,
 ) -> Result<(String, bool), Error> {
-    let args = settings(iface, ssid, subnet, security);
+    let args = settings(iface, ssid, subnet, security, user);
     if let Some(uuid) = existing.filter(|u| profile_exists(sys, u)) {
         let mut cmd = nmcli(&["connection", "modify", "uuid", uuid]);
         cmd.args.extend(args);
@@ -365,6 +383,11 @@ pub fn start(
             "preflight produced no interface or subnet".into(),
         ));
     };
+    let user = sys.username().ok_or_else(|| {
+        Error::Refused(
+            "cannot read this user's login name from the password database (or it has unusual characters), so the hotspot profile cannot be restricted to this user".into(),
+        )
+    })?;
     let old = state::load(state_dir).map_err(Error::Failed)?;
     let existing = old.as_ref().and_then(|s| s.profile_uuid.clone());
     let generated;
@@ -387,8 +410,9 @@ pub fn start(
         &subnet,
         pf.security,
         psk,
+        &user,
     )?;
-    verify_profile(sys, &uuid, &iface, &pf.ssid, &subnet, pf.security)?;
+    verify_profile(sys, &uuid, &iface, &pf.ssid, &subnet, pf.security, &user)?;
 
     // Remember how to undo this before touching the adapter.
     let previous = pf
@@ -707,7 +731,8 @@ pub struct Status {
     /// NetworkManager says the profile is active (the truth).
     pub active: bool,
     /// LabLink's record disagrees with NetworkManager (stopped elsewhere,
-    /// or started outside LabLink).
+    /// started outside LabLink, or a start interrupted before it was
+    /// recorded).
     pub out_of_sync: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<FieldState>,
@@ -718,6 +743,10 @@ pub struct Status {
     /// NATs hotspot clients onto them, so an uplink that appeared after the
     /// start (a USB tether, a cable) shares this machine's internet.
     pub uplinks: Vec<String>,
+    /// While it runs: other networks this machine routes to ("dest
+    /// (device)"), which forwarding lets hotspot clients reach; a VPN or
+    /// cable that came up after the start shows here.
+    pub routed: Vec<String>,
     pub clients: Vec<crate::clients::Client>,
 }
 
@@ -734,6 +763,7 @@ pub fn status(sys: &dyn System, state_dir: &Path) -> Result<Status, Error> {
             .read_file(Path::new("/proc/sys/net/ipv4/ip_forward"))
             .map(|t| t.trim() == "1"),
         uplinks: Vec::new(),
+        routed: Vec::new(),
         clients: Vec::new(),
     };
     let Some(st) = st else { return Ok(s) };
@@ -752,13 +782,15 @@ pub fn status(sys: &dyn System, state_dir: &Path) -> Result<Status, Error> {
             "ip",
             &["-4", "-o", "route", "show", "table", "all"],
         )) {
-            let mut devs: Vec<String> = host::parse_routes(&out.stdout)
-                .into_iter()
+            let routes = host::parse_routes(&out.stdout);
+            let mut devs: Vec<String> = routes
+                .iter()
                 .filter(|r| r.is_default() && r.table == "main" && r.device != st.interface)
-                .map(|r| r.device)
+                .map(|r| r.device.clone())
                 .collect();
             devs.dedup();
             s.uplinks = devs;
+            s.routed = host::routed_elsewhere(&routes, &st.interface);
         }
     }
     Ok(s)

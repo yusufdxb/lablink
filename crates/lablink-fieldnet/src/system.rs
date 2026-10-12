@@ -142,6 +142,8 @@ pub trait System: Send + Sync {
     fn random(&self, buf: &mut [u8]) -> io::Result<()>;
     /// Whether stdin and stdout are a terminal (for confirmations).
     fn interactive(&self) -> bool;
+    /// The login name of the user running LabLink, if it is a plain name.
+    fn username(&self) -> Option<String>;
 }
 
 /// Replace every occurrence of `secret` in `text`.
@@ -255,6 +257,10 @@ impl System for RealSystem {
         use std::io::IsTerminal;
         io::stdin().is_terminal() && io::stdout().is_terminal()
     }
+
+    fn username(&self) -> Option<String> {
+        lablink_core::paths::username()
+    }
 }
 
 /// A scripted system for tests: commands are answered by the first rule
@@ -269,12 +275,14 @@ pub struct FakeSystem {
     calls: Mutex<Vec<Cmd>>,
     counter: Mutex<u8>,
     pub tty: bool,
+    pub user: Option<String>,
 }
 
 impl FakeSystem {
     pub fn new() -> Self {
         Self {
             os_family: Some(Os::Linux),
+            user: Some("tester".into()),
             ..Self::default()
         }
     }
@@ -358,6 +366,10 @@ impl System for FakeSystem {
 
     fn interactive(&self) -> bool {
         self.tty
+    }
+
+    fn username(&self) -> Option<String> {
+        self.user.clone()
     }
 }
 

@@ -13,6 +13,7 @@ pub mod diagnose;
 pub mod env;
 pub mod graph;
 pub mod inspect;
+pub mod redact;
 pub mod script;
 
 pub use lablink_doctor::RemoteError;

@@ -36,6 +36,25 @@ fn passwd_home() -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(&account.dir))).filter(|p| p.is_absolute())
 }
 
+/// This user's login name from the password database (by real uid, never
+/// `$USER`), when it is a plain portable name: ASCII letters, digits, `.`,
+/// `_` and `-`, not starting with `-`. Anything else (a name NetworkManager
+/// or a command line could misread) is `None`.
+pub fn username() -> Option<String> {
+    plain_login_name(passwd_entry()?.name)
+}
+
+fn plain_login_name(name: Vec<u8>) -> Option<String> {
+    let name = String::from_utf8(name).ok()?;
+    let plain = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    plain.then_some(name)
+}
+
 /// This user's entry in the password database.
 struct Account {
     name: Vec<u8>,
@@ -544,6 +563,27 @@ pub fn user_known_hosts() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_login_names_are_used() {
+        for ok in ["alice", "ops", "a.b_c-d", "user1"] {
+            assert_eq!(plain_login_name(ok.into()).as_deref(), Some(ok));
+        }
+        for bad in [
+            &b""[..],
+            b"-alice",
+            b"al ice",
+            b"al:ice",
+            b"al,ice",
+            b"al\nice",
+            b"\xff",
+            "al\u{202e}ice".as_bytes(),
+            &[b'a'; 65],
+        ] {
+            assert_eq!(plain_login_name(bad.to_vec()), None, "{bad:?}");
+        }
+        assert_eq!(username(), plain_login_name(passwd_entry().unwrap().name));
+    }
     use std::os::unix::fs::PermissionsExt;
 
     fn chmod(p: &Path, mode: u32) {

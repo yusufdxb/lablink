@@ -184,11 +184,13 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
             "NetworkManager does not let this user control networking without administrator authorization (polkit network-control). LabLink never asks for passwordless root.".into(),
         );
     }
-    if ctx.own_profile.is_none() && !nm.allowed("settings.modify.system") {
+    // The profile is restricted to this user (connection.permissions), so
+    // NetworkManager asks for settings.modify.own when it is added.
+    if ctx.own_profile.is_none() && !nm.allowed("settings.modify.own") {
         block(
             &mut f,
             "permission",
-            "NetworkManager does not let this user create connection profiles without administrator authorization (polkit settings.modify.system)".into(),
+            "NetworkManager does not let this user create their own connection profiles without administrator authorization (polkit settings.modify.own)".into(),
         );
     }
 
@@ -346,14 +348,7 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
             });
         }
     }
-    let exposed: Vec<String> = facts
-        .routes
-        .iter()
-        .filter(|r| {
-            !r.is_default() && r.device != iface && r.device != "lo" && !r.dest.addr().is_loopback()
-        })
-        .map(|r| format!("{} ({})", r.dest, r.device))
-        .collect();
+    let exposed = crate::host::routed_elsewhere(&facts.routes, &iface);
     if !exposed.is_empty() {
         let message = format!(
             "NetworkManager's shared mode enables IPv4 forwarding for hotspot clients. This machine also routes to {}; unless your firewall blocks forwarding from {iface}, hotspot clients can reach those networks through it. LabLink does not change firewall rules.",

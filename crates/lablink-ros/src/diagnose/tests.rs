@@ -568,3 +568,36 @@ fn graph_snapshot_is_labeled_by_device_and_drops_cli_nodes() {
     let (ic, _) = inspect::inspect_pair(&f, "orin", "laptop", &Options::default());
     assert!(crate::graph::GraphSnapshot::from_inspection(&ic.unwrap()).is_none());
 }
+
+#[test]
+fn dds_security_secrets_never_reach_output() {
+    // A DDS Security config inline in CYCLONEDDS_URI, on the node and in
+    // a startup file: the private key and password are LabLink-internal
+    // (passed back to the same device only), never shown.
+    const XML: &str = "CYCLONEDDS_URI=<CycloneDDS><Domain><Security><Authentication><PrivateKey>data:,-----BEGIN PRIVATE KEY-----MIIEsecretkey-----END PRIVATE KEY-----</PrivateKey><Password>hunter2</Password></Authentication></Security></Domain></CycloneDDS>";
+    let mut a = dev("orin", "10.42.0.20", 101);
+    a.node_env = vec!["ROS_DISTRO=humble", "ROS_DOMAIN_ID=7", XML];
+    a.shell
+        .push("122:export CYCLONEDDS_URI='<Password>hunter2</Password>'");
+    let f = fake(vec![a, dev("laptop", "10.42.0.30", 202)], &[]);
+    let ins = inspect::inspect(&f, "orin", &opts()).unwrap();
+    let raw = serde_json::to_string(&ins).unwrap();
+    assert!(
+        raw.contains("hunter2"),
+        "the fixture must carry the secret, or this test proves nothing"
+    );
+    let mut v = serde_json::to_value(&ins).unwrap();
+    crate::redact::redact_json(&mut v);
+    let shown = v.to_string();
+    assert!(
+        !shown.contains("hunter2") && !shown.contains("MIIEsecretkey"),
+        "{shown}"
+    );
+    assert!(shown.contains("[redacted]"));
+    let r = pair(&f, "orin", "laptop");
+    let rep = serde_json::to_string(&r).unwrap();
+    assert!(
+        !rep.contains("hunter2") && !rep.contains("MIIEsecretkey"),
+        "{rep}"
+    );
+}

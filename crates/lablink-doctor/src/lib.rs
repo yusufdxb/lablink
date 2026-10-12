@@ -854,15 +854,7 @@ pub fn human_text(c: &CheckResult) -> String {
 }
 
 fn printable(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control() {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    lablink_core::printable(s)
 }
 
 fn paint(on: bool, code: &str, text: &str) -> String {

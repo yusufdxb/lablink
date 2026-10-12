@@ -93,6 +93,24 @@ pub struct Report {
 }
 
 impl Report {
+    /// Remove DDS Security secrets from every text field (see
+    /// [`crate::redact`]); evidence quotes device settings.
+    pub fn redact_secrets(&mut self) {
+        use crate::redact::redact_secrets as r;
+        let all = |v: &mut Vec<String>| v.iter_mut().for_each(|s| *s = r(s));
+        for c in &mut self.checks {
+            c.summary = r(&c.summary);
+            all(&mut c.evidence);
+            all(&mut c.endpoints);
+            all(&mut c.interfaces);
+            c.method = r(&c.method);
+            c.hint = c.hint.as_deref().map(r);
+        }
+        for l in &mut self.levels {
+            l.detail = r(&l.detail);
+        }
+    }
+
     pub fn worst(&self) -> Verdict {
         self.checks
             .iter()
@@ -249,7 +267,7 @@ pub fn diagnose(input: &Input) -> Report {
         }
         None => (None, vec![]),
     };
-    Report {
+    let mut r = Report {
         device: cx.a.device.clone(),
         peer: cx.b.map(|b| b.device.clone()),
         active: input.active.is_some(),
@@ -257,7 +275,9 @@ pub fn diagnose(input: &Input) -> Report {
         checks,
         level,
         levels,
-    }
+    };
+    r.redact_secrets();
+    r
 }
 
 fn src(i: &Inspection) -> String {
