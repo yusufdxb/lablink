@@ -19,23 +19,28 @@ proof limits in each guide.
   A WPA2 (default) or WPA3 hotspot through NetworkManager, offline by
   default; WEP and open refused. Read-only preflight with blockers (an SSH
   session, this command's or inbound, that rides on the adapter, a tunnel
-  or an unknown interface; isolation that cannot be guaranteed; DNS relay
-  without `--allow-dns-relay`; subnet conflicts; missing polkit permission) and
+  or an unknown interface; isolation that cannot be guaranteed; subnet
+  conflicts; missing polkit permission) and
   warnings (what disconnects, registered devices that would lose this
   machine). `stop` and `restart` refuse while an SSH session depends on the
   adapter, and stay available with the feature off; `status` warns about
   uplinks that appear while the hotspot runs. NetworkManager checkpoint
   rollback when permitted, restore of the previous connection on failure
   and on stop. Passwords go to NetworkManager on stdin only.
-- Field Network isolation by default: the hotspot profile carries
-  `priority 0 iif <adapter> prohibit` routing rules (IPv4 and IPv6), so
-  clients reach this machine and each other only, whatever routes, VPNs or
-  firewall rules exist or appear. Start verifies the rules in the kernel or
-  stops the hotspot; `lablinkd` re-verifies every 2 s and stops it on
-  failure. Isolated starts need a `no-resolv` dnsmasq drop-in (or
-  `--allow-dns-relay`). `--allow-internet-sharing` is now a separate mode;
-  `--allow-routing` is gone. Preflight also requires polkit
-  `wifi.share.protected`.
+- Field Network isolation by default, in two kernel layers. The field
+  filter (`packaging/networkmanager/90-lablink-field-filter`, a
+  NetworkManager dispatcher script an administrator installs once) keeps
+  an nftables table that arms every `wl*` adapter unless it runs an
+  ordinary connection: no forwarding, and on this machine only the
+  hotspot address for DHCP, ICMP, SSH, mDNS and DDS domain 0. It is armed
+  before the access point starts and stays armed after it stops. The
+  hotspot profile also carries `priority 0 iif <adapter> prohibit` routing
+  rules (IPv4 and IPv6). LabLink checks the filter with an unprivileged
+  probe, refuses to activate an adapter that is not armed, verifies both
+  layers after start and restart, and `lablinkd` re-verifies every 2 s and
+  stops the hotspot on failure (recovery, not prevention).
+  `--allow-internet-sharing` is a separate mode; `--allow-routing` is gone.
+  Preflight also requires polkit `wifi.share.protected`.
 - Roaming sites: the `field-network` site is an overlay on which pinned
   devices of other sites are recognized by host key alone, without
   duplicates or new trust.

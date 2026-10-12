@@ -10,16 +10,19 @@
 //!   profile is read back and refused if it says otherwise.
 //! - IPv4 `shared`: NetworkManager's own dnsmasq serves DHCP on the hotspot
 //!   only; LabLink runs no DHCP server. IPv6 disabled.
-//! - Isolated unless internet sharing is asked for: the profile carries
-//!   `priority 0 iif <adapter> prohibit` for IPv4 and IPv6 (see
-//!   [`crate::isolation`]), verified after activation. If the rules cannot
-//!   be verified the hotspot is taken down again.
+//! - Isolated unless internet sharing is asked for: before activation the
+//!   adapter is disconnected and must be armed by the field filter
+//!   ([`crate::filter`]), so the access point never runs unfiltered; the
+//!   profile carries `priority 0 iif <adapter> prohibit` for IPv4 and IPv6
+//!   (see [`crate::isolation`]). Both are verified after activation; if
+//!   they cannot be, the hotspot is taken down again.
 //! - Activation is bounded (`--wait`), guarded by a NetworkManager
 //!   checkpoint when this user may create one, and on failure the previous
 //!   connection is restored.
 
+use crate::filter::{self, Filter};
 use crate::host::{self, ActiveConnection, HostFacts};
-use crate::isolation::{self, DnsRelay, Isolation};
+use crate::isolation::{self, Isolation};
 use crate::preflight::Preflight;
 use crate::state::{self, FieldState, Previous, Security};
 use crate::system::{Cmd, System};
@@ -28,11 +31,13 @@ use ipnet::Ipv4Net;
 use serde::Serialize;
 use std::net::Ipv4Addr;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const PROFILE_NAME: &str = "LabLink Field Network";
 const ACTIVATE_WAIT_S: u64 = 45;
 const CHECKPOINT_ROLLBACK_S: u32 = 120;
+/// How long the field filter may take to arm a disconnected adapter.
+const ARM_WAIT: Duration = Duration::from_secs(5);
 
 fn nmcli(args: &[&str]) -> Cmd {
     Cmd::new("nmcli", args)
@@ -375,8 +380,6 @@ pub struct StartReport {
     /// The isolation check after activation (isolated hotspots only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isolation: Option<Isolation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dns_relay: Option<DnsRelay>,
 }
 
 /// What `start` needs beyond the preflight.
@@ -506,22 +509,25 @@ pub fn start(
             format!("unavailable ({why}); LabLink restores the previous connection on failure")
         }
     };
-    let up = run_ok(
-        sys,
-        &nmcli(&[
-            "--wait",
-            &ACTIVATE_WAIT_S.to_string(),
-            "connection",
-            "up",
-            "uuid",
-            &uuid,
-            "ifname",
-            &iface,
-        ])
-        .timeout(Duration::from_secs(ACTIVATE_WAIT_S + 15)),
-    )
-    .and_then(|_| verify_active(sys, &uuid, &iface, gateway))
-    .and_then(|_| verify_isolation(sys, &iface, pf.sharing));
+    let up = arm_adapter(sys, &iface, pf)
+        .and_then(|_| {
+            run_ok(
+                sys,
+                &nmcli(&[
+                    "--wait",
+                    &ACTIVATE_WAIT_S.to_string(),
+                    "connection",
+                    "up",
+                    "uuid",
+                    &uuid,
+                    "ifname",
+                    &iface,
+                ])
+                .timeout(Duration::from_secs(ACTIVATE_WAIT_S + 15)),
+            )
+        })
+        .and_then(|_| verify_active(sys, &uuid, &iface, gateway))
+        .and_then(|_| verify_isolation(sys, &iface, pf.sharing));
     let iso = match up {
         Ok(iso) => iso,
         Err(e) => {
@@ -559,8 +565,39 @@ pub fn start(
         already_running: pf.already_running,
         isolated: !pf.sharing,
         isolation: iso,
-        dns_relay: (!pf.sharing).then(|| isolation::dns_relay(sys)),
     })
+}
+
+/// Isolated starts: the adapter must be armed by the field filter before
+/// the access point exists. An ordinary connection keeps it open, so it is
+/// disconnected first; NetworkManager runs the filter's pre-down hook,
+/// which arms it, before it lets the connection go. Then the probe must
+/// see it armed. The hotspot profile's own pre-up hook keeps it armed.
+fn arm_adapter(sys: &dyn System, iface: &str, pf: &Preflight) -> Result<(), Error> {
+    if pf.sharing {
+        return Ok(());
+    }
+    if pf.would_disconnect.is_some() {
+        run_ok(
+            sys,
+            &nmcli(&["--wait", "20", "device", "disconnect", iface])
+                .timeout(Duration::from_secs(35)),
+        )?;
+    }
+    let deadline = Instant::now() + ARM_WAIT;
+    loop {
+        let state = filter::state(sys, iface);
+        if state == Filter::Armed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::Failed(format!(
+                "{iface} is not armed by the field filter, so the hotspot was not started: {}",
+                state.problem(iface).unwrap_or_default()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 /// After activation: the isolation rules are in force (unless sharing was
@@ -895,8 +932,6 @@ pub struct Status {
     /// While an isolated hotspot runs: the isolation check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isolation: Option<Isolation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dns_relay: Option<DnsRelay>,
     pub clients: Vec<crate::clients::Client>,
 }
 
@@ -915,7 +950,6 @@ pub fn status(sys: &dyn System, state_dir: &Path) -> Result<Status, Error> {
         uplinks: Vec::new(),
         routed: Vec::new(),
         isolation: None,
-        dns_relay: None,
         clients: Vec::new(),
     };
     let Some(st) = st else { return Ok(s) };
@@ -946,7 +980,6 @@ pub fn status(sys: &dyn System, state_dir: &Path) -> Result<Status, Error> {
         }
         if !st.sharing {
             s.isolation = Some(isolation::check(sys, &st.interface));
-            s.dns_relay = Some(isolation::dns_relay(sys));
         }
     }
     Ok(s)

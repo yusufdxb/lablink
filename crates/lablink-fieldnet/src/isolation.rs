@@ -2,36 +2,47 @@
 //!
 //! NetworkManager's shared mode (the only mode that gives hotspot clients
 //! DHCP without a root helper) turns on IPv4 forwarding and NAT. LabLink
-//! does not rely on the firewall to stop that forwarding. Instead the
-//! hotspot profile carries one policy-routing rule per address family:
+//! does not rely on either being off. Two independent layers stop hotspot
+//! traffic from leaving this machine:
 //!
-//! ```text
-//! priority 0 iif <adapter> prohibit
-//! ```
+//! 1. The field filter ([`crate::filter`]), installed once by an
+//!    administrator: an nftables table that drops every forwarded packet
+//!    from or to the adapter, armed before the access point starts and
+//!    until after it stops. A drop verdict is final in nftables, so no
+//!    other table, rule order or priority can let such a packet through.
+//! 2. One policy-routing rule per address family in the hotspot profile:
 //!
-//! - NetworkManager owns the rules: it installs them when the profile
-//!   activates and removes them when it goes down, also on failure.
-//! - The kernel evaluates rules before any routing table, in priority order,
-//!   and adds a new rule behind existing rules of the same priority. Rule 0
-//!   comes right after `0: lookup local`, so packets for this machine's own
-//!   addresses are still delivered, and every other packet that arrives on
-//!   the adapter is refused before routing. A rule, route, VPN or uplink
-//!   added later is evaluated after it.
-//! - It does not depend on iptables/nftables rule order, on `ip_forward`, or
-//!   on the routes that exist.
-//! - Clients reach each other through the access point itself (802.11
-//!   frames between stations never enter this machine's IP stack).
+//!    ```text
+//!    priority 0 iif <adapter> prohibit
+//!    ```
 //!
-//! [`check`] verifies the rules (and that nothing on the adapter bypasses
+//!    NetworkManager installs it when the profile activates and removes it
+//!    when it goes down. Priority 0 places it right after the kernel's
+//!    `0: lookup local`, so packets for this machine's own addresses are
+//!    still delivered and every other packet from the adapter is refused
+//!    before any routing table. Rules added later without a priority get
+//!    one below the second rule's, which a higher priority than 0 would
+//!    put ahead of this rule (wg-quick does this); at 0 they land behind
+//!    it. The check reads the real evaluation order (`ip rule show`)
+//!    instead of trusting equal-priority insertion order.
+//!
+//! Clients reach each other through the access point itself (802.11 frames
+//! between stations never enter this machine's IP stack).
+//!
+//! [`check`] verifies both layers (and that nothing on the adapter bypasses
 //! routing: a bridge, an upper device, tc or XDP) after the hotspot starts,
 //! and `lablinkd` repeats it while the hotspot runs. When it fails the
 //! hotspot is stopped: isolation that cannot be verified is treated as
-//! absent.
+//! absent. The two layers prevent leaks; the repeated check only recovers,
+//! seconds later.
 //!
-//! [`dns_relay`] covers the one path that is not routing: NetworkManager's
-//! dnsmasq answers hotspot clients' DNS queries by forwarding them to this
-//! machine's resolvers unless a drop-in tells it not to.
+//! DNS needs nothing extra: the filter refuses port 53 from hotspot
+//! clients, so NetworkManager's dnsmasq never gets a query to forward, and
+//! no system-wide dnsmasq drop-in is needed (one in
+//! `/etc/NetworkManager/dnsmasq-shared.d` would apply to every shared
+//! connection on the machine).
 
+use crate::filter::{self, Filter};
 use crate::system::{Cmd, System};
 use serde::Serialize;
 use std::path::Path;
@@ -170,8 +181,10 @@ pub fn bypass_problems(links: &str, qdiscs: Option<&str>, iface: &str) -> Vec<St
 pub struct Isolation {
     pub verified: bool,
     pub problems: Vec<String>,
-    /// IPv6 is off on the adapter too (a second layer; the IPv6 rule is the
-    /// guarantee).
+    /// The field filter's state for the adapter (must be armed).
+    pub filter: Filter,
+    /// IPv6 is off on the adapter too (an extra layer; the filter and the
+    /// IPv6 rule do not depend on it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ipv6_disabled: Option<bool>,
 }
@@ -186,6 +199,8 @@ fn run_text(sys: &dyn System, program: &str, args: &[&str]) -> Option<String> {
 /// Verify that hotspot clients on `iface` cannot be routed anywhere.
 pub fn check(sys: &dyn System, iface: &str) -> Isolation {
     let mut problems = Vec::new();
+    let filter = filter::state(sys, iface);
+    problems.extend(filter.problem(iface));
     for (family, flag) in [("IPv4", "-4"), ("IPv6", "-6")] {
         match run_text(sys, "ip", &[flag, "rule", "show"]) {
             Some(t) => problems.extend(rule_problems(family, &parse_rules(&t), iface)),
@@ -202,6 +217,7 @@ pub fn check(sys: &dyn System, iface: &str) -> Isolation {
     Isolation {
         verified: problems.is_empty(),
         problems,
+        filter,
         ipv6_disabled: sys
             .read_file(Path::new(&format!(
                 "/proc/sys/net/ipv6/conf/{iface}/disable_ipv6"
@@ -219,16 +235,24 @@ pub struct HostView {
     pub links: Option<String>,
     /// `tc qdisc show` (every device).
     pub qdiscs: Option<String>,
-    pub dns: Option<DnsRelay>,
+    /// The field filter script is installed.
+    pub filter_installed: bool,
+    /// Its table is loaded (`None`: not probed).
+    pub filter_loaded: Option<Result<bool, String>>,
+    /// What the installed script lets clients reach on this machine.
+    pub filter_services: Vec<String>,
 }
 
 pub fn gather(sys: &dyn System) -> HostView {
+    let script = filter::script(sys);
     HostView {
         rules4: run_text(sys, "ip", &["-4", "rule", "show"]).map(|t| parse_rules(&t)),
         rules6: run_text(sys, "ip", &["-6", "rule", "show"]).map(|t| parse_rules(&t)),
         links: run_text(sys, "ip", &["-o", "-d", "link", "show"]),
         qdiscs: run_text(sys, "tc", &["qdisc", "show"]),
-        dns: Some(dns_relay(sys)),
+        filter_installed: script.is_some(),
+        filter_loaded: Some(filter::loaded(sys)),
+        filter_services: script.as_deref().map(filter::services).unwrap_or_default(),
     }
 }
 
@@ -237,6 +261,27 @@ impl HostView {
     /// packets around it, on `iface`. Anything unreadable is a problem.
     pub fn problems(&self, iface: &str) -> Vec<String> {
         let mut v = Vec::new();
+        if !iface.starts_with("wl") {
+            v.push(format!(
+                "the field filter arms only Wi-Fi adapters named wl*, and {iface} is not one"
+            ));
+        }
+        if !self.filter_installed {
+            v.push(format!(
+                "the field filter is not installed ({}; see docs/FIELD_NETWORK.md, \"The field filter\")",
+                filter::SCRIPT
+            ));
+        }
+        match &self.filter_loaded {
+            Some(Ok(true)) => {}
+            Some(Ok(false)) if self.filter_installed => v.push(format!(
+                "the field filter is installed but not loaded (an administrator runs `{} load`)",
+                filter::SCRIPT
+            )),
+            Some(Ok(false)) => {}
+            Some(Err(why)) => v.push(format!("the field filter cannot be checked: {why}")),
+            None => v.push("the field filter was not checked".into()),
+        }
         for (family, rules) in [("IPv4", &self.rules4), ("IPv6", &self.rules6)] {
             match rules {
                 Some(r) => v.extend(preexisting_priority0(r, iface).into_iter().map(|r| {
@@ -261,89 +306,6 @@ impl HostView {
             None => v.push("cannot list network interfaces (`ip link`)".into()),
         }
         v
-    }
-}
-
-/// Where NetworkManager's shared-mode dnsmasq reads extra options.
-pub const DNSMASQ_SHARED_DIR: &str = "/etc/NetworkManager/dnsmasq-shared.d";
-/// The drop-in LabLink's documentation tells administrators to install.
-pub const DNS_DROPIN: &str = "/etc/NetworkManager/dnsmasq-shared.d/lablink-no-upstream.conf";
-
-/// Whether hotspot clients' DNS queries are forwarded to this machine's
-/// upstream resolvers.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "state", content = "detail", rename_all = "kebab-case")]
-pub enum DnsRelay {
-    /// A drop-in stops forwarding (`no-resolv`) or DNS entirely (`port=0`).
-    Off(String),
-    /// Queries are forwarded (no drop-in, or one that adds servers).
-    Forwarded(String),
-    /// The drop-ins cannot be read, so forwarding cannot be ruled out.
-    Unknown(String),
-}
-
-/// Options that make dnsmasq forward queries or read more configuration.
-const FORWARDING_KEYS: [&str; 7] = [
-    "server",
-    "rev-server",
-    "servers-file",
-    "resolv-file",
-    "conf-file",
-    "conf-dir",
-    "conf-script",
-];
-
-/// Read the shared-mode dnsmasq drop-ins the way dnsmasq's `--conf-dir`
-/// does (every file except `.*`, `*~` and `#*#`).
-pub fn dns_relay(sys: &dyn System) -> DnsRelay {
-    let dir = Path::new(DNSMASQ_SHARED_DIR);
-    let names = match sys.list_dir(dir) {
-        Ok(n) => n,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return DnsRelay::Unknown(format!("cannot list {DNSMASQ_SHARED_DIR}: {e}")),
-    };
-    let mut no_resolv = None;
-    let mut port0 = None;
-    let mut forwarding = Vec::new();
-    for name in names {
-        if name.starts_with('.')
-            || name.ends_with('~')
-            || (name.starts_with('#') && name.ends_with('#'))
-        {
-            continue;
-        }
-        let path = dir.join(&name);
-        let Some(text) = sys.read_file(&path) else {
-            return DnsRelay::Unknown(format!("cannot read {}", path.display()));
-        };
-        for line in text.lines() {
-            let l = line.trim();
-            if l.is_empty() || l.starts_with('#') {
-                continue;
-            }
-            let (key, value) = match l.split_once('=') {
-                Some((k, v)) => (k.trim(), v.trim()),
-                None => (l, ""),
-            };
-            match key {
-                "no-resolv" => no_resolv = Some(path.display().to_string()),
-                "port" if value == "0" => port0 = Some(path.display().to_string()),
-                k if FORWARDING_KEYS.contains(&k) => {
-                    forwarding.push(format!("{} sets {k}", path.display()))
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(p) = port0 {
-        return DnsRelay::Off(format!("{p} turns DNS off (port=0)"));
-    }
-    if !forwarding.is_empty() {
-        return DnsRelay::Forwarded(forwarding.join("; "));
-    }
-    match no_resolv {
-        Some(p) => DnsRelay::Off(format!("{p} stops forwarding (no-resolv)")),
-        None => DnsRelay::Forwarded(format!("no drop-in in {DNSMASQ_SHARED_DIR} sets no-resolv")),
     }
 }
 
@@ -450,26 +412,46 @@ mod tests {
             "{:?}",
             iso.problems
         );
+        // The routing rules alone are not enough: the filter must be armed.
+        sys.ok(
+            "ip -6 rule show",
+            "0:\tfrom all lookup local\n0:\tfrom all iif wlan0 prohibit\n",
+        );
+        sys.set_filter("open");
+        let iso = check(&sys, "wlan0");
+        assert!(!iso.verified);
+        assert_eq!(iso.filter, Filter::Open);
+        assert_eq!(iso.problems.len(), 1, "{:?}", iso.problems);
+        sys.set_filter("unloaded");
+        assert!(check(&sys, "wlan0").problems[0].contains("not loaded"));
     }
 
     #[test]
-    fn dns_relay_needs_a_drop_in() {
-        let dir = DNSMASQ_SHARED_DIR;
+    fn preflight_view_needs_the_filter_and_a_wifi_name() {
         let sys = FakeSystem::new();
-        assert!(matches!(dns_relay(&sys), DnsRelay::Forwarded(_)));
-        sys.file(DNS_DROPIN, "# LabLink\nno-resolv\n");
-        assert!(matches!(dns_relay(&sys), DnsRelay::Off(d) if d.contains("no-resolv")));
-        sys.file(DNS_DROPIN, "no-resolv\nserver=1.1.1.1\n");
-        assert!(matches!(dns_relay(&sys), DnsRelay::Forwarded(d) if d.contains("server")));
-        sys.file(DNS_DROPIN, "no-resolv\n");
-        sys.file(&format!("{dir}/other.conf"), "conf-dir=/etc/dnsmasq.d\n");
-        assert!(matches!(dns_relay(&sys), DnsRelay::Forwarded(_)));
-        sys.file(&format!("{dir}/other.conf"), "port=0\n");
-        assert!(matches!(dns_relay(&sys), DnsRelay::Off(d) if d.contains("port=0")));
-        // Files dnsmasq skips do not count either way.
-        let sys = FakeSystem::new();
-        sys.file(&format!("{dir}/.hidden"), "no-resolv\n");
-        sys.file(&format!("{dir}/old.conf~"), "no-resolv\n");
-        assert!(matches!(dns_relay(&sys), DnsRelay::Forwarded(_)));
+        sys.ok("ip -4 rule show", RULES_OK);
+        sys.ok("ip -6 rule show", "0:\tfrom all lookup local\n");
+        sys.ok("ip -o -d link show", "7: wlan0: <UP> mtu 1500\n");
+        sys.ok(
+            "tc qdisc show",
+            "qdisc noqueue 0: dev wlan0 root refcnt 2\n",
+        );
+        let v = gather(&sys);
+        assert_eq!(
+            v.problems("wlan0"),
+            vec![format!(
+                "the field filter is not installed ({}; see docs/FIELD_NETWORK.md, \"The field filter\")",
+                filter::SCRIPT
+            )]
+        );
+        sys.file(filter::SCRIPT, "FIELD_TCP=\"22\"\nFIELD_UDP=\"\"\n");
+        let v = gather(&sys);
+        assert!(v.problems("wlan0").is_empty(), "{:?}", v.problems("wlan0"));
+        assert_eq!(v.filter_services, vec!["tcp 22"]);
+        assert!(v.problems("eth1")[0].contains("named wl*"));
+        sys.set_filter("unloaded");
+        assert!(gather(&sys).problems("wlan0")[0].contains("installed but not loaded"));
+        sys.set_filter("denied");
+        assert!(gather(&sys).problems("wlan0")[0].contains("cannot be checked"));
     }
 }

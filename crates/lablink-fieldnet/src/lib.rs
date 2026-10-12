@@ -9,19 +9,31 @@
 //! internet; every change goes through NetworkManager's own polkit-checked
 //! API. NetworkManager's shared mode, which the hotspot uses for DHCP, does
 //! turn on IPv4 forwarding and add a NAT rule for the hotspot subnet while
-//! it runs. Isolation does not depend on either: the profile carries
-//! `priority 0 iif <adapter> prohibit` routing rules (IPv4 and IPv6) that
-//! NetworkManager installs and removes with the connection, so nothing from
-//! the hotspot is routed anywhere but this machine. `nm::start` and
-//! `nm::restart` check them after activation, and `nm::enforce` (run by
-//! `lablinkd`) keeps checking and stops the hotspot when they are gone.
-//! Internet sharing is a separate, explicit mode without the rules.
+//! it runs. Isolation does not depend on either. Two layers keep hotspot
+//! clients on this machine:
+//!
+//! - the field filter ([`filter`]): a NetworkManager dispatcher script an
+//!   administrator installs once. Its nftables table drops forwarding from
+//!   and to the Wi-Fi adapter, and limits what clients reach on this
+//!   machine, from before the access point starts until after it stops.
+//!   An isolated start is refused without it.
+//! - `priority 0 iif <adapter> prohibit` routing rules (IPv4 and IPv6) in
+//!   the profile, which NetworkManager installs and removes with the
+//!   connection ([`isolation`]).
+//!
+//! `nm::start` and `nm::restart` check both after activation, and
+//! `nm::enforce` (run by `lablinkd`) keeps checking and stops the hotspot
+//! when either is gone. The filter and the rules are kernel state and
+//! prevent; the check is recovery, seconds later. Internet sharing is a
+//! separate, explicit mode without the rules (the filter opens the adapter
+//! for it).
 //!
 //! The site side (a roaming `field-network` site whose visiting devices
 //! are recognized by their pinned host key) lives in `lablink-core` and
 //! the daemon; `field_site` here only writes that site's config entry.
 
 pub mod clients;
+pub mod filter;
 pub mod host;
 pub mod isolation;
 pub mod macos;

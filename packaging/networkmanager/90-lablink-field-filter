@@ -1,0 +1,116 @@
+#!/bin/sh
+# LabLink Field Network filter: a NetworkManager dispatcher script.
+#
+# Install once, as root (LabLink itself never runs as root):
+#   install -o root -g root -m 755 90-lablink-field-filter /etc/NetworkManager/dispatcher.d/
+#   ln -sf ../90-lablink-field-filter /etc/NetworkManager/dispatcher.d/pre-up.d/
+#   ln -sf ../90-lablink-field-filter /etc/NetworkManager/dispatcher.d/pre-down.d/
+#   /etc/NetworkManager/dispatcher.d/90-lablink-field-filter load
+# Remove: run it with `unload`, then delete the file and both links.
+#
+# It keeps one nftables table, inet lablink_field. Every Wi-Fi interface
+# (name wl*) is "armed" unless NetworkManager runs an ordinary connection on
+# it. Armed means:
+#   - nothing is forwarded from or to it (IPv4 and IPv6);
+#   - this machine accepts from it only DHCP, ICMP, IGMP and the services
+#     below, and only on the address of that interface; DNS is refused.
+# An interface opens at pre-up of a connection that does not carry an
+# isolation rule ("iif <dev> prohibit", which LabLink's isolated hotspot
+# profile has), and is armed again at pre-down and down. So an interface is
+# armed before a LabLink hotspot starts, the whole time it runs, and after
+# it stops until an ordinary connection comes up. The table is kernel state:
+# it stays in force when NetworkManager, lablinkd or LabLink stop or crash.
+# Drop verdicts are final in nftables whatever other tables accept.
+set -u
+
+# Services hotspot clients may reach on this machine (nft set syntax).
+# Empty disables a line. DDS: domain 0 discovery and data (7400-7649).
+FIELD_TCP="22"
+FIELD_UDP="5353, 7400-7649"
+
+TABLE="inet lablink_field"
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+log() { logger -t lablink-field-filter "$*" 2>/dev/null || true; }
+
+ruleset() {
+    tcp_line="" udp_line=""
+    [ -n "$FIELD_TCP" ] && tcp_line="tcp dport { $FIELD_TCP } accept"
+    [ -n "$FIELD_UDP" ] && udp_line="udp dport { $FIELD_UDP } accept"
+    cat <<NFT
+table $TABLE
+delete table $TABLE
+table $TABLE {
+	set open {
+		type ifname
+	}
+	chain forward {
+		type filter hook forward priority -300; policy accept;
+		iifname "wl*" iifname != @open counter drop
+		oifname "wl*" oifname != @open counter drop
+	}
+	chain input {
+		type filter hook input priority -300; policy accept;
+		iifname "wl*" iifname != @open jump field_input
+	}
+	chain field_input {
+		ct state established,related accept
+		fib daddr . iif type != { local, broadcast, multicast } counter drop
+		meta l4proto { icmp, ipv6-icmp, igmp } accept
+		udp dport { 67, 68, 546 } accept
+		$tcp_line
+		$udp_line
+		counter reject with icmpx type admin-prohibited
+	}
+	chain output {
+		type filter hook output priority -300; policy accept;
+		ip daddr 192.0.0.8 udp dport 47977 oifname "wl*" oifname != @open drop
+		ip daddr 127.77.77.77 udp dport 47977 drop
+	}
+}
+NFT
+}
+
+# Whether connection $1 asks for isolation on interface $2.
+isolating() {
+    [ -n "$1" ] || return 1
+    nmcli -g ipv4.routing-rules connection show uuid "$1" 2>/dev/null |
+        grep -q -- "iif $2 type prohibit"
+}
+
+arm() { nft delete element $TABLE open "{ \"$1\" }" 2>/dev/null; log "armed $1 ($2)"; }
+open_if() { nft add element $TABLE open "{ \"$1\" }" && log "opened $1 ($2)"; }
+
+load() {
+    ruleset | nft -f - || { log "cannot load the table"; return 1; }
+    # Reopen interfaces that already run an ordinary connection.
+    nmcli -t -f DEVICE,TYPE,STATE,CON-UUID device 2>/dev/null |
+        while IFS=: read -r dev type state uuid; do
+            case $dev in wl*) ;; *) continue ;; esac
+            [ "$type" = wifi ] && [ "$state" = connected ] || continue
+            isolating "$uuid" "$dev" || open_if "$dev" load
+        done
+    log "loaded"
+}
+
+exec 9>/run/lablink-field-filter.lock && flock 9
+
+case ${1:-} in
+load) load; exit $? ;;
+unload) nft delete table $TABLE 2>/dev/null; log "unloaded"; exit 0 ;;
+esac
+
+iface=${1:-} action=${2:-}
+nft list table $TABLE >/dev/null 2>&1 || load
+case $iface in wl*) ;; *) exit 0 ;; esac
+case $action in
+pre-up | up)
+    if isolating "${CONNECTION_UUID:-}" "$iface"; then
+        arm "$iface" "$action"
+    else
+        open_if "$iface" "$action"
+    fi
+    ;;
+pre-down | down) arm "$iface" "$action" ;;
+esac
+exit 0

@@ -324,7 +324,10 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
 
 /// While LabLink's isolated Field Network hotspot runs, re-check its
 /// isolation every two seconds and take the hotspot down when it no longer
-/// holds. Without a hotspot this only reads the Field Network state file.
+/// holds. This is recovery, not prevention: the field filter and the
+/// routing rules (kernel state) prevent leaks; this notices within about
+/// two seconds when one of them was removed, and stops the hotspot. Without
+/// a hotspot this only reads the Field Network state file.
 async fn fieldnet_watchdog(state: Arc<State>) {
     use lablink_fieldnet::nm::{enforce, Enforcement};
     let mut last_verified = false;

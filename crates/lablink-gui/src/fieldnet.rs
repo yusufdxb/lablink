@@ -18,7 +18,6 @@ pub struct Form {
     pub subnet: String,
     pub wpa3: bool,
     pub internet: bool,
-    pub dns_relay: bool,
 }
 
 impl Form {
@@ -30,7 +29,6 @@ impl Form {
             subnet: opt(&self.subnet),
             security: if self.wpa3 { "wpa3" } else { "wpa2" }.into(),
             allow_internet_sharing: self.internet,
-            allow_dns_relay: self.dns_relay,
         }
     }
 }
@@ -356,12 +354,6 @@ impl FieldPanel {
                 "Let clients reach the internet and every network this machine routes to (NAT, no isolation)",
             );
             ui.end_row();
-            ui.label("DNS relay");
-            ui.checkbox(
-                &mut self.form.dns_relay,
-                "Let the hotspot's DNS server forward clients' queries to this machine's resolvers",
-            );
-            ui.end_row();
         });
         ui.weak("WEP and open networks are not offered. A password is generated and stored in NetworkManager; Show password reveals it once the network runs.");
         ui.horizontal_wrapped(|ui| {
@@ -640,13 +632,7 @@ fn findings(ui: &mut egui::Ui, pf: &Preflight, accepted: &mut Vec<String>) {
     for f in &pf.findings {
         match f.level {
             preflight::Level::Block => {
-                let how = match f.override_flag {
-                    Some("--allow-dns-relay") => {
-                        " (tick DNS relay above only if clients may resolve names through this machine)"
-                    }
-                    _ => "",
-                };
-                ui.colored_label(view::RED, format!("Refused: {}{how}", f.message));
+                ui.colored_label(view::RED, format!("Refused: {}", f.message));
             }
             preflight::Level::Warn => {
                 let mut on = accepted.contains(&f.message);

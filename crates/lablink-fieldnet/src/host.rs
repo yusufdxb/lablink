@@ -703,7 +703,10 @@ pub(crate) fn script_host(f: &crate::system::FakeSystem) {
         "tc qdisc show",
         "qdisc noqueue 0: dev lo root refcnt 2\nqdisc noqueue 0: dev wlan0 root refcnt 2\nqdisc noqueue 0: dev docker0 root refcnt 2\n",
     );
-    f.file(crate::isolation::DNS_DROPIN, "no-resolv\n");
+    f.file(
+        crate::filter::SCRIPT,
+        include_str!("../../../packaging/networkmanager/90-lablink-field-filter"),
+    );
     f.file(
         "/proc/net/tcp",
         "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:0277 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 100 0 0 10 0\n",

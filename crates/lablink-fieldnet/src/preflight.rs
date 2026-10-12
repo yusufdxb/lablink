@@ -44,9 +44,6 @@ pub struct Request {
     /// Share this machine's internet and networks with hotspot clients:
     /// the profile gets no isolation rules. Off by default.
     pub allow_internet_sharing: bool,
-    /// Accept that NetworkManager's dnsmasq answers hotspot clients' DNS
-    /// queries from this machine's resolvers (no `no-resolv` drop-in).
-    pub allow_dns_relay: bool,
 }
 
 /// A registered device currently reached from this machine (from the
@@ -384,30 +381,13 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
                 format!("hotspot clients reach this machine and each other only; the isolation rule keeps them off {}", nets.join(", ")),
             );
         }
-        match &facts.isolation.dns {
-            Some(crate::isolation::DnsRelay::Off(_)) => {}
-            Some(crate::isolation::DnsRelay::Forwarded(why))
-            | Some(crate::isolation::DnsRelay::Unknown(why)) => {
-                let message = format!(
-                    "NetworkManager's DNS server on the hotspot forwards clients' queries to this machine's resolvers ({why}). That is not routing, but it lets clients resolve outside names through this machine. Install the drop-in {} containing `no-resolv` (see docs/FIELD_NETWORK.md)",
-                    crate::isolation::DNS_DROPIN
-                );
-                if req.allow_dns_relay {
-                    warn(
-                        &mut f,
-                        "dns-relay",
-                        format!("{message}; allowed as requested"),
-                    );
-                } else {
-                    f.push(Finding {
-                        level: Level::Block,
-                        code: "dns-relay",
-                        message,
-                        override_flag: Some("--allow-dns-relay"),
-                    });
-                }
-            }
-            None => {}
+        if problems.is_empty() {
+            let services = &facts.isolation.filter_services;
+            info(
+                &mut f,
+                "exposure",
+                format!("on this machine, hotspot clients reach only {iface}'s own address, for DHCP, ICMP{}{}; the field filter refuses every other service (DNS included) and every other address of this machine", if services.is_empty() { "" } else { " and " }, services.join(", ")),
+            );
         }
     }
     match facts.ip_forward {
@@ -539,7 +519,6 @@ mod tests {
             subnet: None,
             security: Security::Wpa2,
             allow_internet_sharing: false,
-            allow_dns_relay: false,
         }
     }
 
@@ -613,8 +592,9 @@ mod tests {
             .find(|f| f.code == "forwarding" && f.level == Level::Warn)
             .unwrap();
         assert!(fw.message.contains("tailscale0") && fw.message.contains("no isolation rule"));
-        // Sharing needs neither the DNS drop-in nor a clean rule table.
-        h.isolation.dns = Some(crate::isolation::DnsRelay::Forwarded("none".into()));
+        // Sharing needs neither the field filter nor a clean rule table.
+        h.isolation.filter_installed = false;
+        h.isolation.filter_loaded = None;
         h.isolation.rules4 = None;
         assert!(!check(&h, &r, &ctx(&[])).blocked());
     }
@@ -655,24 +635,29 @@ mod tests {
     }
 
     #[test]
-    fn dns_relay_blocks_unless_accepted() {
+    fn isolated_start_needs_the_field_filter_and_states_the_exposure() {
+        let pf = check(&facts(), &req(), &ctx(&[]));
+        let e = pf.findings.iter().find(|f| f.code == "exposure").unwrap();
+        assert_eq!(e.level, Level::Info);
+        assert!(
+            e.message
+                .contains("wlan0's own address, for DHCP, ICMP and tcp 22, udp 5353, 7400-7649")
+                && e.message.contains("DNS included"),
+            "{}",
+            e.message
+        );
         let mut h = facts();
-        h.isolation.dns = Some(crate::isolation::DnsRelay::Forwarded("no drop-in".into()));
+        h.isolation.filter_installed = false;
+        h.isolation.filter_loaded = Some(Ok(false));
+        let b = check(&h, &req(), &ctx(&[])).blockers().len();
+        assert_eq!(b, 1);
+        let mut h = facts();
+        h.isolation.filter_loaded = Some(Ok(false));
         let pf = check(&h, &req(), &ctx(&[]));
         let b = pf.blockers();
-        assert_eq!(b.len(), 1, "{b:#?}");
-        assert_eq!(
-            (b[0].code, b[0].override_flag),
-            ("dns-relay", Some("--allow-dns-relay"))
-        );
-        assert!(b[0].message.contains(crate::isolation::DNS_DROPIN));
-        let mut r = req();
-        r.allow_dns_relay = true;
-        let pf = check(&h, &r, &ctx(&[]));
-        assert!(!pf.blocked());
-        assert!(codes(&pf, Level::Warn).contains(&"dns-relay"));
-        h.isolation.dns = Some(crate::isolation::DnsRelay::Unknown("cannot read".into()));
-        assert_eq!(check(&h, &req(), &ctx(&[])).blockers()[0].code, "dns-relay");
+        assert_eq!((b[0].code, b[0].override_flag), ("isolation", None));
+        assert!(b[0].message.contains("not loaded"), "{}", b[0].message);
+        assert!(!pf.findings.iter().any(|f| f.code == "exposure"));
     }
 
     #[test]

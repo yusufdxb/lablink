@@ -12,7 +12,6 @@ use crate::{print_json, Fail, R};
 use clap::Subcommand;
 use lablink_core::client::Client;
 use lablink_core::exit;
-use lablink_fieldnet::isolation::DnsRelay;
 use lablink_fieldnet::preflight::{self, Level};
 use lablink_fieldnet::system::{RealSystem, System};
 use lablink_fieldnet::{nm, ops, Error};
@@ -40,11 +39,6 @@ pub struct StartArgs {
     /// default: clients reach only this machine and each other.
     #[arg(long)]
     allow_internet_sharing: bool,
-    /// Accept that the hotspot's DNS server forwards clients' queries to this machine's
-    /// resolvers (no `no-resolv` drop-in installed). Off by default; without the drop-in an
-    /// isolated start is refused.
-    #[arg(long)]
-    allow_dns_relay: bool,
     /// [default: $XDG_CONFIG_HOME/lablink/config.yaml]
     #[arg(long)]
     config: Option<PathBuf>,
@@ -218,7 +212,6 @@ fn plan(
         subnet: args.subnet.clone(),
         security: args.security.clone(),
         allow_internet_sharing: args.allow_internet_sharing,
-        allow_dns_relay: args.allow_dns_relay,
     };
     ops::plan(sys, client, cfg, &state_dir(), &a).map_err(|e| match e {
         ops::PlanError::BadRequest(m) => Fail::new(exit::USAGE, "bad_request", m),
@@ -393,7 +386,7 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
                     );
                 }
                 if r.isolated {
-                    println!("Isolated: clients reach only this machine and each other (IPv4 and IPv6 rules verified); lablinkd re-checks while it runs.");
+                    println!("Isolated: the field filter is armed and the IPv4 and IPv6 rules are verified. Clients reach each other and, on this machine, only the hotspot address for DHCP, ICMP and the filter's listed services; no DNS. lablinkd re-checks while it runs.");
                 } else {
                     println!(
                         "Internet sharing: clients can reach every network this machine routes to."
@@ -402,12 +395,6 @@ pub fn cmd_hotspot(client: &Client, action: HotspotAction) -> R {
                 if r.ip_forward_after == Some(true) && r.ip_forward_before == Some(false) {
                     println!(
                         "NetworkManager turned on IPv4 forwarding for the whole machine (shared mode) and leaves it on after the hotspot stops."
-                    );
-                }
-                if let Some(DnsRelay::Forwarded(why) | DnsRelay::Unknown(why)) = &r.dns_relay {
-                    println!(
-                        "DNS queries from clients may be forwarded to this machine's resolvers ({}), as accepted.",
-                        printable(why)
                     );
                 }
                 println!("Show the password with `lablink hotspot password`; see who joined with `lablink hotspot clients`.");
@@ -719,7 +706,11 @@ fn status_text(s: &nm::Status) -> String {
     }
     if let Some(iso) = &s.isolation {
         if iso.verified {
-            let _ = writeln!(o, "  isolated: clients reach only this machine and each other (IPv4 and IPv6 rules verified)");
+            let _ = writeln!(o, "  isolated: field filter armed, IPv4 and IPv6 rules verified; clients reach each other and this machine's hotspot address only");
+            let _ = writeln!(
+                o,
+                "  DNS: refused by the field filter (use addresses or mDNS .local names)"
+            );
             let kept: Vec<String> = s
                 .uplinks
                 .iter()
@@ -735,18 +726,6 @@ fn status_text(s: &nm::Status) -> String {
                 printable(&iso.problems.join("; "))
             );
         }
-    }
-    match &s.dns_relay {
-        Some(DnsRelay::Off(_)) => {
-            let _ = writeln!(o, "  DNS: answered locally, not forwarded");
-        }
-        Some(DnsRelay::Forwarded(why) | DnsRelay::Unknown(why)) => {
-            let _ = writeln!(o,
-                "  WARNING: the hotspot's DNS server may forward clients' queries to this machine's resolvers ({})",
-                printable(why)
-            );
-        }
-        None => {}
     }
     if s.active {
         let _ = writeln!(
@@ -847,7 +826,6 @@ mod tests {
             uplinks: Vec::new(),
             routed: Vec::new(),
             isolation: None,
-            dns_relay: None,
             clients: Vec::new(),
         }
     }
@@ -881,40 +859,38 @@ mod tests {
 
     #[test]
     fn status_reports_isolation_and_dns() {
+        use lablink_fieldnet::filter::Filter;
         use lablink_fieldnet::isolation::Isolation;
         let mut s = status(true, true);
         s.routed = vec!["100.64.0.0/10 (tailscale0)".into()];
         s.isolation = Some(Isolation {
             verified: true,
             problems: vec![],
+            filter: Filter::Armed,
             ipv6_disabled: Some(true),
         });
-        s.dns_relay = Some(DnsRelay::Off("x".into()));
         let t = status_text(&s);
         assert!(
-            t.contains("isolated: clients reach only this machine"),
+            t.contains("isolated: field filter armed, IPv4 and IPv6 rules verified"),
             "{t}"
         );
         assert!(t.contains("kept off: 100.64.0.0/10 (tailscale0)"), "{t}");
-        assert!(t.contains("DNS: answered locally"), "{t}");
+        assert!(t.contains("DNS: refused by the field filter"), "{t}");
         assert!(!t.contains("WARNING"), "{t}");
         s.isolation = Some(Isolation {
             verified: false,
             problems: vec![
                 "the IPv4 isolation rule (priority 0 iif wlan0 prohibit) is missing".into(),
             ],
+            filter: Filter::NotLoaded,
             ipv6_disabled: None,
         });
-        s.dns_relay = Some(DnsRelay::Forwarded("no drop-in".into()));
         let t = status_text(&s);
         assert!(
             t.contains("WARNING: ISOLATION NOT VERIFIED: the IPv4 isolation rule"),
             "{t}"
         );
-        assert!(
-            t.contains("WARNING: the hotspot's DNS server may forward"),
-            "{t}"
-        );
+        assert!(!t.contains("DNS: refused"), "{t}");
     }
 
     #[test]

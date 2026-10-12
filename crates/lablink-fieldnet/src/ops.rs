@@ -25,7 +25,6 @@ pub struct PlanArgs {
     /// `wpa2` or `wpa3`.
     pub security: String,
     pub allow_internet_sharing: bool,
-    pub allow_dns_relay: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +126,6 @@ pub fn plan(
         subnet,
         security,
         allow_internet_sharing: args.allow_internet_sharing,
-        allow_dns_relay: args.allow_dns_relay,
     };
     let facts = crate::host::gather(sys);
     let sites = site_networks(cfg);

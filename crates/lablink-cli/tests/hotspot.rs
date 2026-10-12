@@ -106,10 +106,14 @@ impl Env {
             std::fs::write(&p, body.replace("@UUID@", UUID)).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        // The drop-in that keeps the hotspot's DNS server from forwarding.
-        let dnsd = root.join("etc/NetworkManager/dnsmasq-shared.d");
-        std::fs::create_dir_all(&dnsd).unwrap();
-        std::fs::write(dnsd.join("lablink-no-upstream.conf"), "no-resolv\n").unwrap();
+        // The field filter script, installed (its verdicts: `filter_probe`).
+        let disp = root.join("etc/NetworkManager/dispatcher.d");
+        std::fs::create_dir_all(&disp).unwrap();
+        std::fs::write(
+            disp.join("90-lablink-field-filter"),
+            include_str!("../../../packaging/networkmanager/90-lablink-field-filter"),
+        )
+        .unwrap();
         Env { _dir: dir, root }
     }
 
@@ -138,6 +142,8 @@ impl Env {
             // An empty /proc: this machine's own connections stay out.
             .env("LABLINK_TEST_PROC_ROOT", self.root.join("proc"))
             .env("LABLINK_TEST_ETC_ROOT", self.root.join("etc"))
+            // The field filter's verdict (armed unless the file says otherwise).
+            .env("LABLINK_TEST_FILTER_PROBE", self.root.join("filter"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -337,19 +343,60 @@ fn start_takes_the_hotspot_down_when_isolation_cannot_be_verified() {
 }
 
 #[test]
-fn isolated_start_is_refused_without_the_dns_drop_in() {
+fn isolated_start_needs_the_field_filter() {
     let e = Env::new();
     enable(&e);
-    std::fs::remove_file(
-        e.root
-            .join("etc/NetworkManager/dnsmasq-shared.d/lablink-no-upstream.conf"),
-    )
-    .unwrap();
-    let o = e.run(&["hotspot", "start", "--yes", "--ssid", "LL Test"], None);
+    let start = || {
+        e.run(
+            &[
+                "hotspot",
+                "start",
+                "--yes",
+                "--ssid",
+                "LL Test",
+                "--password-stdin",
+            ],
+            Some(&format!("{PSK}\n")),
+        )
+    };
+    // Not installed.
+    let script = e
+        .root
+        .join("etc/NetworkManager/dispatcher.d/90-lablink-field-filter");
+    let text = read(&script);
+    std::fs::remove_file(&script).unwrap();
+    let o = start();
     assert_eq!(o.status.code(), Some(7), "{}{}", out(&o), err(&o));
-    assert!(err(&o).contains("--allow-dns-relay"), "{}", err(&o));
+    assert!(
+        err(&o).contains("the field filter is not installed"),
+        "{}",
+        err(&o)
+    );
+    std::fs::write(&script, text).unwrap();
+    // Installed, not loaded.
+    std::fs::write(e.root.join("filter"), "unloaded").unwrap();
+    let o = start();
+    assert_eq!(o.status.code(), Some(7), "{}{}", out(&o), err(&o));
+    assert!(err(&o).contains("installed but not loaded"), "{}", err(&o));
+    // Another firewall refuses every probe: cannot tell, so no start.
+    std::fs::write(e.root.join("filter"), "denied").unwrap();
+    let o = start();
+    assert_eq!(o.status.code(), Some(7), "{}{}", out(&o), err(&o));
+    assert!(err(&o).contains("cannot be checked"), "{}", err(&o));
     assert!(!e.argv_log().contains("connection up"));
-    // Accepting it explicitly starts, isolated.
+    // Loaded, but the adapter is never armed: the access point never starts.
+    std::fs::write(e.root.join("filter"), "open").unwrap();
+    let o = start();
+    assert_ne!(o.status.code(), Some(0), "{}{}", out(&o), err(&o));
+    assert!(
+        err(&o).contains("wlan1 is not armed by the field filter"),
+        "{}",
+        err(&o)
+    );
+    assert!(!e.argv_log().contains("connection up"), "{}", e.argv_log());
+    assert!(!e.up());
+    // Armed: starts, and the isolation report names the filter.
+    std::fs::remove_file(e.root.join("filter")).unwrap();
     let o = e.run(
         &[
             "hotspot",
@@ -357,15 +404,13 @@ fn isolated_start_is_refused_without_the_dns_drop_in() {
             "--yes",
             "--ssid",
             "LL Test",
-            "--allow-dns-relay",
             "--password-stdin",
             "--json",
         ],
         Some(&format!("{PSK}\n")),
     );
     assert_eq!(o.status.code(), Some(0), "{}{}", out(&o), err(&o));
-    assert_eq!(json(&o)["started"]["isolated"], true);
-    assert_eq!(json(&o)["started"]["dns_relay"]["state"], "forwarded");
+    assert_eq!(json(&o)["started"]["isolation"]["filter"]["state"], "armed");
 }
 
 #[test]
@@ -436,7 +481,7 @@ fn start_clients_password_stop_forget_end_to_end() {
     }
     assert_eq!(j["started"]["isolated"], true);
     assert_eq!(j["started"]["isolation"]["verified"], true);
-    assert_eq!(j["started"]["dns_relay"]["state"], "off");
+    assert_eq!(j["started"]["isolation"]["filter"]["state"], "armed");
     assert!(!log.contains("busctl"), "no checkpoint without permission");
 
     // The roaming field-network site was added.

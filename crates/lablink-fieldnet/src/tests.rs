@@ -18,7 +18,6 @@ fn req() -> Request {
         subnet: None,
         security: Security::Wpa2,
         allow_internet_sharing: false,
-        allow_dns_relay: false,
     }
 }
 
@@ -45,6 +44,8 @@ fn working_host() -> FakeSystem {
         "nmcli -t -f connection.interface-name",
         &profile_show("LabLink-TEST", "wpa-psk"),
     );
+    // The adapter leaves 'Home WiFi' first, so the field filter arms it.
+    f.ok("nmcli --wait 20 device disconnect wlan0", "");
     f.ok(
         &format!("nmcli --wait 45 connection up uuid {UUID} ifname wlan0"),
         "Connection successfully activated\n",
@@ -155,6 +156,14 @@ fn start_creates_a_wpa2_profile_with_the_password_only_on_stdin() {
     assert!(pos("connection add") < pos("connection edit"));
     assert!(pos("connection edit") < pos("-f connection.interface-name"));
     assert!(pos("-f connection.interface-name") < pos("connection up"));
+    // The adapter leaves its ordinary connection and the field filter is
+    // seen arming it before the access point is brought up.
+    assert!(pos("-f connection.interface-name") < pos("device disconnect wlan0"));
+    assert!(pos("device disconnect wlan0") < pos("connection up"));
+    assert!(f
+        .probes()
+        .iter()
+        .any(|(i, to)| i.as_deref() == Some("wlan0") && to.port() == crate::filter::ARMED_PORT));
     assert!(
         !f.lines().iter().any(|l| l.starts_with("busctl")),
         "no checkpoint attempt without permission"
@@ -314,6 +323,57 @@ fn failed_activation_restores_the_previous_connection() {
         .lines()
         .iter()
         .any(|l| l.contains(&format!("connection up uuid {HOME}"))));
+    assert!(!state::load(dir.path()).unwrap().unwrap().active);
+}
+
+#[test]
+fn an_adapter_the_filter_does_not_arm_never_becomes_an_access_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = working_host();
+    f.ok(
+        &format!("nmcli --wait 45 connection up uuid {HOME}"),
+        "Connection successfully activated\n",
+    );
+    let facts = gather(&f);
+    let pf = preflight::check(
+        &facts,
+        &req(),
+        &Context {
+            sites: &[],
+            equipment: &[],
+            own_profile: None,
+        },
+    );
+    assert!(!pf.blocked(), "{:#?}", pf.findings);
+    // Loaded at preflight, but the adapter stays open (say the script's
+    // pre-down hook is missing).
+    f.set_filter("open");
+    let t = std::time::Instant::now();
+    let e = nm::start(
+        &f,
+        dir.path(),
+        &facts,
+        &pf,
+        &nm::StartOptions {
+            psk: Some("Correct-Horse_42!"),
+            confirmed: true,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        t.elapsed() >= std::time::Duration::from_secs(4),
+        "it waits for the hook"
+    );
+    let Error::Failed(m) = e else { panic!() };
+    assert!(
+        m.contains("wlan0 is not armed by the field filter")
+            && m.contains("Reconnected 'Home WiFi'"),
+        "{m}"
+    );
+    assert!(!f
+        .lines()
+        .iter()
+        .any(|l| l.contains(&format!("connection up uuid {UUID}"))));
     assert!(!state::load(dir.path()).unwrap().unwrap().active);
 }
 
@@ -903,6 +963,30 @@ fn the_watchdog_takes_the_hotspot_down_when_isolation_breaks() {
         .any(|l| l.contains(&format!("connection down uuid {UUID}"))));
     assert!(!state::load(dir.path()).unwrap().unwrap().active);
     assert!(matches!(nm::enforce(&f, dir.path()), nm::Enforcement::Idle));
+}
+
+#[test]
+fn the_watchdog_stops_the_hotspot_when_the_filter_is_unloaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = running_hotspot(dir.path());
+    // An administrator unloads the filter; the routing rules still hold.
+    f.set_filter("unloaded");
+    f.ok(
+        &format!("nmcli --wait 20 connection down uuid {UUID}"),
+        "Connection successfully deactivated\n",
+    );
+    f.ok(
+        "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show --active",
+        "",
+    );
+    f.once(
+        "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show --active",
+        &format!("LabLink Field Network:{UUID}:802-11-wireless:wlan0\n"),
+    );
+    let nm::Enforcement::Stopped(why) = nm::enforce(&f, dir.path()) else {
+        panic!("not stopped")
+    };
+    assert!(why.contains("field filter is not loaded"), "{why}");
 }
 
 #[test]

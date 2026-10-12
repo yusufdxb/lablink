@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::net::SocketAddrV4;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -146,6 +147,10 @@ pub trait System: Send + Sync {
     fn interactive(&self) -> bool;
     /// The login name of the user running LabLink, if it is a plain name.
     fn username(&self) -> Option<String>;
+    /// Send one UDP datagram to `to`, from a socket bound to `iface` when
+    /// given. Only the local verdict matters (`EPERM`: a firewall dropped
+    /// it before it left). For [`crate::filter`].
+    fn send_probe(&self, iface: Option<&str>, to: SocketAddrV4) -> io::Result<()>;
 }
 
 /// Replace every occurrence of `secret` in `text`.
@@ -279,6 +284,36 @@ impl System for RealSystem {
     fn username(&self) -> Option<String> {
         lablink_core::paths::username()
     }
+
+    fn send_probe(&self, iface: Option<&str>, to: SocketAddrV4) -> io::Result<()> {
+        // Debug builds only: end-to-end tests of the binary pick the
+        // filter's verdict from a file (see `filter::simulated_probe`).
+        #[cfg(debug_assertions)]
+        if let Some(path) = std::env::var_os("LABLINK_TEST_FILTER_PROBE") {
+            let mode = std::fs::read_to_string(path).unwrap_or_default();
+            return crate::filter::simulated_probe(&mode, iface, to);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use socket2::{Domain, Protocol, Socket, Type};
+            let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+            // SO_BINDTODEVICE needs no privilege since Linux 5.7.
+            if let Some(i) = iface {
+                s.bind_device(Some(i.as_bytes()))?;
+            }
+            s.connect(&to.into())?;
+            s.send(b"lablink field filter probe")?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (iface, to);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the field filter exists only on Linux",
+            ))
+        }
+    }
 }
 
 /// A scripted system for tests: commands are answered by the first rule
@@ -293,6 +328,9 @@ pub struct FakeSystem {
     vars: Mutex<HashMap<String, String>>,
     calls: Mutex<Vec<Cmd>>,
     counter: Mutex<u8>,
+    /// The field filter's verdict (`filter::simulated_probe`); empty: armed.
+    filter: Mutex<String>,
+    probes: Mutex<Vec<(Option<String>, SocketAddrV4)>>,
     pub tty: bool,
     pub user: Option<String>,
 }
@@ -346,6 +384,16 @@ impl FakeSystem {
 
     pub fn lines(&self) -> Vec<String> {
         self.calls().iter().map(Cmd::line).collect()
+    }
+
+    /// `armed` (the default), `open`, `unloaded`, `denied` or `down`.
+    pub fn set_filter(&self, mode: &str) {
+        *self.filter.lock().unwrap() = mode.into();
+    }
+
+    /// The probes sent so far: (interface, destination).
+    pub fn probes(&self) -> Vec<(Option<String>, SocketAddrV4)> {
+        self.probes.lock().unwrap().clone()
     }
 }
 
@@ -425,6 +473,14 @@ impl System for FakeSystem {
 
     fn username(&self) -> Option<String> {
         self.user.clone()
+    }
+
+    fn send_probe(&self, iface: Option<&str>, to: SocketAddrV4) -> io::Result<()> {
+        self.probes
+            .lock()
+            .unwrap()
+            .push((iface.map(str::to_string), to));
+        crate::filter::simulated_probe(&self.filter.lock().unwrap(), iface, to)
     }
 }
 
