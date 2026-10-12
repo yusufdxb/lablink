@@ -10,17 +10,22 @@ or published.
 > hardware either.
 >
 > - **F1 and blocker 3 (wired uplink).** The hotspot is now isolated by
->   default: the profile carries `priority 0 iif <adapter> prohibit`
->   routing rules (IPv4 and IPv6) that NetworkManager installs and removes
->   with the connection, so clients reach this machine and each other and
->   nothing behind it, whatever the firewall, NAT, forwarding sysctls or
->   later routes and VPNs do. A wired uplink no longer blocks a start, and
->   `--allow-routing` no longer exists. `lablinkd` re-checks the rules
->   every two seconds and stops the hotspot when they are missing. Verified
->   in simulation only ([Isolation evidence](../FIELD_NETWORK.md#isolation-evidence)).
-> - **New requirement.** An isolated start also needs a one-line
->   NetworkManager drop-in (`no-resolv`) so the hotspot's DNS does not
->   forward queries outside ([Isolation](../FIELD_NETWORK.md#isolation)).
+>   default, by two independent kernel layers: the field filter (an
+>   nftables table kept by a NetworkManager dispatcher script that an
+>   administrator installs; it drops all forwarding from and to Wi-Fi
+>   interfaces that have no ordinary connection, from before the access
+>   point starts until after it stops) and `priority 0 iif <adapter>
+>   prohibit` routing rules (IPv4 and IPv6) in the profile. Clients reach
+>   each other and, on this machine, only the hotspot address and its
+>   listed services (SSH, mDNS, DDS domain 0). A wired uplink no longer
+>   blocks a start, and `--allow-routing` no longer exists. `lablinkd`'s
+>   2 s check is recovery: it stops a hotspot whose filter or rule went
+>   away. Verified in simulation only
+>   ([Isolation evidence](../FIELD_NETWORK.md#isolation-evidence)).
+> - **New requirement.** An isolated start needs the field filter installed
+>   and loaded ([Isolation](../FIELD_NETWORK.md#isolation)). It also
+>   refuses DNS from clients, so the `no-resolv` dnsmasq drop-in an earlier
+>   revision required is no longer used.
 > - **Blocker 5 (no checkpoint).** A `.pkla` granting only
 >   `checkpoint-rollback` to the one user enables checkpoints without root
 >   or blanket sudo ([Permissions](../FIELD_NETWORK.md#permissions)). Still

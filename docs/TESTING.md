@@ -110,10 +110,12 @@ root (Docker and `modprobe`), so it is not part of the suite or CI.
 | `raw_late_changes` | A WireGuard VPN with a policy rule, new routes and tables, hostile priority-0 rules, sysctl toggles and blanket MASQUERADE after activation leak nothing; deleting the rules (negative control) does |
 | `raw_nm_restart` | NetworkManager stopped (SIGTERM) and killed (SIGKILL) under a running hotspot, and restarted |
 | `raw_window` | The rules are in the kernel before the access point accepts clients (repeated activations, flood from a client) |
-| `raw_dns` | The hotspot's dnsmasq forwards queries upstream without the `no-resolv` drop-in and refuses them with it |
+| `raw_dns` | Without the field filter, the hotspot's dnsmasq forwards client queries upstream, and a `no-resolv` drop-in stops it (the reason LabLink now relies on the filter refusing port 53 instead; `lablink_leak` checks that refusal) |
+| `raw_filter_events` | The field filter script by itself: armed before NetworkManager brings an access point up, opened for an ordinary connection, re-armed at pre-down and down; opened again for a sharing hotspot (no isolation rule); a 10 ms trace of the set and the radio mode around activation |
 | `lablink_permissions` | As an unprivileged user: preflight blocks without polkit grants and passes with the four-action `.pkla`; checkpoint created; another user cannot see or stop the hotspot |
-| `lablink_isolated` | `lablink hotspot start` as that user: the same probes, DNS and late changes as the raw scenarios, `status`, sharing mode as a positive control, stop |
+| `lablink_isolated` | `lablink hotspot start` as that user (field filter loaded): the same probes, DNS and late changes as the raw scenarios, `status`, sharing mode as a positive control, stop |
 | `lablink_monitor` | The real `lablinkd` watchdog stops the hotspot after the IPv4 rule, the IPv6 rule is deleted or an ingress qdisc is attached, with the time it took and the packets forwarded meanwhile |
+| `lablink_leak` | Continuous client and uplink traffic (IPv4 and IPv6 ping at 100/s, UDP, TCP) through timed phases: armed idle, activation, operation, restart, rule deleted, filter unloaded, a new interface and a priority-less VPN rule, interface state changes, `lablinkd` killed, the user's processes killed, NetworkManager SIGTERM and SIGKILL with restart, stop during start, shutdown, plus a negative control with both layers removed. Counts packets per phase at the uplink, the LAN, a Docker-style namespace and a raw counter on the client's own injection, and checks which host services a client reaches |
 
 Results and their limits are in
 [FIELD_NETWORK.md](FIELD_NETWORK.md#simulated-validation).

@@ -8,7 +8,7 @@
 
 all_scenarios() {
     echo raw_control raw_isolated raw_late_changes raw_nm_restart raw_window raw_dns \
-        lablink_isolated lablink_monitor lablink_permissions
+        raw_filter_events lablink_isolated lablink_monitor lablink_permissions lablink_leak
 }
 
 PSK=fieldtest-passphrase
@@ -183,7 +183,7 @@ scenario_raw_window() {
         ip -6 route replace default via fe80::77 dev wlan0 onlink
         # Scan only the hotspot's channel, and rescan at once whenever idle
         # (a scan request while authenticating would abort the attempt).
-        umask 077; printf 'ctrl_interface=/run/wpa_supplicant\nnetwork={\n ssid=\"LLTEST\"\n psk=\"$PSK\"\n key_mgmt=WPA-PSK\n ieee80211w=1\n scan_freq=2437\n freq_list=2437\n}\n' >/tmp/wpa.conf
+        umask 077; printf 'ctrl_interface=/run/wpa_supplicant\nnetwork={\n ssid=\"LLTEST\"\n psk=\"$PSK\"\n key_mgmt=WPA-PSK\n ieee80211w=1\n scan_freq=$freq\n freq_list=$freq\n}\n' >/tmp/wpa.conf
         wpa_supplicant -B -i wlan0 -c /tmp/wpa.conf -f /tmp/wpa.log -t || echo 'wpa_supplicant did not start'
         nohup bash -c 'while :; do case \$(wpa_cli -i wlan0 status | sed -n s/^wpa_state=//p) in DISCONNECTED|INACTIVE) wpa_cli -i wlan0 scan >/dev/null;; esac; sleep 0.05; done' >/dev/null 2>&1 &
         for d in 198.51.100.1 192.0.2.1 10.20.0.1; do nohup ping -q -i 0.005 \$d >/dev/null 2>&1 & done
@@ -282,6 +282,8 @@ perms() { # user
 
 # One unprivileged user who runs LabLink, one who does not.
 lablink_user() {
+    # The one root step: the field filter.
+    install_filter
     in_ ap '
         id fielduser >/dev/null 2>&1 || useradd -m -s /bin/bash fielduser
         id otheruser >/dev/null 2>&1 || useradd -m -s /bin/bash otheruser
@@ -291,19 +293,16 @@ lablink_user() {
             "exec runuser -u fielduser -- env HOME=/home/fielduser USER=fielduser LOGNAME=fielduser XDG_RUNTIME_DIR=/run/user/$u \"\$@\"" \
             >/usr/local/bin/fu
         chmod 755 /usr/local/bin/fu
-        # The one root step: stop the hotspot DNS server forwarding upstream.
-        mkdir -p /etc/NetworkManager/dnsmasq-shared.d
-        echo no-resolv >/etc/NetworkManager/dnsmasq-shared.d/lablink-no-upstream.conf
         fu lablink feature enable field-network >/dev/null
         echo "lablink $(fu lablink --version 2>&1 | head -1) as $(fu id -un)"'
 }
 fu_start() { # extra flags
     in_ ap "echo $PSK | fu lablink hotspot start --ssid LLTEST --password-stdin --no-site --yes --json $* >/tmp/start.json; rc=\$?
             echo \"start exit \$rc\"
-            jq -e .started /tmp/start.json >/dev/null 2>&1 && jq -c '.started | {isolated, isolation: .isolation.verified, problems: .isolation.problems, dns: .dns_relay.state, checkpoint, ip_forward_before}' /tmp/start.json 2>/dev/null || cat /tmp/start.json"
+            jq -e .started /tmp/start.json >/dev/null 2>&1 && jq -c '.started | {isolated, isolation: .isolation.verified, filter: .isolation.filter.state, problems: .isolation.problems, checkpoint, ip_forward_before}' /tmp/start.json 2>/dev/null || cat /tmp/start.json"
 }
 fu_stop() { in_ ap 'fu lablink hotspot stop --json >/dev/null 2>&1; echo "stop exit $?"'; }
-fu_status() { in_ ap "fu lablink hotspot status --json | jq -c '.status | {active, out_of_sync, isolation, dns: .dns_relay.state}'"; }
+fu_status() { in_ ap "fu lablink hotspot status --json | jq -c '.status | {active, out_of_sync, verified: .isolation.verified, filter: .isolation.filter.state, problems: .isolation.problems}'"; }
 hotspot_up() { in_ ap "nmcli -t -f NAME connection show --active | grep -qx 'LabLink Field Network'"; }
 
 scenario_lablink_permissions() {
@@ -342,7 +341,7 @@ scenario_lablink_isolated() {
     probe_host c1
     probe_c2c
     probe_out c1 "lablink isolated"
-    echo "## DNS: the drop-in is in place"
+    echo "## DNS: refused by the field filter"
     in_ c1 'r=$(dig +time=2 +tries=1 @10.77.0.1 internet.test A 2>&1 | grep -E "status:|^internet.test|failed" | head -1); echo "client asks the host for internet.test -> ${r:-no answer}"'
     echo "## a VPN and new routes appear after the start"
     in_ ap 'ip link add vpn0 type dummy; ip link set vpn0 up; ip addr add 100.64.0.2/10 dev vpn0
@@ -404,4 +403,321 @@ scenario_lablink_monitor() {
         fu_stop
     done
     in_ ap 'pkill -x lablinkd; true'
+}
+
+# --- the field filter (packaging/networkmanager/90-lablink-field-filter) ----
+
+FILTER=/etc/NetworkManager/dispatcher.d/90-lablink-field-filter
+install_filter() {
+    in_ ap "install -o root -g root -m 755 /opt/lablink/90-lablink-field-filter $FILTER
+        ln -sf ../90-lablink-field-filter /etc/NetworkManager/dispatcher.d/pre-up.d/
+        ln -sf ../90-lablink-field-filter /etc/NetworkManager/dispatcher.d/pre-down.d/
+        $FILTER load; echo \"filter load exit \$?\""
+}
+remove_filter() {
+    in_ ap "$FILTER unload; rm -f $FILTER /etc/NetworkManager/dispatcher.d/pre-up.d/90-lablink-field-filter /etc/NetworkManager/dispatcher.d/pre-down.d/90-lablink-field-filter"
+}
+open_set() { in_ ap "nft -j list set inet lablink_field open 2>/dev/null | jq -c '[.nftables[].set? | select(.) | .elem // [] | .[]]' || echo absent"; }
+
+# An ordinary Wi-Fi network for the host to be a client of ("Carebear 1" on
+# the workstation): c2 runs it as a WPA2 access point (wpa_supplicant AP
+# mode) with a static address; the host joins with a static address too.
+uplink_wifi_up() {
+    in_ c2 'pkill wpa_supplicant; pkill dhclient; sleep 0.3; ip -4 addr flush dev wlan0; ip link set wlan0 up
+        ip addr add 192.168.8.1/24 dev wlan0
+        printf "ctrl_interface=/run/wpa_supplicant\nap_scan=2\nnetwork={\n ssid=\"Carebear\"\n mode=2\n frequency=2412\n key_mgmt=WPA-PSK\n proto=RSN\n pairwise=CCMP\n group=CCMP\n psk=\"carebear-pass\"\n}\n" >/tmp/cb.conf
+        wpa_supplicant -B -i wlan0 -c /tmp/cb.conf -f /tmp/cb.log; sleep 1; echo "c2 runs Carebear: $(wpa_cli -i wlan0 status | grep -E "^(mode|ssid)=" | tr "\n" " ")"'
+    in_ ap 'nmcli connection delete "Carebear 1" >/dev/null 2>&1
+        nmcli connection add type wifi ifname wlan0 con-name "Carebear 1" autoconnect no ssid Carebear \
+            wifi-sec.key-mgmt wpa-psk wifi-sec.psk carebear-pass ipv4.method manual \
+            ipv4.addresses 192.168.8.168/24 ipv4.never-default yes ipv6.method disabled >/dev/null
+        nmcli --wait 45 connection up "Carebear 1" >/dev/null && echo "host joined Carebear 1 as a client" || echo "Carebear 1 FAILED"'
+}
+uplink_wifi_down() {
+    in_ ap 'nmcli connection down "Carebear 1" >/dev/null 2>&1; nmcli connection delete "Carebear 1" >/dev/null 2>&1; true'
+    in_ c2 'pkill wpa_supplicant; ip -4 addr flush dev wlan0; true'
+}
+
+scenario_raw_filter_events() {
+    echo "# Field filter state across NetworkManager events (raw nmcli profiles)."
+    install_filter
+    echo "open set after load, no connection on wlan0: $(open_set)"
+    in_ ap 'ls -l /etc/NetworkManager/dispatcher.d/ /etc/NetworkManager/dispatcher.d/pre-up.d/ | grep lablink'
+    uplink_wifi_up
+    echo "open set with Carebear 1 (ordinary client connection): $(open_set)"
+    in_ ap 'ping -c1 -W1 -q 192.168.8.1 >/dev/null && echo "host reaches Carebear AP: yes" || echo "host reaches Carebear AP: NO"'
+    raw_profile Field "$RULES"
+    # Trace: the open set, the radio mode, NetworkManager's device state.
+    in_ ap '( end=$((SECONDS+30)); while [ $SECONDS -lt $end ]; do
+            printf "%s open=%s type=%s\n" "$(date +%s.%N | cut -c1-14)" \
+              "$(nft list set inet lablink_field open | grep -c "elements = { \"wlan0\" }")" \
+              "$(iw dev wlan0 info | awk "/type/{print \$2}")"; sleep 0.01; done ) >/tmp/ftrace.txt 2>&1 & echo $! >/tmp/ftrace.pid'
+    raw_up Field
+    echo "open set with the isolated hotspot up: $(open_set)"
+    in_ ap 'kill $(cat /tmp/ftrace.pid)
+        echo "trace samples: $(wc -l </tmp/ftrace.txt)"
+        echo "first AP sample:   $(grep -m1 "type=AP" /tmp/ftrace.txt)"
+        echo "AP samples while open=1: $(grep -c "open=1 type=AP" /tmp/ftrace.txt)"
+        echo "last open=1 sample: $(grep "open=1" /tmp/ftrace.txt | tail -1)"'
+    in_ ap 'nmcli connection down Field >/dev/null; echo "open set after the hotspot went down: $(nft list set inet lablink_field open | grep -c wlan0) (0 = armed)"
+        ip -br link show wlan0'
+    in_ ap 'nmcli --wait 45 connection up "Carebear 1" >/dev/null && echo "Carebear 1 back"'
+    echo "open set with Carebear 1 back: $(open_set)"
+    echo "## device disconnect: is wlan0 still up, and armed?"
+    in_ ap 'nmcli --wait 20 device disconnect wlan0 >/dev/null; ip -br link show wlan0; nmcli -t -f DEVICE,STATE device | grep ^wlan0'
+    echo "open set after disconnect: $(open_set)"
+    echo "## a shared hotspot WITHOUT the isolation rule (internet sharing) opens the interface"
+    raw_profile Share ""
+    raw_up Share
+    echo "open set with the sharing hotspot: $(open_set)"
+    raw_down Share
+    echo "open set after it: $(open_set)"
+    uplink_wifi_down
+    raw_down Field
+    remove_filter
+    in_ ap 'nft list tables'
+}
+
+# --- continuous traffic: leakage measured, not inferred ----------------------
+#
+# c1 knows the passphrase, has a static address and the host's MAC, and
+# sends continuously to every network behind the host (ICMP, UDP, TCP, v4
+# and v6) while it re-associates as soon as the hotspot exists. wan sends
+# continuously towards c1 through the host. Every phase below runs with
+# that traffic and reports, from counters taken before and after it:
+#   wan      client packets that reached the networks behind the host
+#   inject   wan packets that reached the client
+#   docker   client packets that reached a Docker-style container (bridge
+#            plus a published-port DNAT rule) on the host
+#   arrived  client packets that reached the host's Wi-Fi interface (proof
+#            the client was sending through the phase)
+# tcpdump on wan and c1 (inbound only) gives an independent per-phase count.
+
+leak_counts() {
+    local w i d a
+    w=$(counters)
+    i=$(in_ c1 'iptables -t raw -L INJECT -v -n -x | awk "/RETURN/{s+=\$1} END{print s+0}"')
+    d=$(in_ ap 'ip netns exec dk1 iptables -t raw -L PROBE -v -n -x | awk "/RETURN/{s+=\$1} END{print s+0}"')
+    a=$(in_ ap 'a=$(iptables -t raw -L ARRIVE -v -n -x | awk "/RETURN/{s+=\$1} END{print s+0}"); b=$(ip6tables -t raw -L ARRIVE -v -n -x | awk "/RETURN/{s+=\$1} END{print s+0}"); echo $((a+b))')
+    echo "$w $i $d $a"
+}
+
+leak_phase() { # name dwell-seconds action
+    local name=$1 dwell=$2 action=$3 b a t0 t1 up
+    echo; echo "## phase $name"
+    b=$(leak_counts)
+    t0=$(date +%s.%N)
+    if [ -n "$action" ]; then eval "$action"; fi
+    sleep "$dwell"
+    t1=$(date +%s.%N)
+    a=$(leak_counts)
+    if hotspot_up; then up=up; else up=down; fi
+    # shellcheck disable=SC2086
+    set -- $b $a
+    printf '%s\t%s\t%s\t%.1f\t%d\t%d\t%d\t%d\t%s\n' "$name" "$t0" "$t1" "$(echo "$t1 - $t0" | bc)" \
+        $(($5 - $1)) $(($6 - $2)) $(($7 - $3)) $(($8 - $4)) "$up" >>"$OUT/leak-phases.tsv"
+    printf 'RESULT %-22s %6.1f s  wan %d  inject %d  docker %d  arrived %d  hotspot %s\n' "$name" \
+        "$(echo "$t1 - $t0" | bc)" $(($5 - $1)) $(($6 - $2)) $(($7 - $3)) $(($8 - $4)) "$up"
+}
+
+leak_lablinkd() { # how many "ready" lines the log has once this one is up
+    in_ ap "fu lablinkd --no-mdns --no-netlink --no-startup-discovery --no-color --log info >>/tmp/lablinkd.log 2>&1 &
+            for i in \$(seq 1 40); do [ \$(grep -c 'lablinkd ready' /tmp/lablinkd.log) -ge $1 ] && break; sleep 0.25; done
+            echo \"lablinkd running: \$(pgrep -x lablinkd | wc -l)\""
+}
+leak_wait_client() { # until the client's packets reach the host again (it re-associates after every start)
+    in_ ap 'n0=$(iptables -t raw -L ARRIVE -v -n -x | awk "/RETURN/{s+=\$1} END{print s+0}"); t0=$SECONDS
+        while [ $((SECONDS - t0)) -lt 40 ]; do
+            sleep 0.2; n=$(iptables -t raw -L ARRIVE -v -n -x | awk "/RETURN/{s+=\$1} END{print s+0}")
+            [ "$n" -gt $((n0 + 20)) ] && { echo "client sending after $((SECONDS - t0)) s"; exit 0; }
+        done; echo "CLIENT NOT SENDING after 40 s"'
+}
+leak_recover() { # start again if the hotspot is down (after a phase that stopped it)
+    hotspot_up && return 0
+    in_ ap 'pgrep -x dnsmasq >/dev/null && { echo "orphan dnsmasq: $(pgrep -a dnsmasq | cut -c1-80)"; pkill -x dnsmasq; sleep 1; }; true'
+    fu_start
+}
+
+exposure_checks() { # c2 joins with DHCP, then probes this machine
+    echo "### exposure: what a hotspot client reaches on the host"
+    client_join c2 LLTEST $PSK
+    in_ c2 'ip neigh show 10.77.0.1 | sed "s/^/c2 neighbour (ARP): /"
+        for n in 192.0.2.0/24 172.17.0.0/16; do ip route replace $n via 10.77.0.1 dev wlan0; done
+        t() { r=$(timeout 4 socat -T2 - TCP4:$1,connect-timeout=2 2>&1 </dev/null | head -1); echo "tcp $1 -> ${r:-no answer}"; }
+        t 10.77.0.1:22; t 10.77.0.1:2222; t 10.77.0.1:8080; t 10.77.0.1:53; t 192.0.2.2:22; t 192.0.2.2:2222; t 172.17.0.2:7080
+        r=$(dig +time=2 +tries=1 @10.77.0.1 internet.test A 2>&1 | grep -E "status:|^internet.test|connection refused|timed out|unreachable" | head -1); echo "dns udp 10.77.0.1:53 -> ${r:-no answer}"
+        ping -c2 -W1 -q 10.77.0.1 >/dev/null && echo "icmp 10.77.0.1 -> REPLY" || echo "icmp 10.77.0.1 -> no reply"
+        ping -c2 -W1 -q 192.0.2.2 >/dev/null && echo "icmp 192.0.2.2 (host uplink address) -> REPLY" || echo "icmp 192.0.2.2 (host uplink address) -> no reply"'
+    echo "### positive control from wan: the published port works from the uplink"
+    in_ wan 'r=$(timeout 4 socat -T2 - TCP4:192.0.2.2:8080,connect-timeout=2 2>&1 </dev/null | head -1); echo "wan tcp 192.0.2.2:8080 -> ${r:-no answer}"
+             r=$(timeout 4 socat -T2 - TCP4:192.0.2.2:2222,connect-timeout=2 2>&1 </dev/null | head -1); echo "wan tcp 192.0.2.2:2222 -> ${r:-no answer}"'
+    echo "### multicast and DDS-style traffic (mDNS 5353, SPDP 239.255.0.1:7400, unicast 7410)"
+    local ip2
+    ip2=$(in_ c2 "ip -4 -o addr show dev wlan0 | awk '{print \$4}' | cut -d/ -f1")
+    in_ ap 'rm -f /tmp/mc-*.txt
+        socat -u UDP4-RECV:5353,ip-add-membership=224.0.0.251:wlan0,reuseaddr OPEN:/tmp/mc-mdns.txt,creat,append >/dev/null 2>&1 &
+        socat -u UDP4-RECV:7400,ip-add-membership=239.255.0.1:wlan0,reuseaddr OPEN:/tmp/mc-spdp.txt,creat,append >/dev/null 2>&1 &
+        socat -u UDP4-RECV:7410,reuseaddr OPEN:/tmp/mc-uni.txt,creat,append >/dev/null 2>&1 &'
+    in_ c1 'rm -f /tmp/mc-*.txt
+        socat -u UDP4-RECV:5353,ip-add-membership=224.0.0.251:wlan0,reuseaddr OPEN:/tmp/mc-mdns.txt,creat,append >/dev/null 2>&1 &
+        socat -u UDP4-RECV:7400,ip-add-membership=239.255.0.1:wlan0,reuseaddr OPEN:/tmp/mc-spdp.txt,creat,append >/dev/null 2>&1 &'
+    in_ c2 'rm -f /tmp/mc-*.txt; socat -u UDP4-RECV:7411,reuseaddr OPEN:/tmp/mc-uni.txt,creat,append >/dev/null 2>&1 &'
+    sleep 1
+    in_ c2 "for i in 1 2 3; do
+        echo mdns-from-c2 | socat -u - UDP4-DATAGRAM:224.0.0.251:5353,ip-multicast-if=$ip2,ip-multicast-ttl=255
+        echo spdp-from-c2 | socat -u - UDP4-DATAGRAM:239.255.0.1:7400,ip-multicast-if=$ip2
+        echo dds-unicast-from-c2 | socat -u - UDP4-SENDTO:10.77.0.1:7410; sleep 0.2; done"
+    in_ ap "echo dds-unicast-from-host | socat -u - UDP4-SENDTO:$ip2:7411"
+    sleep 1
+    in_ ap 'echo "host received: mdns=$(grep -c mdns-from-c2 /tmp/mc-mdns.txt 2>/dev/null) spdp=$(grep -c spdp-from-c2 /tmp/mc-spdp.txt 2>/dev/null) unicast=$(grep -c dds-unicast /tmp/mc-uni.txt 2>/dev/null) (of 3 each)"
+            pkill -x socat; socat -T2 TCP4-LISTEN:2222,fork,reuseaddr SYSTEM:"echo host-service" >/dev/null 2>&1 &
+            socat -T2 TCP4-LISTEN:22,fork,reuseaddr SYSTEM:"echo host-ssh" >/dev/null 2>&1 &
+            ip netns exec dk1 socat -T2 TCP4-LISTEN:7080,fork,reuseaddr SYSTEM:"echo container" >/dev/null 2>&1 &'
+    in_ c1 'echo "c1 received: mdns=$(grep -c mdns-from-c2 /tmp/mc-mdns.txt 2>/dev/null) spdp=$(grep -c spdp-from-c2 /tmp/mc-spdp.txt 2>/dev/null) (of 3 each)"; pkill -x socat; true'
+    in_ c2 'echo "c2 received from the host: $(grep -c dds-unicast-from-host /tmp/mc-uni.txt 2>/dev/null) (of 1)"; pkill -x socat; true'
+    probe_c2c
+    in_ ap 'echo "filter counters:"; nft list table inet lablink_field | grep -E "counter packets [1-9]" | sed "s/^\s*/  /"'
+    client_leave c2
+}
+
+scenario_lablink_leak() {
+    echo "# Continuous traffic through every phase of the hotspot's life; leakage counted per phase."
+    : >"$OUT/leak-phases.tsv"
+    in_ ap ': >/tmp/lablinkd.log'
+    lablink_user
+    grant
+    echo "## host services: SSH-like listener on 22 (allowed), another on 2222 (not allowed)"
+    in_ ap 'pkill -x socat; socat -T2 TCP4-LISTEN:2222,fork,reuseaddr SYSTEM:"echo host-service" >/dev/null 2>&1 &
+            socat -T2 TCP4-LISTEN:22,fork,reuseaddr SYSTEM:"echo host-ssh" >/dev/null 2>&1 &'
+    echo "## a Docker-style network: bridge 172.17.0.1/16, a container 172.17.0.2, published port 8080 (DNAT)"
+    in_ ap 'ip link add br-dk type bridge; ip addr add 172.17.0.1/16 dev br-dk; ip link set br-dk up
+        ip netns add dk1; ip link add vdk0 type veth peer name vdk1 netns dk1; ip link set vdk0 master br-dk up
+        ip -n dk1 link set lo up; ip -n dk1 addr add 172.17.0.2/16 dev vdk1; ip -n dk1 link set vdk1 up
+        ip -n dk1 route add default via 172.17.0.1
+        ip netns exec dk1 iptables -t raw -N PROBE; ip netns exec dk1 iptables -t raw -A PREROUTING -j PROBE
+        ip netns exec dk1 iptables -t raw -A PROBE ! -s 192.0.2.0/24 -p icmp --icmp-type echo-request -j RETURN
+        ip netns exec dk1 iptables -t raw -A PROBE ! -s 192.0.2.0/24 -p tcp --dport 7080 -j RETURN
+        ip netns exec dk1 socat -T2 TCP4-LISTEN:7080,fork,reuseaddr SYSTEM:"echo container" >/dev/null 2>&1 &
+        iptables -t nat -A PREROUTING -m addrtype --dst-type LOCAL -p tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:7080
+        iptables -t nat -A OUTPUT -m addrtype --dst-type LOCAL -p tcp --dport 8080 -j DNAT --to-destination 172.17.0.2:7080
+        r=$(timeout 3 socat -T2 - TCP4:172.17.0.2:7080 </dev/null 2>&1 | head -1); echo "host reaches the container: ${r:-no}"'
+    echo "## an existing policy-routing configuration, present throughout: a full-tunnel VPN as wg-quick sets it up"
+    echo "## (main for anything more specific than a default, then table 200 with a default via the uplink)"
+    in_ ap 'ip route add default via 192.0.2.1 dev up0 table 200
+            ip rule add pref 49 lookup main suppress_prefixlength 0; ip rule add pref 50 not fwmark 0xca6c lookup 200; ip -4 rule'
+    echo "## first start (to learn the access point's MAC), then stop"
+    fu_start
+    local apmac freq
+    apmac=$(AP_MAC)
+    freq=$(in_ ap "iw dev wlan0 info | sed -nE 's/.*channel [0-9]+ \(([0-9]+) MHz.*/\1/p'")
+    echo "AP MAC $apmac, $freq MHz"
+    fu_stop
+    leak_lablinkd 1
+    echo "## counters on the host's Wi-Fi interface, the client and wan; packet captures"
+    in_ ap 'for t in iptables ip6tables; do $t -t raw -N ARRIVE 2>/dev/null; $t -t raw -F ARRIVE
+                $t -t raw -D PREROUTING -i wlan0 -j ARRIVE 2>/dev/null; $t -t raw -I PREROUTING -i wlan0 -j ARRIVE; done
+            iptables -t raw -A ARRIVE -s 10.77.0.50 -j RETURN; ip6tables -t raw -A ARRIVE -s 2001:db8:77::50 -j RETURN'
+    # wan's own packets towards the client come back to it while the hotspot
+    # is down (the host routes 10.77.0.0/24 by its default route then): not
+    # client traffic, so not counted.
+    in_ wan 'iptables -t raw -I PROBE 1 -d 10.77.0.0/16 -j ACCEPT; rm -f /tmp/leak-*.pcap
+        for i in dn0 lan1; do nohup tcpdump -U -Q in -ni $i -w /tmp/leak-$i.pcap "not dst net 10.77.0.0/16 and ((udp and dst portrange 7000-7999) or (tcp and dst portrange 7000-7999) or icmp[icmptype]==icmp-echo or (icmp6 and ip6[40]==128))" >/dev/null 2>&1 & done'
+    in_ c1 "rm -f /tmp/leak-*.pcap
+        pkill wpa_supplicant; pkill dhclient; for i in \$(seq 1 30); do pgrep -x wpa_supplicant >/dev/null || break; sleep 0.1; done
+        ip -4 addr flush dev wlan0; ip -6 addr flush dev wlan0 scope global; ip link set wlan0 up
+        ip addr add 10.77.0.50/24 dev wlan0
+        ip neigh replace 10.77.0.1 lladdr $apmac dev wlan0 nud permanent
+        for n in 192.0.2.0/24 198.51.100.0/24 10.20.0.0/24 100.64.0.0/10 172.17.0.0/16 203.0.113.0/24; do ip route replace \$n via 10.77.0.1 dev wlan0 onlink; done
+        ip -6 addr add 2001:db8:77::50/64 dev wlan0 nodad
+        ip -6 neigh replace fe80::77 lladdr $apmac dev wlan0 nud permanent
+        ip -6 route replace default via fe80::77 dev wlan0 onlink
+        iptables -t raw -N INJECT 2>/dev/null; iptables -t raw -F INJECT
+        iptables -t raw -D PREROUTING -i wlan0 -j INJECT 2>/dev/null; iptables -t raw -I PREROUTING -i wlan0 -j INJECT
+        for n in 192.0.2.0/24 198.51.100.0/24 10.20.0.0/24; do iptables -t raw -A INJECT -s \$n -j RETURN; done
+        nohup tcpdump -U -Q in -ni wlan0 -w /tmp/leak-c1.pcap 'src net 192.0.2.0/24 or src net 198.51.100.0/24 or src net 10.20.0.0/24' >/dev/null 2>&1 &
+        umask 077; printf 'ctrl_interface=/run/wpa_supplicant\nnetwork={\n ssid=\"LLTEST\"\n psk=\"$PSK\"\n key_mgmt=WPA-PSK\n ieee80211w=1\n scan_freq=$freq\n freq_list=$freq\n}\n' >/tmp/wpa.conf
+        wpa_supplicant -B -i wlan0 -c /tmp/wpa.conf -f /tmp/wpa.log -t || echo 'wpa_supplicant did not start'
+        nohup bash -c 'while :; do case \$(wpa_cli -i wlan0 status | sed -n s/^wpa_state=//p) in DISCONNECTED|INACTIVE) wpa_cli -i wlan0 scan >/dev/null;; esac; sleep 0.05; done' >/dev/null 2>&1 &
+        for d in 198.51.100.1 192.0.2.1 10.20.0.1 100.64.0.1 172.17.0.2 203.0.113.9; do nohup ping -q -i 0.01 \$d >/dev/null 2>&1 & done
+        nohup ping -6 -q -i 0.01 2001:db8:ff::1 >/dev/null 2>&1 &
+        nohup bash -c 'while :; do for t in 192.0.2.1/7001 198.51.100.1/7002 10.20.0.1/7003; do echo x >/dev/udp/\${t%/*}/\${t#*/}; done 2>/dev/null; sleep 0.01; done' >/dev/null 2>&1 &
+        nohup bash -c 'while :; do timeout 0.3 bash -c \"exec 3<>/dev/tcp/192.0.2.1/7080\" 2>/dev/null; timeout 0.3 bash -c \"exec 3<>/dev/tcp/10.77.0.1/8080\" 2>/dev/null; sleep 0.05; done' >/dev/null 2>&1 &
+        echo 'c1 floods: 6 v4 + 1 v6 ping targets at 100/s each, UDP to 3 networks, TCP connects to wan and to the published Docker port'"
+    in_ wan 'nohup ping -q -i 0.01 10.77.0.50 >/dev/null 2>&1 &
+        nohup bash -c "while :; do echo y >/dev/udp/10.77.0.50/7500; sleep 0.01; done" >/dev/null 2>&1 &
+        echo "wan floods towards the client: ping 100/s + UDP 7500"'
+
+    leak_phase armed-idle 6 ""
+    leak_phase activation 4 "fu_start"
+    leak_phase operation 4 ""
+    leak_phase operation-exposure 1 "exposure_checks"
+    leak_phase operation-steady 20 ""
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase restart 4 "in_ ap 'fu lablink hotspot restart --json >/dev/null 2>&1; echo \"restart exit \$?\"'"
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase rules-deleted 8 "in_ ap 'ip rule del pref 0 iif wlan0 prohibit; ip -6 rule del pref 0 iif wlan0 prohibit; echo rules deleted'"
+    in_ ap 'grep "isolation failed" /tmp/lablinkd.log | tail -1 | cut -c1-240'
+    leak_phase recovery-1 4 "leak_recover"
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase filter-unloaded 8 "in_ ap '$FILTER unload; echo filter unloaded'"
+    in_ ap 'grep "isolation failed" /tmp/lablinkd.log | tail -1 | cut -c1-240'
+    leak_phase recovery-2 4 "in_ ap '$FILTER load; echo filter reloaded'; leak_recover"
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase no-pref-rule+new-if 10 "in_ ap 'ip link add new0 type dummy; sysctl -qw net.ipv6.conf.new0.disable_ipv6=1; ip link set new0 up; ip addr add 203.0.113.1/24 dev new0
+            ip route add default via 192.0.2.1 dev up0 table 51820; ip rule add not fwmark 0xca6d lookup 51820; ip rule add lookup main suppress_prefixlength 0
+            echo \"rules after wg-quick-style rules without a priority:\"; ip -4 rule | head -5; echo \"new0 tx before: \$(cat /sys/class/net/new0/statistics/tx_packets)\"'"
+    in_ ap 'echo "new0 tx after: $(cat /sys/class/net/new0/statistics/tx_packets)"; ip rule del not fwmark 0xca6d lookup 51820; ip rule del lookup main suppress_prefixlength 0; ip route flush table 51820; ip link del new0'
+    fu_status
+    leak_phase if-state-change 10 "in_ ap 'nmcli device disconnect lan0 >/dev/null; ip link set up0 down; sleep 2; ip link set up0 up; nmcli --wait 20 connection up \"Lab LAN\" >/dev/null; nmcli --wait 20 connection up \"Wired uplink\" >/dev/null; nmcli -t -f DEVICE,STATE device'"
+    fu_status
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase lablinkd-killed 8 "in_ ap 'pkill -KILL -x lablinkd; echo lablinkd killed'"
+    leak_phase user-procs-killed 6 "in_ ap 'pkill -KILL -u fielduser; echo all fielduser processes killed (no logind here: the nearest stand-in for a logout)'"
+    leak_lablinkd 2
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase nm-sigterm 10 "in_ ap 'pkill -TERM -x NetworkManager; sleep 1; pgrep -x NetworkManager || echo NetworkManager stopped; iw dev wlan0 info | grep type'"
+    leak_phase nm-restart-1 12 "in_ ap 'NetworkManager --debug >>/tmp/nm.log 2>&1 & for i in \$(seq 1 40); do nmcli -t general status >/dev/null 2>&1 && break; sleep 0.5; done; echo NetworkManager back'"
+    in_ ap 'nmcli -t -f NAME,DEVICE,STATE connection show --active; iw dev wlan0 info | grep type'
+    leak_phase recovery-3 4 "leak_recover"
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase nm-sigkill 10 "in_ ap 'pkill -KILL -x NetworkManager; sleep 1; pgrep -x NetworkManager || echo NetworkManager killed; iw dev wlan0 info | grep type; pgrep -a dnsmasq | cut -c1-60'"
+    leak_phase nm-restart-2 12 "in_ ap 'NetworkManager --debug >>/tmp/nm.log 2>&1 & for i in \$(seq 1 40); do nmcli -t general status >/dev/null 2>&1 && break; sleep 0.5; done; echo NetworkManager back'"
+    in_ ap 'nmcli -t -f NAME,DEVICE,STATE connection show --active; iw dev wlan0 info | grep type'
+    leak_phase recovery-4 4 "leak_recover"
+    leak_phase stop-during-start 10 "fu_stop; in_ ap 'echo $PSK | fu lablink hotspot start --ssid LLTEST --password-stdin --no-site --yes --json >/tmp/start2.json 2>&1 & t0=\$(date +%s.%N); sleep 1.5; t1=\$(date +%s.%N); fu lablink hotspot stop --json >/tmp/stop2.json 2>&1; echo \"stop exit \$? (sent at +\$(echo \$t1 - \$t0 | bc | cut -c1-4) s, done at +\$(echo \$(date +%s.%N) - \$t0 | bc | cut -c1-4) s): \$(jq -c . /tmp/stop2.json | cut -c1-300)\"; wait; echo \"start finished at +\$(echo \$(date +%s.%N) - \$t0 | bc | cut -c1-4) s: \$(jq -c \"{started: (.started != null), error}\" /tmp/start2.json 2>/dev/null || head -c 300 /tmp/start2.json)\"; nmcli -t -f NAME,STATE connection show --active | grep -i lablink || echo \"no LabLink connection active\"'"
+    in_ ap 'nmcli connection down id "LabLink Field Network" >/dev/null 2>&1; true'
+    leak_phase recovery-5 4 "leak_recover"
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase NEGATIVE-CONTROL 8 "in_ ap 'ip rule del pref 0 iif wlan0 prohibit; ip -6 rule del pref 0 iif wlan0 prohibit; $FILTER unload; echo rules deleted AND filter unloaded'"
+    in_ ap 'grep "isolation failed" /tmp/lablinkd.log | tail -1 | cut -c1-240'
+    leak_phase recovery-6 4 "in_ ap '$FILTER load'; leak_recover"
+    leak_phase rejoin 0 "leak_wait_client"
+    leak_phase shutdown 6 "fu_stop"
+    leak_phase armed-idle-after 6 ""
+
+    echo; echo "## stop traffic and captures"
+    in_ c1 'pkill -x ping; pkill -f "dev/[u]dp"; pkill -f "dev/[t]cp"; pkill -f "wpa_cli -i wlan[0]"; pkill wpa_supplicant; pkill -x tcpdump; true'
+    in_ wan 'pkill -x ping; pkill -f "dev/[u]dp"; pkill -x tcpdump; iptables -t raw -D PROBE -d 10.77.0.0/16 -j ACCEPT; true'
+    sleep 1
+    docker cp "$P-wan:/tmp/leak-dn0.pcap" "$OUT/" 2>/dev/null; docker cp "$P-wan:/tmp/leak-lan1.pcap" "$OUT/" 2>/dev/null
+    docker cp "$P-c1:/tmp/leak-c1.pcap" "$OUT/" 2>/dev/null
+    echo "## per-phase packets in the captures (wan dn0 + lan1 inbound; c1 inbound from wan)"
+    local f
+    for f in dn0 lan1 c1; do
+        docker run --rm -v "$OUT:/o:ro" "$IMG" tcpdump -tt -nr "/o/leak-$f.pcap" 2>/dev/null | awk '{print $1}' >"$OUT/leak-$f.times" || true
+    done
+    while IFS=$'\t' read -r name t0 t1 dur _ _ _ _ _; do
+        n_dn0=$(awk -v a="$t0" -v b="$t1" '$1>=a && $1<b' "$OUT/leak-dn0.times" | wc -l)
+        n_lan1=$(awk -v a="$t0" -v b="$t1" '$1>=a && $1<b' "$OUT/leak-lan1.times" | wc -l)
+        n_c1=$(awk -v a="$t0" -v b="$t1" '$1>=a && $1<b' "$OUT/leak-c1.times" | wc -l)
+        printf 'PCAP %-22s %6s s  dn0 %d  lan1 %d  c1 %d\n' "$name" "$dur" "$n_dn0" "$n_lan1" "$n_c1"
+    done <"$OUT/leak-phases.tsv"
+    echo "## totals"
+    awk -F'\t' '{d+=$4; w+=$5; i+=$6; k+=$7; a+=$8} END {printf "phases %d, %.1f s, wan %d, inject %d, docker %d, arrived %d\n", NR, d, w, i, k, a}' "$OUT/leak-phases.tsv"
+    echo "pcap packets: dn0 $(wc -l <"$OUT/leak-dn0.times"), lan1 $(wc -l <"$OUT/leak-lan1.times"), c1 $(wc -l <"$OUT/leak-c1.times")"
+    in_ ap 'cp /tmp/lablinkd.log /tmp/leak-lablinkd.log; grep -cE "isolation (verified|failed)" /tmp/lablinkd.log | sed "s/^/watchdog log lines: /"'
+    docker cp "$P-ap:/tmp/lablinkd.log" "$OUT/leak-lablinkd.log" 2>/dev/null
+    in_ ap 'pkill -x lablinkd; iptables -t nat -F PREROUTING; iptables -t nat -F OUTPUT; ip netns del dk1; ip link del br-dk; ip rule del pref 50 not fwmark 0xca6c lookup 200; ip rule del pref 49 lookup main suppress_prefixlength 0; ip route flush table 200
+            for t in iptables ip6tables; do $t -t raw -D PREROUTING -i wlan0 -j ARRIVE; done; true'
+    in_ c1 'iptables -t raw -D PREROUTING -i wlan0 -j INJECT; ip -6 route flush dev wlan0; ip route flush dev wlan0; ip neigh flush dev wlan0; ip -4 addr flush dev wlan0; ip -6 addr flush dev wlan0 scope global; true'
 }

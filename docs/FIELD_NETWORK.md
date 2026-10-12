@@ -42,8 +42,10 @@ hardware. The simulated runs do not change that.
   never runs `sudo`, and never installs a privileged helper. If polkit
   says `auth` (would prompt) or `no`, preflight refuses and names the
   missing permission.
-- For isolated mode (the default): a one-time dnsmasq drop-in installed by
-  an administrator, and `lablinkd` running ([Isolation](#isolation)).
+- For isolated mode (the default): the field filter, a NetworkManager
+  dispatcher script that an administrator installs once (it needs `nft`),
+  a Wi-Fi adapter named `wl*`, and `lablinkd` running
+  ([Isolation](#isolation)).
 
 ### Permissions
 
@@ -119,8 +121,7 @@ reads.
 | `lablink hotspot forget` | Delete LabLink's profile and password. Refused while running | NetworkManager profile |
 
 Start and preflight options: `--interface`, `--ssid`, `--subnet` (private
-IPv4, /22 to /28), `--security wpa2|wpa3`, `--allow-internet-sharing`,
-`--allow-dns-relay`.
+IPv4, /22 to /28), `--security wpa2|wpa3`, `--allow-internet-sharing`.
 `start` also takes `--yes` (accept warnings without asking; blockers are
 never accepted), `--password-stdin` and `--no-site`. Every command takes
 `--json`. Exit codes follow the rest of LabLink: 0 success, 1 failure, 2
@@ -132,8 +133,7 @@ In the app, the **Field Network** tab shows the same capabilities, status
 and clients. **Check** runs preflight for the settings in the form;
 **Start** is enabled only after a check of exactly those settings found no
 blocker and you ticked every warning. The **Internet sharing** box
-switches to the sharing mode; **DNS relay** accepts the DNS relay
-blocker. The app checks again just before
+switches to the sharing mode. The app checks again just before
 starting and refuses if any warning's text changed. With the feature off,
 the tab still shows a running hotspot's status and a **Stop** button.
 
@@ -165,18 +165,23 @@ the tab still shows a running hotspot's status and a **Stop** button.
    notes the previous connection on the adapter, the subnet and whether
    IPv4 forwarding was on.
 6. **Checkpoint** (when polkit allows it without a prompt).
-7. **Activate** with a bounded wait, then confirm the profile is active on
+7. **Arm** (isolated mode): disconnect the adapter if it is in use and
+   wait up to five seconds for the field filter to arm it. An adapter
+   that is not armed is never turned into an access point.
+8. **Activate** with a bounded wait, then confirm the profile is active on
    the adapter with the gateway address up, and (isolated mode) that the
-   kernel holds both isolation rules first in line. On failure, the
+   adapter is still armed and the kernel holds both isolation rules first
+   in line. On failure, the
    checkpoint is rolled back, or LabLink stops the hotspot and reconnects
    the previous connection itself.
-8. **Site.** The `field-network` site in your config is added or updated
+9. **Site.** The `field-network` site in your config is added or updated
    with the hotspot's subnet (skip with `--no-site`).
 
 DHCP comes from NetworkManager's own dnsmasq instance, bound to the hotspot
-only. LabLink runs no DHCP server, opens no port, and starts no service.
-While the hotspot runs, `lablinkd` re-checks the isolation every two
-seconds ([Isolation](#isolation)).
+only (its DNS port is refused by the field filter). LabLink runs no DHCP
+server, opens no port, and starts no service. While the hotspot runs,
+`lablinkd` re-checks the isolation every two seconds
+([Isolation](#isolation)).
 
 ## Preflight findings
 
@@ -194,8 +199,8 @@ Each finding has a level (`block`, `warn`, `info`) and a stable code that
 | `remote-session` | block / info | An SSH session (this command's, or any inbound connection to port 22 or this session's SSH port, read from `/proc/net/tcp` and `tcp6`) arrives through the adapter, through a tunnel or other virtual interface, or through an interface LabLink cannot identify. No override. Info when it arrives over another physical adapter |
 | `disconnect` | warn | The adapter leaves its current network while the hotspot runs |
 | `uplink` | warn | That network is this machine's only internet uplink |
-| `isolation` | block / info | Block: the isolation cannot be guaranteed (another priority-0 routing rule, unreadable rules, an interface stacked on the adapter, the adapter in a bridge, an XDP program or a tc ingress/clsact qdisc on it, or unreadable qdiscs). No override. Info: the networks the rule keeps clients off |
-| `dns-relay` | block / warn | The hotspot's DNS server would forward clients' queries to this machine's resolvers (no `no-resolv` drop-in), or the drop-ins cannot be read. Blocked unless `--allow-dns-relay` |
+| `isolation` | block / info | Block: the isolation cannot be guaranteed (the field filter not installed, not loaded or not checkable, an adapter not named `wl*`, another priority-0 routing rule, unreadable rules, an interface stacked on the adapter, the adapter in a bridge, an XDP program or a tc ingress/clsact qdisc on it, or unreadable qdiscs). No override. Info: the networks kept off |
+| `exposure` | info | What clients can reach on this machine: the hotspot address, for DHCP, ICMP and the filter's services |
 | `internet-sharing` | warn | Sharing mode only: clients will reach the internet through the named uplinks |
 | `forwarding` | warn / info | Sharing mode: every routed network (VPN, Docker, LAN) is reachable. Isolated mode: shared mode will turn IPv4 forwarding on (warn when it was off; it stays on after stop) |
 | `sessions` | info | Other (non-SSH) TCP connections that arrive over the adapter and will drop |
@@ -228,80 +233,144 @@ than 22 unless this command itself runs over that session.
 
 ### Isolation
 
-Isolated mode is the default. Hotspot clients reach this machine and each
-other, and nothing else: not the internet, the LAN, a VPN or a container
-network behind this machine, whether it existed at start or appears later.
+Isolated mode is the default. Hotspot clients reach each other and, on
+this machine, only the hotspot address and a short list of services:
+DHCP, ICMP, SSH (TCP 22), mDNS (UDP 5353) and ROS 2 DDS for domain 0 (UDP
+7400-7649). Nothing is forwarded: not to the internet, the LAN, a VPN or a
+container network behind this machine, whether it existed at start or
+appears later.
 
-How. NetworkManager's shared mode still provides DHCP (its own dnsmasq)
-and still turns on IPv4 forwarding and NAT. The profile adds two routing
-rules that NetworkManager installs when it activates the hotspot and
-removes when it deactivates it:
+Two independent layers do this. Both are kernel state, so both stay in
+force when NetworkManager, `lablinkd` or LabLink stop or crash.
 
-    priority 0 iif <adapter> prohibit      (IPv4)
-    priority 0 iif <adapter> prohibit      (IPv6)
+**1. The field filter** (prevention). A NetworkManager dispatcher script
+that an administrator installs once
+([packaging/networkmanager/90-lablink-field-filter](../packaging/networkmanager/90-lablink-field-filter)).
+It keeps one nftables table, `inet lablink_field`, with hooks at priority
+-300 (before NAT and the usual firewall tables). Every Wi-Fi interface
+(name `wl*`) is *armed* unless NetworkManager runs an ordinary connection
+on it. Armed means:
 
-The kernel consults routing rules in priority order, and `0: lookup local`
-(this machine's own addresses) comes first. A packet that arrives from the
-hotspot and is for this machine is delivered by `lookup local`. Any other
-packet from the hotspot hits the `prohibit` rule before any routing table
-is read, so it cannot be forwarded: the sender gets an ICMP "administratively
-prohibited" error. This happens in routing, before the firewall's FORWARD
-chain and NAT, so firewall rule order, a firewall that accepts all
-forwarding, `MASQUERADE` rules, `ip_forward=1` and new routes in any table
-do not matter. A rule added later at the same priority sorts after
-LabLink's. IPv6 is also disabled on the adapter (the IPv6 rule is the
-guarantee; that is a second layer).
+- nothing is forwarded from or to it, IPv4 or IPv6 (a `drop` in a
+  netfilter hook is final, whatever other tables accept);
+- this machine accepts from it only packets addressed to that interface's
+  own address, its broadcast or a multicast group (the kernel's `fib`
+  lookup, so the Ethernet, VPN and Docker addresses of this machine are
+  dropped), and of those only established replies, ICMP, IGMP, DHCP and
+  the listed services. Everything else is refused with ICMP
+  "administratively prohibited", DNS included.
+
+The script opens an interface at `pre-up` of a connection without
+LabLink's isolation rule (joining an ordinary Wi-Fi network) and arms it
+again at `pre-down` and `down`. So the adapter is armed while
+NetworkManager disconnects it before the hotspot starts, while the access
+point accepts its first clients, the whole time it runs, through
+`restart`, and after it stops. `lablink hotspot start` checks that the
+adapter is armed before it asks NetworkManager to start the access point
+and refuses otherwise, so a hotspot never runs on an open adapter.
+
+**2. Routing rules** (prevention, independent of the firewall). The
+profile carries `priority 0 iif <adapter> prohibit` for IPv4 and IPv6,
+which NetworkManager installs at activation and removes at deactivation.
+A packet from the hotspot for any other network hits the rule before any
+routing table is read. The rules sit at priority 0 on purpose: a rule
+added later without a priority (as `wg-quick` does) lands just before
+the second rule in the list, so at any other priority it would sort
+ahead of LabLink's. A rule added later at priority 0 sorts after it.
+Preflight refuses if another priority-0 rule already exists. If the
+`lookup local` rule is moved off priority 0, the prohibit rule comes
+first and blocks clients from this machine too: that fails closed. IPv6
+is also disabled on the adapter.
+
+LabLink runs unprivileged and cannot read nftables, so it probes the
+filter: a UDP datagram to 192.0.0.8 port 47977 from a socket bound to the
+adapter is dropped by the filter's output chain while the adapter is
+armed (`send` fails with `EPERM` before anything leaves), and a control
+datagram to port 47976 must go out. The same pair on the loopback
+interface tells whether the table is loaded. While `lablinkd` watches,
+the control datagram is a real packet on the hotspot every two seconds (an
+ARP request for 192.0.0.8, an address nothing answers). The probe proves
+that the table is loaded and the adapter armed; it cannot prove that root
+has not edited the table's other rules.
+
+Install the filter once, as an administrator:
+
+    sudo install -o root -g root -m 755 packaging/networkmanager/90-lablink-field-filter /etc/NetworkManager/dispatcher.d/
+    sudo ln -sf ../90-lablink-field-filter /etc/NetworkManager/dispatcher.d/pre-up.d/
+    sudo ln -sf ../90-lablink-field-filter /etc/NetworkManager/dispatcher.d/pre-down.d/
+    sudo /etc/NetworkManager/dispatcher.d/90-lablink-field-filter load
+
+It needs `nft` (nftables) and only adds its own table, so it leaves
+iptables, Docker and Tailscale rules alone (in simulation it ran beside
+iptables NAT and FORWARD rules and a Docker-style published port). It
+does not restart NetworkManager. It must be loaded again after a reboot: the next
+NetworkManager event on any interface loads it, and LabLink refuses to
+start while it is not loaded. To change the allowed services, edit
+`FIELD_TCP` and `FIELD_UDP` at the top of the installed script and run it
+with `load`. ROS 2 DDS uses UDP 7400 + 250 x domain and the 250 ports after
+it, so domain 67 needs `24150-24399`. Remove it with `unload`, then delete
+the file and both links.
 
 What LabLink checks and when:
 
-- **Preflight** refuses (no override) if the isolation cannot be
-  guaranteed: an existing priority-0 rule other than `lookup local`
-  (it would sort before LabLink's), rules it cannot read, an interface
-  stacked on the adapter (macvlan, VLAN), the adapter in a bridge, an XDP
-  program or a tc ingress/clsact qdisc on it, or qdiscs it cannot read.
-- **Start, restart** read the profile back (the rules must be exactly
-  LabLink's) and, after activation, the kernel's rules: each family's rule
-  must be the first rule after `lookup local`. Otherwise LabLink stops the
-  hotspot (or NetworkManager rolls back the checkpoint) and reports a
-  failure.
+- **Preflight** refuses (no override) if the filter is not installed or
+  not loaded, the adapter's name does not start with `wl`, or the rules
+  cannot be guaranteed: an existing priority-0 rule other than `lookup
+  local`, rules it cannot read, an interface stacked on the adapter
+  (macvlan, VLAN), the adapter in a bridge, an XDP program or a tc
+  ingress/clsact qdisc on it, or qdiscs it cannot read. When nothing is
+  wrong it states the exposure: the hotspot address and the filter's
+  services.
+- **Start** disconnects the adapter first if it is in use, waits up to
+  five seconds for the filter to arm it, and only then activates the
+  hotspot. After activation it requires the profile active, the adapter
+  armed and each family's rule first after `lookup local`. Otherwise
+  NetworkManager rolls the checkpoint back, or LabLink stops the hotspot
+  and reconnects the previous network, and `start` fails.
+- **Restart** checks the same after re-activation.
 - **While it runs**, `lablinkd` repeats the check every two seconds and
   stops the hotspot (`nmcli connection down`) when it fails, logging why.
-  It does not spare SSH sessions over the hotspot: isolation comes first.
+  That is recovery, not prevention: it notices a removed filter or rule
+  seconds later. The filter and the rules are what keep packets in.
   Without a running `lablinkd`, nothing watches; `status` still checks
   when you run it.
-- **`status`** reports `isolation verified` and the networks kept off, or
-  `ISOLATION NOT VERIFIED` with the reason.
+- **`status`** reports `isolated: field filter armed, IPv4 and IPv6 rules
+  verified` or `ISOLATION NOT VERIFIED` with the reason.
 
-DNS. NetworkManager's dnsmasq for the hotspot forwards client queries to
-this machine's resolvers by default, which is a path to the outside
-(queries and answers, so also a covert channel). LabLink refuses an
-isolated start unless a NetworkManager drop-in stops that. Install it once,
-as an administrator (it applies to every NetworkManager shared connection
-on this machine):
+| Failure | What keeps clients in | Recovery |
+|---|---|---|
+| `lablinkd` crashes, or the user logs out | The filter and the rules (kernel state) | None until `lablinkd` runs again; `status` checks when run |
+| NetworkManager stops cleanly | It tears the hotspot down; the filter stays armed | None needed |
+| NetworkManager is killed | The access point, the filter and the rules stay | Restarting NetworkManager may not bring the hotspot back while the orphaned dnsmasq holds the address; stop that dnsmasq as root |
+| Root deletes a rule | The filter | `lablinkd` stops the hotspot |
+| Root unloads the filter | The rules | `lablinkd` stops the hotspot |
+| Root deletes both | Nothing: packets are forwarded until `lablinkd` stops the hotspot | `lablinkd`, about two seconds plus the time `nmcli` takes |
+| A VPN, route, interface or Docker network appears later | The filter and the rules | Not needed |
 
-    echo no-resolv | sudo tee /etc/NetworkManager/dnsmasq-shared.d/lablink-no-upstream.conf
-
-It takes effect at the next activation. Clients then get `REFUSED` for
-names on the outside. `--allow-dns-relay` accepts forwarding instead.
+DNS. NetworkManager's dnsmasq for the hotspot would forward client queries
+to this machine's resolvers (a path to the outside, and a covert channel).
+The filter refuses port 53 from the hotspot, so clients get no DNS at
+all; use addresses or mDNS `.local` names. An earlier build asked for a
+`no-resolv` file in `/etc/NetworkManager/dnsmasq-shared.d/`. That
+directory is read by the dnsmasq of *every* NetworkManager shared
+connection on the machine, including ones LabLink did not make, so the
+file changed them too. It is no longer needed; delete it if you installed
+it and nothing else wants it.
 
 What it does not cover:
 
-- Clients reach every address of this machine, not just the hotspot
-  gateway (`lookup local` includes the Ethernet, VPN and Docker
-  addresses). Any service listening on all interfaces is reachable from
-  the hotspot, as on any network you join.
+- The listed services are reachable from every hotspot client, and SSH
+  then is exactly as exposed as on any network you join. Keep password
+  logins off. Remove a service from the script if you do not need it.
+- Root can edit or remove the filter and the rules. The probe shows the
+  table is loaded and the adapter armed, not that its rules are intact.
+- An adapter whose name does not start with `wl` is not covered;
+  preflight refuses it.
 - IPv4 forwarding stays on after the hotspot stops if shared mode turned
-  it on; `start` and `status` say so.
-- Root can delete the rules. `lablinkd` then stops the hotspot within
-  about two seconds plus the time `nmcli` takes; packets sent in that
-  window are forwarded (the simulated runs measured it, see below).
-- When NetworkManager stops cleanly it removes the rules and tears the
-  hotspot down. In one simulated run 2 small TCP segments (40 bytes, from
-  connections already open) were forwarded during that teardown; a second
-  run forwarded none. If NetworkManager is killed, the rules and the
-  access point stay and isolation holds; restarting NetworkManager then
-  may fail to bring the hotspot back while its orphaned dnsmasq holds the
-  address (reboot or stop that dnsmasq as root).
+  it on; `start` and `status` say so. The filter keeps the adapter armed
+  regardless.
+- Client-to-client traffic is relayed by the access point in the driver
+  and never reaches the filter, by design.
 
 ### Internet sharing
 
@@ -433,14 +502,17 @@ with `lablink status` and `lablink ros` from either machine.
 - The profile is restricted to your user, so other local accounts cannot
   list it, bring it up or down, or read its password through
   NetworkManager. Root can.
-- Hotspot clients are isolated unless you ask for internet sharing: the
-  only change beyond the hotspot itself is two routing rules carried by
-  LabLink's NetworkManager profile, which NetworkManager adds and removes
-  with it. LabLink does not change firewall rules or sysctls.
+- Hotspot clients are isolated unless you ask for internet sharing. The
+  field filter is the one root-installed piece; LabLink itself only adds
+  two routing rules to its NetworkManager profile, which NetworkManager
+  adds and removes with the hotspot. LabLink does not change firewall
+  rules or sysctls.
 - Hotspot clients get nothing from LabLink: there is no API to talk to,
-  and an unknown client is never trusted. A client can still reach any
-  service this machine exposes on all interfaces (SSH, for example), as
-  on any network you join. Check what listens before you start.
+  and an unknown client is never trusted. On this machine they reach only
+  the hotspot address, and there only DHCP, ICMP and the filter's
+  services (SSH, mDNS, DDS domain 0 by default). Services that listen on
+  all interfaces but are not listed (a database, a web UI, Tailscale's
+  port) are refused.
 
 The full threat model is in [THREAT_MODEL.md](THREAT_MODEL.md#field-network-and-robotics-mode).
 
@@ -462,8 +534,20 @@ The full threat model is in [THREAT_MODEL.md](THREAT_MODEL.md#field-network-and-
 - DHCP lease details (hostnames) appear only when your user can read
   NetworkManager's lease file.
 - Forwarding that NetworkManager enables may stay enabled after stop.
-- Isolated mode needs a root-installed dnsmasq drop-in once
-  ([Isolation](#isolation)), and `lablinkd` running to watch the rules.
+- Isolated mode needs the field filter installed once by an
+  administrator ([Isolation](#isolation)), and `lablinkd` running to
+  recover from a filter or rule that root removed.
+- Clients get no DNS from the hotspot.
+- Once installed, the filter arms every Wi-Fi interface named `wl*` that
+  NetworkManager does not run an ordinary connection on, including one
+  managed by another tool (`wpa_supplicant` by hand, `iwd` without
+  NetworkManager). Interfaces with other names are not covered.
+- The probe needs the adapter up: on an adapter that is down, LabLink
+  cannot tell whether it is armed and refuses to start.
+- `start` can report success when a `stop` from another terminal lands in
+  its last moments; `status` shows the real state.
+- After NetworkManager is killed, its dnsmasq stays behind and blocks the
+  next start until it is stopped (see [Isolation](#isolation)).
 
 ## Simulated validation
 
@@ -523,15 +607,106 @@ every run; they were identical each time.
 | NetworkManager stopped (SIGTERM): hotspot torn down, rules removed | 0 (2 TCP segments in an earlier run) |
 | NetworkManager killed (SIGKILL): rules and access point stay; clients get ICMP "administratively prohibited" | 0, and 0 after the restart |
 
-In the isolated cases the client still reached this machine (on the
-hotspot gateway and on its uplink address) and the other client (ICMP,
-TCP and IPv6 link-local), and DNS queries for outside names got `REFUSED`
-with the drop-in. Without the drop-in, the client resolved an outside name
-through the host, which is why `start` requires it. After `stop`, no
-`prohibit` rule was left.
+In the isolated cases the client still reached this machine and the
+other client (ICMP, TCP and IPv6 link-local). After `stop`, no `prohibit`
+rule was left. The rows above ran before the field filter existed (rules
+only); DNS without the filter is in `raw_dns`: the hotspot's dnsmasq
+resolved outside names through the host, which is why the filter refuses
+port 53.
 
-`lablinkd`'s watchdog, with a client sending about 100 IPv4 UDP packets a
-second to the uplink, after root broke isolation:
+**Continuous traffic with both layers** (`lablink_leak`, run `leak3`,
+2026-10-12, 266.2 s). A static client (10.77.0.50, 2001:db8:77::50) sent
+the whole time: IPv4 ping at 100/s to six destinations (uplink gateway,
+internet, LAN, a VPN-style 100.64.0.1, a Docker-style container
+172.17.0.2, a new interface's network), IPv6 ping at 100/s to the
+internet, UDP every 10 ms to three networks and repeated TCP connects to
+the uplink and to a published Docker port; the uplink side pinged and sent
+UDP to the client at 100/s. The host side had a wg-quick-style full-tunnel
+policy (`lookup main suppress_prefixlength 0` at 49, `not fwmark lookup
+200` at 50), a Docker-style bridge with a published port (DNAT 8080 to
+172.17.0.2:7080) and NetworkManager-managed Ethernet uplink and LAN.
+Counted per phase: client packets that reached the host (raw table on the
+hotspot interface), packets that reached the uplink, internet, LAN or VPN
+(raw counters there), packets that reached the container namespace (raw
+counter, excluding the uplink's own positive control), replies injected
+back to the client from those networks, and an independent `tcpdump` on
+the uplink and LAN interfaces. `rejoin` phases wait until the client has
+re-associated, so every breach ran under traffic.
+
+| Phase | Duration (s) | Client packets at the host | Reached uplink/internet, LAN, VPN (counter) | Reached Docker namespace | Captured on uplink, LAN | Hotspot after |
+|---|---|---|---|---|---|---|
+| armed-idle | 6.0 | 0 | 0 | 0 | 0, 0 | down |
+| activation | 4.7 | 0 | 0 | 0 | 0, 0 | up |
+| operation | 4.0 | 76 | 0 | 0 | 0, 0 | up |
+| operation-exposure | 32.7 | 26909 | 0 | 0 | 0, 0 | up |
+| operation-steady | 20.0 | 16475 | 0 | 0 | 0, 0 | up |
+| rejoin | 0.2 | 236 | 0 | 0 | 0, 0 | up |
+| restart | 4.8 | 258 | 0 | 0 | 0, 0 | up |
+| rejoin | 14.3 | 175 | 0 | 0 | 0, 0 | up |
+| rules-deleted | 8.0 | 1491 | 0 | 0 | 0, 0 | down |
+| recovery-1 | 4.8 | 0 | 0 | 0 | 0, 0 | up |
+| rejoin | 2.4 | 133 | 0 | 0 | 0, 0 | up |
+| filter-unloaded | 8.0 | 681 | 0 | 0 | 0, 0 | down |
+| recovery-2 | 4.8 | 0 | 0 | 0 | 0, 0 | up |
+| rejoin | 1.4 | 116 | 0 | 0 | 0, 0 | up |
+| no-pref-rule+new-if | 10.0 | 8316 | 0 | 0 | 0, 0 | up |
+| if-state-change | 12.1 | 10009 | 0 | 0 | 0, 0 | up |
+| rejoin | 0.2 | 237 | 0 | 0 | 0, 0 | up |
+| lablinkd-killed | 8.0 | 6633 | 0 | 0 | 0, 0 | up |
+| user-procs-killed | 6.0 | 4980 | 0 | 0 | 0, 0 | up |
+| rejoin | 0.2 | 232 | 0 | 0 | 0, 0 | up |
+| nm-sigterm | 11.0 | 125 | 0 | 0 | 0, 0 | down |
+| nm-restart-1 | 12.5 | 0 | 0 | 0 | 0, 0 | down |
+| recovery-3 | 4.8 | 3300 | 0 | 0 | 0, 0 | up |
+| rejoin | 0.2 | 234 | 0 | 0 | 0, 0 | up |
+| nm-sigkill | 11.0 | 9126 | 0 | 0 | 0, 0 | down |
+| nm-restart-2 | 12.5 | 38 | 0 | 0 | 0, 0 | down |
+| recovery-4 | 5.9 | 0 | 0 | 0 | 0, 0 | up |
+| stop-during-start | 12.5 | 0 | 0 | 0 | 0, 0 | down |
+| recovery-5 | 5.8 | 0 | 0 | 0 | 0, 0 | up |
+| rejoin | 9.3 | 102 | 0 | 0 | 0, 0 | up |
+| NEGATIVE-CONTROL | 8.0 | 2107 | 1709 | 349 | 1314, 395 | down |
+| recovery-6 | 5.8 | 0 | 0 | 0 | 0, 0 | up |
+| rejoin | 1.8 | 109 | 0 | 0 | 0, 0 | up |
+| shutdown | 6.5 | 261 | 0 | 0 | 0, 0 | down |
+| armed-idle-after | 6.0 | 0 | 0 | 0 | 0, 0 | down |
+
+Replies from other networks back to the client: 0 in every phase except
+the negative control (672). In total, outside the negative control: 258.2 s,
+90,252 client packets at the host, **0** packets on any other network by
+counter or capture. The negative control (both rules deleted and the
+filter unloaded while the hotspot ran; `lablinkd` stopped it 2.4 s after the phase began) leaked 1,709 packets to the uplink,
+internet, LAN and VPN (1,314 + 395 captured) and 349 to the container, which
+shows the counters and captures see leaks. Phases with 0 client packets
+(`activation`, `nm-restart-1`, the recoveries, `stop-during-start`) carry
+no leakage evidence of their own: the client re-associates a few seconds
+after each start. The activation ordering is shown separately by
+`raw_filter_events`: sampling every 10 ms while NetworkManager switched the adapter from an
+ordinary Wi-Fi connection to the hotspot, the interface was armed more
+than 100 ms before it first appeared in AP mode and was never open in AP
+mode;
+`recovery-3` (a start, 3,300 client packets as the client rejoined) and the
+`rejoin` phases cover the first seconds of client traffic after
+activation.
+
+What each failure did, with both layers:
+
+| Event | Hotspot | Leaked | Which layer held |
+|---|---|---|---|
+| Normal stop (`shutdown`), `restart` | stopped / restarted | 0 | both, then the filter (re-armed at `pre-down`) |
+| IPv4 and IPv6 rules deleted by root | stopped by `lablinkd` 2.0 s after the phase began | 0 (was 142 with rules only) | filter |
+| Filter table removed by root | stopped by `lablinkd` 1.1 s after the phase began | 0 | rules |
+| A new interface, a new table and a priority-less wg-quick-style rule | up | 0 | both |
+| Ethernet uplink and LAN disconnected, link down and up, reconnected | up | 0 | both |
+| `lablinkd` killed | up, unwatched | 0 | both (no recovery until it restarts) |
+| All of the user's processes killed (stand-in for a logout) | up | 0 | both |
+| NetworkManager SIGTERM, then restarted | torn down | 0 (was 2 TCP segments with rules only) | filter |
+| NetworkManager SIGKILL, then restarted | access point stays up without NetworkManager, then torn down | 0 | both, then the filter |
+| `stop` 1.5 s after `start` began | stopped; `start` still reported success | 0 (no client yet) | both |
+
+Before the field filter existed, `lablinkd`'s watchdog was the only
+recovery after a rule was deleted. With a client sending about 100 IPv4
+UDP packets a second to the uplink (rules only, no filter):
 
 | Breach | Hotspot down after | Flood packets forwarded meanwhile |
 |---|---|---|
@@ -539,14 +714,34 @@ second to the uplink, after root broke isolation:
 | IPv6 rule deleted | 1.18 s | 0 (the flood was IPv4 only, so this says nothing about IPv6 leakage) |
 | tc ingress qdisc added on the adapter | 1.18 s | 0 |
 
-Activation window: eight activations of the isolated profile while a
-client tried to flood. NetworkManager installed both rules about 16 ms
-after activation started. No client packet reached the host or another
-network in any run, but the client also never got a packet to the host
-during an activation, so these runs do not prove that the rules beat the
-first client packet. The first activation failed ("IP configuration could
-not be reserved") because the dnsmasq orphaned by the SIGKILL case still
-held the address.
+Activation window, rules only (before the filter): eight activations of
+the isolated profile while a client tried to flood. NetworkManager
+installed both rules about 16 ms after activation started; no client
+packet reached the host or another network, but the client never got a
+packet through during an activation either, so those runs did not prove
+the ordering. The filter closes that question: it is armed before the
+access point exists. After a NetworkManager SIGKILL its dnsmasq is left
+behind and holds the hotspot address, so the next start fails ("IP
+configuration could not be reserved") until it is killed.
+
+Host services a client reached (`lablink_leak`, exposure check, from a
+second client that joined with DHCP and got 10.77.0.65):
+
+| Target | Result |
+|---|---|
+| 10.77.0.1 TCP 22 (listed) | connected |
+| 10.77.0.1 TCP 2222, 8080 (a published Docker port), 53 | refused (ICMP admin-prohibited, seen as "No route to host") |
+| DNS query to 10.77.0.1 | refused (ICMP admin-prohibited, `dig`: host unreachable) |
+| The host's uplink address 192.0.2.2, TCP 22 and 2222, ICMP | no answer (dropped) |
+| The container 172.17.0.2:7080 | refused |
+| Same ports from the uplink side (positive control) | 8080 reached the container, 2222 the host service |
+| ICMP to 10.77.0.1 | reply |
+| mDNS (224.0.0.251:5353) and DDS SPDP (239.255.0.1:7400) from a client | host 3 of 3 each; the other client 3 of 3 each |
+| DDS-style unicast client to host (7410), host to client (7411) | 3 of 3; 1 of 1 |
+| Client to client: ICMP, TCP, UDP, IPv6 link-local | all answered |
+
+DHCP (the second client's lease) and ARP (its neighbour entry for the
+hotspot address) worked with the filter armed.
 
 Permissions, as an unprivileged user under polkit 0.105: without grants,
 `network-control`, `settings.modify.own` and `checkpoint-rollback` needed
@@ -641,7 +836,8 @@ yourself and keep what you observe.
 | Clients join but get no address | `journalctl -u NetworkManager` for dnsmasq errors; another DHCP server on the machine may hold port 67 |
 | A registered device stays `discovered-untrusted` | Its pin is not provable yet. `lablink status <name>` and `lablink doctor <name>` explain why |
 | `status` says out of sync | Something else stopped or started the profile, or a start was interrupted; `lablink hotspot stop` reconciles |
-| `isolation` blocker | Preflight names the cause: remove the other priority-0 rule, the stacked interface, bridge, XDP program or ingress qdisc, or use the sharing mode knowingly |
-| `dns-relay` blocker | Install the `no-resolv` drop-in ([Isolation](#isolation)) |
+| `isolation` blocker | Preflight names the cause: install or load the field filter ([Isolation](#isolation)), remove the other priority-0 rule, the stacked interface, bridge, XDP program or ingress qdisc, or use the sharing mode knowingly |
+| `start` says the adapter is not armed | The filter is loaded but has opened the adapter (an ordinary connection was still on it). Disconnect it and start again; if it persists, run the script with `load` as root |
+| A ROS 2 machine on the hotspot cannot discover this one | The filter allows DDS domain 0 only by default; add the domain's ports to `FIELD_UDP` ([Isolation](#isolation)) |
 | `lablinkd` stopped the hotspot | Its log names the failed check. Something removed a rule or attached a bypass; find out what before starting again |
 | `status` warns that clients can be routed somewhere | Sharing mode only: a VPN, container network or uplink appeared after start. Stop the hotspot, or block forwarding from the hotspot interface in your firewall |

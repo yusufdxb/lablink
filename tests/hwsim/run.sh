@@ -80,6 +80,7 @@ setup() {
             for b in "$LABLINK_BIN" "$(dirname "$LABLINK_BIN")/lablinkd"; do
                 [ -f "$b" ] && mount+=(-v "$b:/usr/local/bin/$(basename "$b"):ro")
             done
+            mount+=(-v "$ROOT/packaging/networkmanager/90-lablink-field-filter:/opt/lablink/90-lablink-field-filter:ro")
         fi
         docker run -d --name "$P-$c" --hostname "$c" --network none --privileged \
             "${mount[@]}" "$IMG" sleep infinity >/dev/null
