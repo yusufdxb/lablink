@@ -46,6 +46,7 @@ appears.
 | Parsers (environment, DDS XML, `ip`, graph listings, QoS), the twelve checks and the level rules | Unit tests on recorded output (`crates/lablink-ros/src`) |
 | End to end against real ROS 2 Humble and Jazzy installations | Docker containers (`ros:humble-ros-base`, `ros:jazzy-ros-base`, with iproute2 and ping added) driven through `docker exec` instead of SSH (`crates/lablink-ros/tests/docker_ros.rs`, run with `--ignored`). This is simulation: no robot, no Wi-Fi, no real SSH |
 | CLI argument checks, feature gate, daemon-down behavior | `crates/lablink-cli/tests/ros.rs` |
+| Secrets in DDS Security settings never reach output | Unit tests on synthetic settings (`crates/lablink-ros/src/redact.rs`, `dds_security_secrets_never_reach_output`). Not run against a device with DDS Security enabled |
 | Real OpenSSH, a real daemon and config-pinned host keys | One manual run (not an automated test) against two ROS 2 Humble containers running `sshd`, with a named publisher and subscriber: both devices VERIFIED by possession proof; `inspect`, `nodes`, `topics` correct; passive `dds-check` level 2 (discovery seen one way), level 3 on a rerun; `--active` level 4, all six probes PASS, no probe process left, the existing nodes kept running. This run predates the `--no-daemon` subscriber and the daemon leftover check; those were re-run only in the `docker_ros` container test (Humble pair, `--active` level 4, no leftover), not over real SSH |
 | A real robot computer (Jetson), real Wi-Fi or a Field Network | **Not tested** |
 
@@ -171,6 +172,13 @@ A full active run takes about 50 seconds.
 - **DDS XML is read for Cyclone DDS and Fast DDS only.** Other RMWs are
   checked for domain, installation, localhost and discovery-range
   settings, but their own configuration files are not interpreted.
+- **DDS Security secrets are redacted.** Private keys (PEM blocks or
+  `data:,` values), passwords and PKCS#11 PINs found in inline
+  `CYCLONEDDS_URI` XML, Fast DDS properties or shell startup lines are
+  shown as `[redacted]` in text, `--json` and the app. Certificates and
+  file paths stay visible. Redaction recognizes the standard DDS Security
+  element and property names, not every possible spelling, so do not put
+  keys inline when a file path will do.
 
 ## Using it across a Field Network
 

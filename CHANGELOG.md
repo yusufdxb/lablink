@@ -46,6 +46,38 @@ proof limits in each guide.
 - App: Field Network and Robotics tabs, feature switches in Settings; the
   top bar wraps on narrow windows.
 
+### Security
+
+- The hotspot profile is restricted to the user who starts it
+  (`connection.permissions`), with its password in NetworkManager's
+  root-only store (`psk-flags 0`). A profile read back without that
+  restriction is refused before activation. Creating it needs polkit
+  `settings.modify.own` instead of `settings.modify.system`.
+- Unicode bidirectional and invisible format characters in text from
+  devices, clients and files are shown escaped, like control characters.
+- Robotics output redacts DDS Security private keys, passwords and PKCS#11
+  PINs from inline Cyclone DDS XML, Fast DDS properties and shell lines.
+- `hotspot status` (and the app) warns when a route to another network,
+  such as a VPN, appears while the hotspot runs, not only a new uplink.
+
+### Changed
+
+- `hotspot clients` marks clients known only from a DHCP lease as possibly
+  gone. `hotspot status` explains that an out-of-sync report can also come
+  from an interrupted start, and no longer says it "restores" a network
+  while stopped.
+
+### Downgrading
+
+Builds without these features (0.3.1 and earlier) refuse a config with
+`preferences.features` or a roaming site, and their daemon does not start.
+Before downgrading: `lablink hotspot stop`, optionally
+`lablink hotspot forget --yes`, `lablink feature disable` for each feature,
+and remove the `field-network` site (or its `roaming: true` line); or
+restore the oldest `config.yaml.bak-*` written after upgrading. Check with
+the older `lablinkd --check-config`. Nothing else changed format. Details in
+[docs/FIELD_NETWORK.md](docs/FIELD_NETWORK.md#downgrading-and-recovery).
+
 ## [0.3.1] - 2026-10-10
 
 Installing 0.3.1 over an earlier 0.3.0 build is no longer a same-version no-op.

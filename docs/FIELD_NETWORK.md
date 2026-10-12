@@ -22,12 +22,13 @@ applies until you turn it on.
 | Preflight, start, stop, restore, rollback, password handling, client classification, profile verification | Unit and integration tests against a scripted fake of `nmcli`, `ip` and `/proc` (`crates/lablink-fieldnet/src/tests.rs`, `crates/lablink-cli/tests/hotspot.rs`) |
 | Visiting devices recognized by pinned host key only | Daemon integration tests on a simulated network (`crates/lablink-daemon/tests/field_network.rs`) |
 | `capabilities` and `preflight` on a real Linux host (NetworkManager, one Wi-Fi adapter, Ethernet uplink, a VPN and Docker) | Run read-only. Output matched the host: AP and WPA2 reported, WPA3 "cannot verify" without `iw`, start refused because Ethernet would be NATed |
-| Starting a hotspot on real hardware, a real client joining, real DHCP leases, real rollback | **Not tested.** No hotspot has been started on a real adapter during development |
+| Start, WPA2 and WPA3 authentication, DHCP, client-to-host and client-to-client traffic, stop and restore, restart, password rotation, activation failure with and without a checkpoint, NetworkManager rolling a checkpoint back after LabLink was killed, isolation with and without shared mode, late-route warnings, `forget`, downgrade | **Simulation only.** Real NetworkManager, `wpa_supplicant`, `hostapd` and `dnsmasq` driving simulated radios (Linux `mac80211_hwsim`) inside network-isolated containers, with simulated LAN, internet and VPN networks behind the host. See [Simulated validation](#simulated-validation) |
+| Starting a hotspot on a real adapter, a real client joining, real DHCP leases, real rollback | **Not tested.** No hotspot has been started on a real adapter during development. Simulated radios do not show driver, firmware, channel or regulatory limits |
 | macOS | **Not tested on a Mac.** Only the parsers and guidance are tested, against recorded command output |
 
 Treat the Field Network as experimental until you have run the
 [example](#example-a-laptop-a-jetson-and-a-second-ros-machine) on your own
-hardware.
+hardware. The simulated runs do not change that.
 
 ## Requirements (Linux)
 
@@ -39,8 +40,8 @@ hardware.
   installed.
 - Polkit permission for your user to control networking
   (`org.freedesktop.NetworkManager.network-control`) and, the first time,
-  to create a system connection profile (`settings.modify.system`). A
-  desktop session's user normally has both. LabLink never asks for root,
+  to create a connection profile of its own (`settings.modify.own`). A
+  local desktop session's user normally has both. LabLink never asks for root,
   never runs `sudo`, and never installs a privileged helper. If polkit
   says `auth` (would prompt), preflight refuses and tells you which
   permission is missing.
@@ -100,14 +101,20 @@ the tab still shows a running hotspot's status and a **Stop** button.
 2. **Profile.** LabLink creates one NetworkManager profile, "LabLink Field
    Network" (autoconnect off), or updates the one it made before. Mode
    `ap`; key management `wpa-psk` (WPA2, CCMP) or `sae` (WPA3, PMF
-   required); IPv4 `shared`, IPv6 disabled.
+   required); IPv4 `shared`, IPv6 disabled. The profile belongs to your
+   user (`connection.permissions user:<you>`): other local users cannot
+   see, activate, edit or read the password of it, and creating it needs
+   polkit's `settings.modify.own`, not `settings.modify.system`. LabLink
+   refuses to start if it cannot read a plain login name for your user.
 3. **Password.** A generated 24-character password (120 bits from the OS
    random source, no look-alike characters), or one you pipe in with
    `--password-stdin`. It goes to `nmcli connection edit` on stdin, never
    on a command line, and is stored in NetworkManager's root-only secret
    store. LabLink keeps only the profile's UUID.
 4. **Verify.** The profile is read back. Anything other than WPA2/WPA3 with
-   a password (open, WEP, a missing key) is refused and never activated.
+   a password (open, WEP, a missing key), a password not kept in
+   NetworkManager's own store, or a profile visible to anyone but you
+   (no permissions, or other users listed) is refused and never activated.
 5. **Record.** `fieldnet.json` (mode 0600, in LabLink's state directory)
    notes the previous connection on the adapter, the subnet and whether
    IPv4 forwarding was on.
@@ -186,6 +193,18 @@ so:
 - If another uplink appears while the hotspot runs (you plug in Ethernet),
   NetworkManager's NAT may start sharing it. `status` prints a warning
   naming it.
+- If a route to another network appears while the hotspot runs (a VPN
+  connects, a container network starts), clients can be forwarded to it.
+  `status` names those routes, from every routing table, with a warning
+  (`routed` in `--json`). It warns; it does not block or stop the hotspot,
+  and LabLink does not add firewall rules. Stop the hotspot if that is not
+  intended.
+
+In the simulated runs, an isolated start (no other uplink or routes) left
+clients able to reach only this machine. With `--allow-internet-sharing`
+and `--allow-routing`, clients reached the simulated LAN, internet and VPN
+through NetworkManager's masquerading, as warned. A VPN route added after
+start was reachable by clients and reported by `status`.
 
 ## Clients and device states
 
@@ -213,6 +232,9 @@ compare the fingerprint.
 `address_changed` is set when the daemon recorded an address change for the
 device since the hotspot started. An address is never a device's identity.
 
+A client known only from a DHCP lease, with no current neighbor entry, is
+marked "DHCP lease only: may have left". Leases outlive the client.
+
 ## The `field-network` site
 
 Starting adds a roaming site called `field-network` (or updates the one
@@ -237,7 +259,9 @@ one, LabLink reconnects the previous connection. `start` says which
 applied.
 
 If something else stops the hotspot, `status` reports that LabLink's record
-and NetworkManager disagree, and believes NetworkManager.
+and NetworkManager disagree, and believes NetworkManager. The same report
+appears when a start was interrupted before LabLink recorded it; with a
+checkpoint, NetworkManager restores the adapter within about two minutes.
 
 ## One adapter or two
 
@@ -301,6 +325,9 @@ with `lablink status` and `lablink ros` from either machine.
   the app, which forgets it after the next action).
 - WEP and open networks are refused at the command line and again after
   reading the profile back.
+- The profile is restricted to your user, so other local accounts cannot
+  list it, bring it up or down, or read its password through
+  NetworkManager. Root can.
 - Internet sharing is off unless you ask. LabLink does not change firewall
   rules, sysctls or routes.
 - Hotspot clients get nothing from LabLink: there is no API to talk to,
@@ -323,10 +350,85 @@ The full threat model is in [THREAT_MODEL.md](THREAT_MODEL.md#field-network-and-
 - The remote-session guard does not see UDP sessions (mosh) or SSH
   servers on a non-standard port that this command does not run over.
 - Older LabLink builds reject a config written by this one (the new
-  `features` and roaming-site keys). Downgrading needs those keys removed.
+  `features` and roaming-site keys). See
+  [Downgrading and recovery](#downgrading-and-recovery).
 - DHCP lease details (hostnames) appear only when your user can read
   NetworkManager's lease file.
 - Forwarding that NetworkManager enables may stay enabled after stop.
+
+## Simulated validation
+
+These results come from simulated radios (Linux `mac80211_hwsim`), not a
+real Wi-Fi adapter. They exercise the real NetworkManager, `wpa_supplicant`,
+`hostapd` and `dnsmasq` code paths, but not drivers, firmware, channels,
+regulatory rules, radio range or interference. They do not make the Field
+Network proven on hardware.
+
+The setup: NetworkManager 1.36 with LabLink in one network-isolated
+container owning one simulated radio; a client (`wpa_supplicant` and a DHCP
+client) in a second container owning the other; a third container
+simulating a LAN, the internet and a VPN behind the host. No physical
+interface was touched.
+
+| Behavior | Observed |
+|---|---|
+| Start | WPA2 profile created and verified (CCMP, PMF off for older clients, password only in NetworkManager's root-only keyfile), owned by the starting user |
+| Authentication | A wrong password was rejected by the access point; the right one joined |
+| DHCP and client to host | Client leased an address from the hotspot subnet; ping and TCP to this machine worked |
+| Client to client | Two clients exchanged TCP and UDP through the access point; a capture showed the frames relayed and encrypted |
+| Stop, restart, password rotation | Stop reconnected the previous network. Restart kept the password and the client rejoined. After `password --rotate` and a restart, the old password was rejected and the new one accepted |
+| Activation failure | With a checkpoint, NetworkManager restored the previous network. Without one, LabLink reconnected it |
+| LabLink killed after activation | NetworkManager rolled the checkpoint back by itself, in under two minutes |
+| Remote-session guard | `stop` refused while an SSH session arrived over the hotspot |
+| Isolation | Described under [Internet sharing and forwarding](#internet-sharing-and-forwarding) |
+| WPA3 | A WPA3 (SAE, PMF required) hotspot accepted a WPA3 client; a WPA2-only client could not join |
+| Another local user | Could not list the profile or read its password |
+| `forget` | Refused without `--yes`; deleted the profile after stop |
+
+## Downgrading and recovery
+
+A LabLink build without the Field Network (0.3.1 and earlier) refuses a
+config file that has the new keys, with an error such as
+``preferences: unknown field `features` `` or
+``sites[2]: unknown field `roaming` ``, and its daemon does not start.
+Nothing else needs migrating: no daemon database or cache format changed,
+and the old build ignores `fieldnet.json`.
+
+Before installing the older build:
+
+1. Stop the hotspot and get your network back: `lablink hotspot stop`.
+2. If you will not use it again, delete the profile and its password from
+   NetworkManager: `lablink hotspot forget --yes`. (This needs the feature
+   on, so do it before step 3. Afterwards,
+   `nmcli connection delete "LabLink Field Network"` does the same.)
+3. Turn the features off, which removes the `features` key when none is
+   left on: `lablink feature disable field-network` and
+   `lablink feature disable robotics`.
+4. Remove the roaming site: delete the `field-network` site from
+   `config.yaml`, or at least its `roaming: true` line. LabLink keeps no
+   other roaming state.
+5. Check the file with the older build before relying on it:
+   `lablinkd --check-config`.
+
+Alternatively, restore a backup. Every time LabLink rewrites `config.yaml`
+it saves the previous version next to it as `config.yaml.bak-<UTC time>`;
+the oldest backup written after upgrading is the file the older build last
+accepted. Copy it over `config.yaml`, check it, and redo any later edits by
+hand.
+
+`fieldnet.json` in LabLink's state directory can be left or deleted; the
+older build does not read it. A NetworkManager profile that you did not
+`forget` stays in NetworkManager, usable only by your user, and can be
+deleted with `nmcli` at any time.
+
+If an older daemon already refuses to start, do steps 3 and 4 by editing
+`config.yaml` (remove the `features:` lines under `preferences:` and the
+roaming site), or restore the backup, then restart it.
+
+Upgrading again needs nothing: the newer build reads the older config.
+If you removed only the `roaming: true` line, put it back (or delete the
+site) before the next `lablink hotspot start`, which refuses to reuse a
+`field-network` site that is not roaming.
 
 ## Example: a laptop, a Jetson and a second ROS machine
 
@@ -361,9 +463,10 @@ yourself and keep what you observe.
 
 | Symptom | Check |
 |---|---|
-| `permission` blocker | `nmcli general permissions`: `network-control` and `settings.modify.system` must say `yes` |
+| `permission` blocker | `nmcli general permissions`: `network-control` and `settings.modify.own` must say `yes`. Polkit usually grants them only to a local, active login session, not over SSH or from a service |
 | Activation fails or times out | The adapter may not support AP mode on the chosen band while connected; try a second adapter, or stop the client connection first |
 | Clients cannot join a WPA3 hotspot | Use the default `--security wpa2` |
 | Clients join but get no address | `journalctl -u NetworkManager` for dnsmasq errors; another DHCP server on the machine may hold port 67 |
 | A registered device stays `discovered-untrusted` | Its pin is not provable yet. `lablink status <name>` and `lablink doctor <name>` explain why |
-| `status` says out of sync | Something else stopped or started the profile; `lablink hotspot stop` reconciles |
+| `status` says out of sync | Something else stopped or started the profile, or a start was interrupted; `lablink hotspot stop` reconciles |
+| `status` warns that clients can be routed somewhere | A VPN, container network or uplink appeared after start. Stop the hotspot, or block forwarding from the hotspot interface in your firewall |
