@@ -236,6 +236,7 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
     tracker.spawn(ipc::serve(state.clone(), listener));
     tracker.spawn(crate::discovery::run_coordinator(state.clone(), rx));
     tracker.spawn(persist_task(state.clone()));
+    tracker.spawn(fieldnet_watchdog(state.clone()));
     for name in state.reg().device_names() {
         tracker.spawn(crate::monitor::run(state.clone(), name));
     }
@@ -319,6 +320,59 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
     drop(lock);
     tracing::info!("stopped cleanly");
     Ok(())
+}
+
+/// While LabLink's isolated Field Network hotspot runs, re-check its
+/// isolation every two seconds and take the hotspot down when it no longer
+/// holds. Without a hotspot this only reads the Field Network state file.
+async fn fieldnet_watchdog(state: Arc<State>) {
+    use lablink_fieldnet::nm::{enforce, Enforcement};
+    let mut last_verified = false;
+    let mut last_failure: Option<String> = None;
+    loop {
+        tokio::select! {
+            _ = state.cancel.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+        let dir = state.paths.state_dir.clone();
+        let Ok(outcome) = tokio::task::spawn_blocking(move || {
+            enforce(&lablink_fieldnet::system::RealSystem, &dir)
+        })
+        .await
+        else {
+            continue;
+        };
+        if !matches!(outcome, Enforcement::StopFailed(_)) {
+            last_failure = None;
+        }
+        match outcome {
+            Enforcement::Idle => last_verified = false,
+            Enforcement::Verified => {
+                if !last_verified {
+                    tracing::info!("field network isolation verified; watching it");
+                }
+                last_verified = true;
+            }
+            Enforcement::Stopped(why) => {
+                last_verified = false;
+                tracing::warn!(
+                    reason = %lablink_core::printable(&why),
+                    "field network isolation failed: hotspot stopped"
+                );
+            }
+            Enforcement::StopFailed(why) => {
+                last_verified = false;
+                if last_failure.as_deref() == Some(why.as_str()) {
+                    continue;
+                }
+                last_failure = Some(why.clone());
+                tracing::error!(
+                    reason = %lablink_core::printable(&why),
+                    "field network isolation failed and the hotspot could NOT be stopped"
+                );
+            }
+        }
+    }
 }
 
 async fn persist_task(state: Arc<State>) {

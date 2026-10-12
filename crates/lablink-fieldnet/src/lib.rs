@@ -9,9 +9,13 @@
 //! internet; every change goes through NetworkManager's own polkit-checked
 //! API. NetworkManager's shared mode, which the hotspot uses for DHCP, does
 //! turn on IPv4 forwarding and add a NAT rule for the hotspot subnet while
-//! it runs: the preflight refuses when that would reach another uplink or
-//! routed network unless the user allows it, and `status` reports an
-//! uplink that appears later.
+//! it runs. Isolation does not depend on either: the profile carries
+//! `priority 0 iif <adapter> prohibit` routing rules (IPv4 and IPv6) that
+//! NetworkManager installs and removes with the connection, so nothing from
+//! the hotspot is routed anywhere but this machine. `nm::start` and
+//! `nm::restart` check them after activation, and `nm::enforce` (run by
+//! `lablinkd`) keeps checking and stops the hotspot when they are gone.
+//! Internet sharing is a separate, explicit mode without the rules.
 //!
 //! The site side (a roaming `field-network` site whose visiting devices
 //! are recognized by their pinned host key) lives in `lablink-core` and
@@ -19,6 +23,7 @@
 
 pub mod clients;
 pub mod host;
+pub mod isolation;
 pub mod macos;
 pub mod nm;
 pub mod ops;

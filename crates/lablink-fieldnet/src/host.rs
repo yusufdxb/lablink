@@ -157,6 +157,8 @@ pub struct HostFacts {
     pub ssh_session: Option<SshSession>,
     pub established: Vec<TcpConn>,
     pub ip_forward: Option<bool>,
+    /// Routing rules, links, qdiscs and DNS drop-ins the isolation depends on.
+    pub isolation: crate::isolation::HostView,
     /// Read-only problems met while gathering (a missing tool, a parse
     /// failure), reported rather than hidden.
     pub notes: Vec<String>,
@@ -302,6 +304,7 @@ pub fn gather(sys: &dyn System) -> HostFacts {
             .and_then(|v| parse_ssh_connection(&v)),
         established: Vec::new(),
         ip_forward: None,
+        isolation: Default::default(),
         notes: Vec::new(),
     };
     if os != Os::Linux {
@@ -399,6 +402,7 @@ pub fn gather(sys: &dyn System) -> HostFacts {
     facts.ip_forward = sys
         .read_file(Path::new("/proc/sys/net/ipv4/ip_forward"))
         .map(|t| t.trim() == "1");
+    facts.isolation = crate::isolation::gather(sys);
     facts.notes = notes;
     facts
 }
@@ -660,7 +664,7 @@ pub(crate) fn script_host(f: &crate::system::FakeSystem) {
     f.ok("nmcli -t -f RUNNING,VERSION general", "running:1.36.6\n");
     f.ok(
         "nmcli -t general permissions",
-        "org.freedesktop.NetworkManager.checkpoint-rollback:auth\norg.freedesktop.NetworkManager.network-control:yes\norg.freedesktop.NetworkManager.settings.modify.own:yes\norg.freedesktop.NetworkManager.settings.modify.system:yes\n",
+        "org.freedesktop.NetworkManager.checkpoint-rollback:auth\norg.freedesktop.NetworkManager.network-control:yes\norg.freedesktop.NetworkManager.settings.modify.own:yes\norg.freedesktop.NetworkManager.settings.modify.system:yes\norg.freedesktop.NetworkManager.wifi.share.protected:yes\n",
     );
     f.ok(
         "nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device",
@@ -683,6 +687,23 @@ pub(crate) fn script_host(f: &crate::system::FakeSystem) {
         "100.64.0.0/10 dev tailscale0 table 52\ndefault via 192.168.8.1 dev wlan0 proto dhcp metric 600\n172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown\n192.168.8.0/24 dev wlan0 proto kernel scope link src 192.168.8.168 metric 600\nlocal 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1\nbroadcast 192.168.8.255 dev wlan0 table local proto kernel scope link src 192.168.8.168\n",
     );
     f.file("/proc/sys/net/ipv4/ip_forward", "1\n");
+    f.ok(
+        "ip -4 rule show",
+        "0:\tfrom all lookup local\n5210:\tfrom all fwmark 0x80000/0xff0000 lookup main\n5270:\tfrom all lookup 52\n32766:\tfrom all lookup main\n32767:\tfrom all lookup default\n",
+    );
+    f.ok(
+        "ip -6 rule show",
+        "0:\tfrom all lookup local\n5270:\tfrom all lookup 52\n32766:\tfrom all lookup main\n",
+    );
+    f.ok(
+        "ip -o -d link show",
+        "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DORMANT group default qlen 1000\\    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n4: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default\\    link/ether 02:42:00:00:00:02 brd ff:ff:ff:ff:ff:ff\\    bridge forward_delay 1500\n",
+    );
+    f.ok(
+        "tc qdisc show",
+        "qdisc noqueue 0: dev lo root refcnt 2\nqdisc noqueue 0: dev wlan0 root refcnt 2\nqdisc noqueue 0: dev docker0 root refcnt 2\n",
+    );
+    f.file(crate::isolation::DNS_DROPIN, "no-resolv\n");
     f.file(
         "/proc/net/tcp",
         "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:0277 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 100 0 0 10 0\n",

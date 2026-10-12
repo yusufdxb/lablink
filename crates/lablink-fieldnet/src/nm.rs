@@ -10,11 +10,16 @@
 //!   profile is read back and refused if it says otherwise.
 //! - IPv4 `shared`: NetworkManager's own dnsmasq serves DHCP on the hotspot
 //!   only; LabLink runs no DHCP server. IPv6 disabled.
+//! - Isolated unless internet sharing is asked for: the profile carries
+//!   `priority 0 iif <adapter> prohibit` for IPv4 and IPv6 (see
+//!   [`crate::isolation`]), verified after activation. If the rules cannot
+//!   be verified the hotspot is taken down again.
 //! - Activation is bounded (`--wait`), guarded by a NetworkManager
 //!   checkpoint when this user may create one, and on failure the previous
 //!   connection is restored.
 
 use crate::host::{self, ActiveConnection, HostFacts};
+use crate::isolation::{self, DnsRelay, Isolation};
 use crate::preflight::Preflight;
 use crate::state::{self, FieldState, Previous, Security};
 use crate::system::{Cmd, System};
@@ -57,6 +62,7 @@ fn settings(
     subnet: &Ipv4Net,
     security: Security,
     user: &str,
+    sharing: bool,
 ) -> Vec<String> {
     let gw = crate::subnet::gateway(subnet);
     let mut s: Vec<String> = vec![
@@ -94,12 +100,26 @@ fn settings(
         format!("{gw}/{}", subnet.prefix_len()),
         "ipv6.method".into(),
         "disabled".into(),
+        // Isolation: NetworkManager installs these with the connection and
+        // removes them with it. Empty (no rules) only for internet sharing.
+        "ipv4.routing-rules".into(),
+        rules(iface, sharing),
+        "ipv6.routing-rules".into(),
+        rules(iface, sharing),
         // Stored by NetworkManager in its root-only keyfile, not an agent.
         "802-11-wireless-security.psk-flags".into(),
         "0".into(),
     ];
     s.shrink_to_fit();
     s
+}
+
+fn rules(iface: &str, sharing: bool) -> String {
+    if sharing {
+        String::new()
+    } else {
+        isolation::profile_rule(iface)
+    }
 }
 
 /// Set the password through the editor's stdin. Its stdout echoes every
@@ -130,6 +150,7 @@ fn profile_exists(sys: &dyn System, uuid: &str) -> bool {
 }
 
 /// Read the profile back and refuse anything but the secure configuration.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_profile(
     sys: &dyn System,
     uuid: &str,
@@ -138,13 +159,14 @@ pub fn verify_profile(
     subnet: &Ipv4Net,
     security: Security,
     user: &str,
+    sharing: bool,
 ) -> Result<(), Error> {
     let out = run_ok(
         sys,
         &nmcli(&[
             "-t",
             "-f",
-            "connection.interface-name,connection.permissions,connection.autoconnect,802-11-wireless.ssid,802-11-wireless.mode,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,ipv4.method,ipv4.addresses,802-11-wireless-security.psk-flags",
+            "connection.interface-name,connection.permissions,connection.autoconnect,802-11-wireless.ssid,802-11-wireless.mode,802-11-wireless-security.key-mgmt,802-11-wireless-security.proto,802-11-wireless-security.pairwise,802-11-wireless-security.group,ipv4.method,ipv4.addresses,ipv4.routing-rules,ipv6.method,ipv6.routing-rules,802-11-wireless-security.psk-flags",
             "connection",
             "show",
             "uuid",
@@ -156,6 +178,11 @@ pub fn verify_profile(
         .map(|(k, v)| (k, host::split_terse(&v).join(":")))
         .collect();
     let gw = crate::subnet::gateway(subnet);
+    let (want4, want6) = if sharing {
+        (String::new(), String::new())
+    } else {
+        isolation::profile_rules_readback(iface)
+    };
     let want = [
         ("connection.interface-name", iface.to_string()),
         ("connection.permissions", format!("user:{user}")),
@@ -171,6 +198,9 @@ pub fn verify_profile(
         ("802-11-wireless-security.group", "ccmp".into()),
         ("ipv4.method", "shared".into()),
         ("ipv4.addresses", format!("{gw}/{}", subnet.prefix_len())),
+        ("ipv4.routing-rules", want4),
+        ("ipv6.method", "disabled".into()),
+        ("ipv6.routing-rules", want6),
         ("802-11-wireless-security.psk-flags", "0".into()),
     ];
     let wrong: Vec<String> = want
@@ -205,8 +235,9 @@ fn ensure_profile(
     security: Security,
     psk: Option<&str>,
     user: &str,
+    sharing: bool,
 ) -> Result<(String, bool), Error> {
-    let args = settings(iface, ssid, subnet, security, user);
+    let args = settings(iface, ssid, subnet, security, user, sharing);
     if let Some(uuid) = existing.filter(|u| profile_exists(sys, u)) {
         let mut cmd = nmcli(&["connection", "modify", "uuid", uuid]);
         cmd.args.extend(args);
@@ -339,6 +370,13 @@ pub struct StartReport {
     pub ip_forward_before: Option<bool>,
     pub ip_forward_after: Option<bool>,
     pub already_running: bool,
+    /// The isolation rules are part of the profile (no internet sharing).
+    pub isolated: bool,
+    /// The isolation check after activation (isolated hotspots only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<Isolation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_relay: Option<DnsRelay>,
 }
 
 /// What `start` needs beyond the preflight.
@@ -411,8 +449,18 @@ pub fn start(
         pf.security,
         psk,
         &user,
+        pf.sharing,
     )?;
-    verify_profile(sys, &uuid, &iface, &pf.ssid, &subnet, pf.security, &user)?;
+    verify_profile(
+        sys,
+        &uuid,
+        &iface,
+        &pf.ssid,
+        &subnet,
+        pf.security,
+        &user,
+        pf.sharing,
+    )?;
 
     // Remember how to undo this before touching the adapter.
     let previous = pf
@@ -446,6 +494,7 @@ pub fn start(
         } else {
             facts.ip_forward
         },
+        sharing: pf.sharing,
     };
     state::save(state_dir, &st).map_err(Error::Failed)?;
 
@@ -471,18 +520,22 @@ pub fn start(
         ])
         .timeout(Duration::from_secs(ACTIVATE_WAIT_S + 15)),
     )
-    .and_then(|_| verify_active(sys, &uuid, &iface, gateway));
-    if let Err(e) = up {
-        let rolled_back = checkpoint.is_ok_and(|cp| cp.rollback(sys));
-        let undo = if rolled_back {
-            "NetworkManager rolled the adapter back".to_string()
-        } else {
-            restore_previous(sys, previous.as_ref())
-        };
-        st.active = false;
-        let _ = state::save(state_dir, &st);
-        return Err(Error::Failed(format!("{e}. {undo}")));
-    }
+    .and_then(|_| verify_active(sys, &uuid, &iface, gateway))
+    .and_then(|_| verify_isolation(sys, &iface, pf.sharing));
+    let iso = match up {
+        Ok(iso) => iso,
+        Err(e) => {
+            let rolled_back = checkpoint.is_ok_and(|cp| cp.rollback(sys));
+            let undo = if rolled_back {
+                "NetworkManager rolled the adapter back.".to_string()
+            } else {
+                take_down(sys, &uuid, previous.as_ref())
+            };
+            st.active = is_active(sys, &uuid).unwrap_or(true);
+            let _ = state::save(state_dir, &st);
+            return Err(Error::Failed(format!("{e}. {undo}")));
+        }
+    };
     if let Ok(cp) = checkpoint {
         cp.commit(sys);
     }
@@ -504,7 +557,49 @@ pub fn start(
             .read_file(Path::new("/proc/sys/net/ipv4/ip_forward"))
             .map(|t| t.trim() == "1"),
         already_running: pf.already_running,
+        isolated: !pf.sharing,
+        isolation: iso,
+        dns_relay: (!pf.sharing).then(|| isolation::dns_relay(sys)),
     })
+}
+
+/// After activation: the isolation rules are in force (unless sharing was
+/// asked for). An unverifiable isolation is an error.
+fn verify_isolation(
+    sys: &dyn System,
+    iface: &str,
+    sharing: bool,
+) -> Result<Option<Isolation>, Error> {
+    if sharing {
+        return Ok(None);
+    }
+    let iso = isolation::check(sys, iface);
+    if iso.verified {
+        Ok(Some(iso))
+    } else {
+        Err(Error::Failed(format!(
+            "hotspot isolation could not be verified: {}",
+            iso.problems.join("; ")
+        )))
+    }
+}
+
+/// Failure without a checkpoint: deactivate the hotspot, then reconnect
+/// what the adapter had. Says plainly if the hotspot is still up.
+fn take_down(sys: &dyn System, uuid: &str, previous: Option<&Previous>) -> String {
+    let _ = sys.run(
+        &nmcli(&["--wait", "20", "connection", "down", "uuid", uuid])
+            .timeout(Duration::from_secs(35)),
+    );
+    if is_active(sys, uuid).unwrap_or(true) {
+        return format!(
+            "The hotspot could NOT be stopped and may still be running: stop it with `nmcli connection down uuid {uuid}` or switch Wi-Fi off."
+        );
+    }
+    format!(
+        "The hotspot was stopped. {}",
+        restore_previous(sys, previous)
+    )
 }
 
 /// The profile is active on the adapter and the gateway address is up.
@@ -663,8 +758,59 @@ pub fn restart(sys: &dyn System, state_dir: &Path) -> Result<(), Error> {
             &st.interface,
         ])
         .timeout(Duration::from_secs(ACTIVATE_WAIT_S + 15)),
-    )
-    .map(|_| ())
+    )?;
+    if let Err(e) = verify_isolation(sys, &st.interface, st.sharing) {
+        return Err(Error::Failed(format!(
+            "{e}. {}",
+            take_down(sys, &uuid, None)
+        )));
+    }
+    Ok(())
+}
+
+/// What [`enforce`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum Enforcement {
+    /// No isolated hotspot of LabLink's is running.
+    Idle,
+    Verified,
+    /// Isolation failed and the hotspot was taken down.
+    Stopped(String),
+    /// Isolation failed and the hotspot could not be taken down.
+    StopFailed(String),
+}
+
+/// The daemon's watchdog: while LabLink's isolated hotspot runs, re-verify
+/// isolation and take the hotspot down when it no longer holds. It does
+/// not spare SSH sessions over the hotspot: isolation comes first.
+pub fn enforce(sys: &dyn System, state_dir: &Path) -> Enforcement {
+    let Ok(Some(st)) = state::load(state_dir) else {
+        return Enforcement::Idle;
+    };
+    let Some(uuid) = st.profile_uuid.as_deref() else {
+        return Enforcement::Idle;
+    };
+    if st.sharing || !matches!(is_active(sys, uuid), Ok(true)) {
+        return Enforcement::Idle;
+    }
+    let iso = isolation::check(sys, &st.interface);
+    if iso.verified {
+        return Enforcement::Verified;
+    }
+    let why = iso.problems.join("; ");
+    let _ = sys.run(
+        &nmcli(&["--wait", "20", "connection", "down", "uuid", uuid])
+            .timeout(Duration::from_secs(35)),
+    );
+    if matches!(is_active(sys, uuid), Ok(false)) {
+        let mut st = st;
+        st.active = false;
+        st.started_ms = None;
+        let _ = state::save(state_dir, &st);
+        Enforcement::Stopped(why)
+    } else {
+        Enforcement::StopFailed(why)
+    }
 }
 
 /// The stored password, read from NetworkManager (never from LabLink's
@@ -739,14 +885,18 @@ pub struct Status {
     pub gateway: Option<Ipv4Addr>,
     pub security: Option<&'static str>,
     pub ip_forward: Option<bool>,
-    /// While it runs: other devices holding a default route. Shared mode
-    /// NATs hotspot clients onto them, so an uplink that appeared after the
-    /// start (a USB tether, a cable) shares this machine's internet.
+    /// While it runs: other devices holding a default route. With internet
+    /// sharing, NetworkManager NATs hotspot clients onto them (also onto an
+    /// uplink that appeared after the start); isolated, they are listed only.
     pub uplinks: Vec<String>,
     /// While it runs: other networks this machine routes to ("dest
-    /// (device)"), which forwarding lets hotspot clients reach; a VPN or
-    /// cable that came up after the start shows here.
+    /// (device)"). Reachable by hotspot clients only with internet sharing.
     pub routed: Vec<String>,
+    /// While an isolated hotspot runs: the isolation check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<Isolation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_relay: Option<DnsRelay>,
     pub clients: Vec<crate::clients::Client>,
 }
 
@@ -764,6 +914,8 @@ pub fn status(sys: &dyn System, state_dir: &Path) -> Result<Status, Error> {
             .map(|t| t.trim() == "1"),
         uplinks: Vec::new(),
         routed: Vec::new(),
+        isolation: None,
+        dns_relay: None,
         clients: Vec::new(),
     };
     let Some(st) = st else { return Ok(s) };
@@ -791,6 +943,10 @@ pub fn status(sys: &dyn System, state_dir: &Path) -> Result<Status, Error> {
             devs.dedup();
             s.uplinks = devs;
             s.routed = host::routed_elsewhere(&routes, &st.interface);
+        }
+        if !st.sharing {
+            s.isolation = Some(isolation::check(sys, &st.interface));
+            s.dns_relay = Some(isolation::dns_relay(sys));
         }
     }
     Ok(s)

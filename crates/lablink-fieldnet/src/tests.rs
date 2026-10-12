@@ -18,13 +18,13 @@ fn req() -> Request {
         subnet: None,
         security: Security::Wpa2,
         allow_internet_sharing: false,
-        allow_routing: true,
+        allow_dns_relay: false,
     }
 }
 
 fn profile_show(ssid: &str, key_mgmt: &str) -> String {
     format!(
-        "connection.interface-name:wlan0\nconnection.permissions:user:tester\nconnection.autoconnect:no\n802-11-wireless.ssid:{ssid}\n802-11-wireless.mode:ap\n802-11-wireless-security.key-mgmt:{key_mgmt}\n802-11-wireless-security.proto:rsn\n802-11-wireless-security.pairwise:ccmp\n802-11-wireless-security.group:ccmp\nipv4.method:shared\nipv4.addresses:10.77.0.1/24\n802-11-wireless-security.psk-flags:0\n"
+        "connection.interface-name:wlan0\nconnection.permissions:user:tester\nconnection.autoconnect:no\n802-11-wireless.ssid:{ssid}\n802-11-wireless.mode:ap\n802-11-wireless-security.key-mgmt:{key_mgmt}\n802-11-wireless-security.proto:rsn\n802-11-wireless-security.pairwise:ccmp\n802-11-wireless-security.group:ccmp\nipv4.method:shared\nipv4.addresses:10.77.0.1/24\nipv4.routing-rules:priority 0 from 0.0.0.0/0 iif wlan0 type prohibit\nipv6.method:disabled\nipv6.routing-rules:priority 0 from \\:\\:/0 iif wlan0 type prohibit\n802-11-wireless-security.psk-flags:0\n"
     )
 }
 
@@ -60,6 +60,19 @@ fn hotspot_active(f: &FakeSystem) {
     f.ok(
         "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show --active",
         &format!("LabLink Field Network:{UUID}:802-11-wireless:wlan0\n"),
+    );
+    isolation_rules(f);
+}
+
+/// The kernel rules NetworkManager installs from the profile.
+fn isolation_rules(f: &FakeSystem) {
+    f.ok(
+        "ip -4 rule show",
+        "0:\tfrom all lookup local\n0:\tfrom all iif wlan0 prohibit\n32766:\tfrom all lookup main\n32767:\tfrom all lookup default\n",
+    );
+    f.ok(
+        "ip -6 rule show",
+        "0:\tfrom all lookup local\n0:\tfrom all iif wlan0 prohibit\n32766:\tfrom all lookup main\n",
     );
 }
 
@@ -310,7 +323,7 @@ fn checkpoint_guards_activation_when_permitted() {
     let f = working_host();
     f.ok(
         "nmcli -t general permissions",
-        "org.freedesktop.NetworkManager.checkpoint-rollback:yes\norg.freedesktop.NetworkManager.network-control:yes\norg.freedesktop.NetworkManager.settings.modify.own:yes\norg.freedesktop.NetworkManager.settings.modify.system:yes\n",
+        "org.freedesktop.NetworkManager.checkpoint-rollback:yes\norg.freedesktop.NetworkManager.network-control:yes\norg.freedesktop.NetworkManager.settings.modify.own:yes\norg.freedesktop.NetworkManager.settings.modify.system:yes\norg.freedesktop.NetworkManager.wifi.share.protected:yes\n",
     );
     f.ok("busctl --system --allow-interactive-authorization=no call org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager GetDeviceByIpIface s wlan0", "o \"/org/freedesktop/NetworkManager/Devices/3\"\n");
     f.ok("busctl --system --allow-interactive-authorization=no call org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager CheckpointCreate aouu 1 /org/freedesktop/NetworkManager/Devices/3 120 0", "o \"/org/freedesktop/NetworkManager/Checkpoint/7\"\n");
@@ -810,4 +823,103 @@ fn linux_capabilities_on_a_single_adapter_host() {
     assert!(c.can_host && c.single_adapter_in_use && !c.checkpoint_rollback);
     assert_eq!(c.backend, "networkmanager");
     assert!(c.notes.iter().any(|n| n.contains("WPA3")));
+}
+
+/// Starts the isolated hotspot on a scripted host and returns the host.
+fn running_hotspot(dir: &std::path::Path) -> FakeSystem {
+    let f = working_host();
+    let facts = gather(&f);
+    let pf = preflight::check(
+        &facts,
+        &req(),
+        &Context {
+            sites: &[],
+            equipment: &[],
+            own_profile: None,
+        },
+    );
+    hotspot_active(&f);
+    let r = nm::start(
+        &f,
+        dir,
+        &facts,
+        &pf,
+        &nm::StartOptions {
+            psk: Some("Correct-Horse_42!"),
+            confirmed: true,
+        },
+    )
+    .unwrap();
+    assert!(r.isolated);
+    f
+}
+
+#[test]
+fn the_watchdog_is_idle_without_a_hotspot() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = FakeSystem::new();
+    assert!(matches!(nm::enforce(&f, dir.path()), nm::Enforcement::Idle));
+    assert!(
+        f.calls().is_empty(),
+        "nothing is run without LabLink's state"
+    );
+}
+
+#[test]
+fn the_watchdog_takes_the_hotspot_down_when_isolation_breaks() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = running_hotspot(dir.path());
+    assert!(matches!(
+        nm::enforce(&f, dir.path()),
+        nm::Enforcement::Verified
+    ));
+    assert!(!f.lines().iter().any(|l| l.contains("connection down")));
+
+    // Someone deletes the IPv6 rule while the hotspot runs.
+    f.ok(
+        "ip -6 rule show",
+        "0:\tfrom all lookup local\n32766:\tfrom all lookup main\n",
+    );
+    f.ok(
+        &format!("nmcli --wait 20 connection down uuid {UUID}"),
+        "Connection successfully deactivated\n",
+    );
+    // Active when checked, gone after the stop.
+    f.ok(
+        "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show --active",
+        "",
+    );
+    f.once(
+        "nmcli -t -f NAME,UUID,TYPE,DEVICE connection show --active",
+        &format!("LabLink Field Network:{UUID}:802-11-wireless:wlan0\n"),
+    );
+    let nm::Enforcement::Stopped(why) = nm::enforce(&f, dir.path()) else {
+        panic!("not stopped")
+    };
+    assert!(why.contains("IPv6"), "{why}");
+    assert!(f
+        .lines()
+        .iter()
+        .any(|l| l.contains(&format!("connection down uuid {UUID}"))));
+    assert!(!state::load(dir.path()).unwrap().unwrap().active);
+    assert!(matches!(nm::enforce(&f, dir.path()), nm::Enforcement::Idle));
+}
+
+#[test]
+fn the_watchdog_says_so_when_the_hotspot_will_not_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = running_hotspot(dir.path());
+    f.ok(
+        "ip -4 rule show",
+        "0:\tfrom all lookup local\n32766:\tfrom all lookup main\n",
+    );
+    f.on(
+        &format!("nmcli --wait 20 connection down uuid {UUID}"),
+        Output::failure(4, "Error: not authorized"),
+    );
+    assert!(matches!(
+        nm::enforce(&f, dir.path()),
+        nm::Enforcement::StopFailed(_)
+    ));
+    assert!(state::load(dir.path()).unwrap().unwrap().active);
 }

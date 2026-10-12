@@ -28,6 +28,95 @@ pub struct Config {
     /// Client preferences (GUI). The daemon ignores this section.
     #[serde(skip_serializing_if = "Preferences::is_default")]
     pub preferences: Preferences,
+    /// Wake-on-LAN profiles written by LabLink 0.1.x, keyed by device name.
+    /// This version does not send Wake-on-LAN packets. The section is still
+    /// read, validated as 0.1.x did and written back unchanged, so a file
+    /// shared with 0.1.x keeps working there; `lablink check-config` says
+    /// that it is inactive.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wake: BTreeMap<String, WakeConfig>,
+}
+
+/// One Wake-on-LAN profile in the 0.1.x format (see [`Config::wake`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WakeConfig {
+    pub mac: String,
+    /// Name of a configured network: an IPv4 subnet to broadcast on.
+    pub network: String,
+    pub interface: String,
+    #[serde(default = "default_wake_port")]
+    pub port: u16,
+}
+
+fn default_wake_port() -> u16 {
+    9
+}
+
+/// The adapter MAC of a wake profile; group (multicast) MACs are refused.
+pub fn wake_mac(s: &str) -> Option<[u8; 6]> {
+    let normalized = normalize_mac(s)?;
+    let bytes: Vec<_> = normalized
+        .split(':')
+        .map(|p| u8::from_str_radix(p, 16).ok())
+        .collect::<Option<_>>()?;
+    let mac: [u8; 6] = bytes.try_into().ok()?;
+    (mac[0] & 1 == 0).then_some(mac)
+}
+
+/// The checks LabLink 0.1.x applied to `wake:`, so a file it accepted is
+/// accepted here and one it refused is refused. Networks are looked up in
+/// every site, because 0.1.x had only one.
+fn validate_wake(cfg: &Config, errs: &mut Vec<String>) {
+    let mut names = BTreeSet::new();
+    let mut macs = BTreeSet::new();
+    for (dev, wake) in &cfg.wake {
+        let at = format!("wake.{dev}");
+        if !valid_name(dev) || !names.insert(dev.to_ascii_lowercase()) {
+            errs.push(format!("{at}: invalid or duplicate device name"));
+        }
+        if let Some(mac) = wake_mac(&wake.mac) {
+            if !macs.insert(mac) {
+                errs.push(format!(
+                    "{at}: adapter MAC is assigned to multiple wake profiles"
+                ));
+            }
+            let owner = cfg.devices().find(|(_, d)| d.answers_to(dev));
+            for (_, other) in cfg.devices() {
+                if owner.is_some_and(|(_, d)| d.name == other.name) {
+                    continue;
+                }
+                if other.macs.iter().any(|m| wake_mac(m) == Some(mac)) {
+                    errs.push(format!("{at}: adapter MAC belongs to another device"));
+                }
+            }
+        } else {
+            errs.push(format!("{at}: mac must be a valid unicast adapter MAC"));
+        }
+        if wake.interface.is_empty()
+            || wake.interface.len() > 15
+            || !wake
+                .interface
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+        {
+            errs.push(format!(
+                "{at}: interface must be an explicit Linux interface name"
+            ));
+        }
+        let broadcast = cfg
+            .networks()
+            .filter(|(_, n)| n.name == wake.network)
+            .any(|(_, n)| matches!(n.cidr.parse::<ipnet::IpNet>(), Ok(ipnet::IpNet::V4(v4)) if v4.prefix_len() < 31));
+        if !broadcast {
+            errs.push(format!(
+                "{at}: network must name an allowlisted IPv4 broadcast subnet"
+            ));
+        }
+        if wake.port == 0 {
+            errs.push(format!("{at}: port must be 1-65535"));
+        }
+    }
 }
 
 /// Site id given to a configuration written in the single-site layout.
@@ -53,6 +142,8 @@ struct RawConfig {
     checks: BTreeMap<String, Vec<crate::checks::CheckSpec>>,
     #[serde(default)]
     preferences: Preferences,
+    #[serde(default)]
+    wake: BTreeMap<String, WakeConfig>,
 }
 
 impl TryFrom<RawConfig> for Config {
@@ -80,6 +171,7 @@ impl TryFrom<RawConfig> for Config {
             ssh: r.ssh,
             sites,
             preferences: r.preferences,
+            wake: r.wake,
         })
     }
 }
@@ -809,6 +901,7 @@ impl Config {
                 ));
             }
         }
+        validate_wake(self, &mut errs);
 
         if errs.is_empty() {
             Ok(())
@@ -1542,6 +1635,85 @@ pub fn valid_ssh_host_alias(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shape of a LabLink 0.1.x file with a Wake-on-LAN profile.
+    const WAKE_0_1: &str = "networks:\n  - name: wired_wake\n    cidr: 192.0.0.0/22\n    active_scan: false\n  - name: go2\n    cidr: 192.168.123.0/24\n    active_scan: true\ndevices:\n  - name: orin\n    usernames: [unitree]\nchecks:\n  ws:\n    - disk\nwake:\n  ws:\n    mac: \"02:00:00:35:7b:ca\"\n    network: wired_wake\n    interface: \"eno1\"\n    port: 9\n";
+
+    #[test]
+    fn wake_section_from_0_1_is_kept_through_migration_and_saving() {
+        let c = Config::parse(WAKE_0_1, "t").unwrap();
+        assert_eq!(c.wake.len(), 1);
+        let w = &c.wake["ws"];
+        assert_eq!(
+            (
+                w.mac.as_str(),
+                w.network.as_str(),
+                w.interface.as_str(),
+                w.port
+            ),
+            ("02:00:00:35:7b:ca", "wired_wake", "eno1", 9)
+        );
+        let out = c.to_yaml();
+        assert!(out.contains("sites:") && out.contains("wake:"), "{out}");
+        assert_eq!(Config::parse(&out, "t").unwrap(), c);
+    }
+
+    #[test]
+    fn wake_port_defaults_to_9_and_is_written_back() {
+        let text = WAKE_0_1.replace("    port: 9\n", "");
+        let c = Config::parse(&text, "t").unwrap();
+        assert_eq!(c.wake["ws"].port, 9);
+        assert_eq!(Config::parse(&c.to_yaml(), "t").unwrap(), c);
+    }
+
+    #[test]
+    fn wake_profiles_are_validated_as_0_1_did() {
+        for (from, to, want) in [
+            (
+                "02:00:00:35:7b:ca",
+                "03:00:00:35:7b:ca",
+                "unicast adapter MAC",
+            ),
+            ("02:00:00:35:7b:ca", "not-a-mac", "unicast adapter MAC"),
+            (
+                "network: wired_wake",
+                "network: nowhere",
+                "IPv4 broadcast subnet",
+            ),
+            (
+                "interface: \"eno1\"",
+                "interface: \"eno1; reboot\"",
+                "explicit Linux interface",
+            ),
+            ("port: 9", "port: 0", "port must be 1-65535"),
+        ] {
+            let text = WAKE_0_1.replace(from, to);
+            let e = Config::parse(&text, "t").unwrap_err().to_string();
+            assert!(e.contains(want), "{to}: {e}");
+        }
+        // A /31 has no broadcast address.
+        let text = WAKE_0_1.replace("192.0.0.0/22", "192.0.2.0/31");
+        assert!(Config::parse(&text, "t").is_err());
+        // A typo inside a profile is an error, not dropped.
+        let text = WAKE_0_1.replace("    port: 9\n", "    prot: 9\n");
+        let e = Config::parse(&text, "t").unwrap_err().to_string();
+        assert!(e.contains("unknown field `prot`"), "{e}");
+        // The MAC of another configured device.
+        let text = WAKE_0_1.replace(
+            "    usernames: [unitree]\n",
+            "    usernames: [unitree]\n    macs: [\"02:00:00:35:7B:CA\"]\n",
+        );
+        let e = Config::parse(&text, "t").unwrap_err().to_string();
+        assert!(e.contains("belongs to another device"), "{e}");
+    }
+
+    #[test]
+    fn unknown_top_level_sections_are_still_refused_by_name() {
+        let e = Config::parse(&format!("{WAKE_0_1}telemetry:\n  on: true\n"), "t")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("unknown field `telemetry`"), "{e}");
+    }
 
     const EXAMPLE: &str = r#"
 networks:

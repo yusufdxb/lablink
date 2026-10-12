@@ -253,3 +253,45 @@ fn site_add_and_rename_write_the_config() {
     assert_eq!(code(&o), exit::OK, "{}", err(&o));
     assert!(out(&o).contains("2 sites"), "{}", out(&o));
 }
+
+/// A file from LabLink 0.1.x (single-site layout with a `wake:` section)
+/// is accepted, and rewriting it in the `sites:` layout keeps the section.
+#[test]
+fn site_add_keeps_the_wake_section_of_a_0_1_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.yaml");
+    std::fs::write(
+        &cfg,
+        "networks:\n  - name: wired_wake\n    cidr: 192.0.2.0/24\n    active_scan: false\ndevices:\n  - name: orin\n    usernames: [ops]\nchecks:\n  ws:\n    - disk\nwake:\n  ws:\n    mac: \"02:00:00:35:7b:ca\"\n    network: wired_wake\n    interface: \"eno1\"\n    port: 9\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_lablink"))
+            .args(args)
+            .env("HOME", dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join("cfg"))
+            .env("LABLINK_SOCKET", "/nonexistent/lablink/test.sock")
+            .output()
+            .unwrap()
+    };
+    let p = cfg.to_str().unwrap();
+    let o = run(&["check-config", p]);
+    assert_eq!(code(&o), exit::OK, "{}", err(&o));
+    assert!(
+        out(&o).contains("wake ws") && out(&o).contains("does not send Wake-on-LAN"),
+        "{}",
+        out(&o)
+    );
+    let before = lablink_core::Config::load(Path::new(p)).unwrap();
+    let o = run(&["site", "add", "Makerspace", "--config", p]);
+    assert_eq!(code(&o), exit::OK, "{}", err(&o));
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("sites:") && text.contains("wake:"), "{text}");
+    let after = lablink_core::Config::load(Path::new(p)).unwrap();
+    assert_eq!(after.wake, before.wake);
+    assert_eq!(after.wake["ws"].mac, "02:00:00:35:7b:ca");
+    assert_eq!(after.wake["ws"].interface, "eno1");
+    assert_eq!(after.sites[0].networks, before.sites[0].networks);
+    assert_eq!(after.sites[0].devices, before.sites[0].devices);
+    assert_eq!(after.sites[0].checks, before.sites[0].checks);
+}

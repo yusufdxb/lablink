@@ -18,7 +18,7 @@ pub struct Form {
     pub subnet: String,
     pub wpa3: bool,
     pub internet: bool,
-    pub routing: bool,
+    pub dns_relay: bool,
 }
 
 impl Form {
@@ -30,7 +30,7 @@ impl Form {
             subnet: opt(&self.subnet),
             security: if self.wpa3 { "wpa3" } else { "wpa2" }.into(),
             allow_internet_sharing: self.internet,
-            allow_routing: self.routing,
+            allow_dns_relay: self.dns_relay,
         }
     }
 }
@@ -353,13 +353,13 @@ impl FieldPanel {
             ui.label("Internet sharing");
             ui.checkbox(
                 &mut self.form.internet,
-                "Let clients reach the internet through this machine (NAT)",
+                "Let clients reach the internet and every network this machine routes to (NAT, no isolation)",
             );
             ui.end_row();
-            ui.label("Routing");
+            ui.label("DNS relay");
             ui.checkbox(
-                &mut self.form.routing,
-                "Let clients reach the other networks this machine routes to (VPN, containers, LAN)",
+                &mut self.form.dns_relay,
+                "Let the hotspot's DNS server forward clients' queries to this machine's resolvers",
             );
             ui.end_row();
         });
@@ -641,11 +641,8 @@ fn findings(ui: &mut egui::Ui, pf: &Preflight, accepted: &mut Vec<String>) {
         match f.level {
             preflight::Level::Block => {
                 let how = match f.override_flag {
-                    Some("--allow-internet-sharing") => {
-                        " (tick Internet sharing above only if you mean to share it)"
-                    }
-                    Some("--allow-routing") => {
-                        " (tick Routing above only if clients may reach those networks)"
+                    Some("--allow-dns-relay") => {
+                        " (tick DNS relay above only if clients may resolve names through this machine)"
                     }
                     _ => "",
                 };
@@ -708,6 +705,7 @@ mod tests {
             gateway: "10.77.0.1".parse().ok(),
             would_disconnect: None,
             already_running: false,
+            sharing: false,
             findings,
         })
     }

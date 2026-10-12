@@ -19,7 +19,8 @@ case "$*" in
   echo "org.freedesktop.NetworkManager.checkpoint-rollback:auth"
   echo "org.freedesktop.NetworkManager.network-control:yes"
   echo "org.freedesktop.NetworkManager.settings.modify.own:yes"
-  echo "org.freedesktop.NetworkManager.settings.modify.system:yes" ;;
+  echo "org.freedesktop.NetworkManager.settings.modify.system:yes"
+  echo "org.freedesktop.NetworkManager.wifi.share.protected:yes" ;;
 "-t -f DEVICE,TYPE,STATE,CONNECTION device")
   if up; then echo "wlan1:wifi:connected:LabLink Field Network"; else echo "wlan1:wifi:disconnected:"; fi
   echo "lo:loopback:unmanaged:" ;;
@@ -41,7 +42,9 @@ case "$*" in
 "-t -f connection.interface-name,"*" connection show uuid @UUID@")
   printf 'connection.interface-name:wlan1\nconnection.permissions:user:%s\nconnection.autoconnect:no\n802-11-wireless.ssid:LL Test\n802-11-wireless.mode:ap\n' "$(/usr/bin/id -un)"
   printf '802-11-wireless-security.key-mgmt:wpa-psk\n802-11-wireless-security.proto:rsn\n802-11-wireless-security.pairwise:ccmp\n'
-  printf '802-11-wireless-security.group:ccmp\nipv4.method:shared\nipv4.addresses:10.77.0.1/24\n802-11-wireless-security.psk-flags:0\n' ;;
+  printf '802-11-wireless-security.group:ccmp\nipv4.method:shared\nipv4.addresses:10.77.0.1/24\n'
+  printf 'ipv4.routing-rules:priority 0 from 0.0.0.0/0 iif wlan1 type prohibit\nipv6.method:disabled\n'
+  printf 'ipv6.routing-rules:priority 0 from \\:\\:/0 iif wlan1 type prohibit\n802-11-wireless-security.psk-flags:0\n' ;;
 "--wait 45 connection up uuid @UUID@ ifname wlan1") : > "$D/up"; echo "Connection successfully activated" ;;
 "--wait "*" connection down uuid @UUID@") /bin/rm -f "$D/up" ;;
 "-s -g 802-11-wireless-security.psk connection show uuid @UUID@")
@@ -64,9 +67,27 @@ case "$*" in
   [ -e "$D/up" ] && echo "10.77.0.0/24 dev wlan1 proto kernel scope link src 10.77.0.1 metric 600"
   echo "local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1" ;;
 "-4 neigh show dev wlan1") echo "10.77.0.23 lladdr aa:bb:cc:dd:ee:01 REACHABLE" ;;
+"-4 rule show"|"-6 rule show")
+  # NetworkManager installs the profile's isolation rules while it is up.
+  printf '0:\tfrom all lookup local\n'
+  [ -e "$D/up" ] && [ ! -e "$D/no-rule" ] && printf '0:\tfrom all iif wlan1 prohibit\n'
+  printf '32766:\tfrom all lookup main\n' ;;
+"-o -d link show")
+  echo '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00'
+  echo '5: wlan1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DORMANT\    link/ether 02:00:00:00:00:05 brd ff:ff:ff:ff:ff:ff' ;;
 *) echo "fake ip: unexpected: $*" >&2; exit 2 ;;
 esac
 exit 0
+"#;
+
+const TC: &str = r#"#!/bin/bash
+D="$(cd "${0%/*}" && pwd)"
+echo "tc $*" >> "$D/argv.log"
+case "$*" in
+"qdisc show") echo "qdisc noqueue 0: dev lo root refcnt 2"; echo "qdisc noqueue 0: dev wlan1 root refcnt 2" ;;
+"qdisc show dev wlan1") echo "qdisc noqueue 0: dev wlan1 root refcnt 2" ;;
+*) echo "fake tc: unexpected: $*" >&2; exit 2 ;;
+esac
 "#;
 
 struct Env {
@@ -80,11 +101,15 @@ impl Env {
         let root = dir.path().to_path_buf();
         let bin = root.join("bin");
         std::fs::create_dir(&bin).unwrap();
-        for (name, body) in [("nmcli", NMCLI), ("ip", IP)] {
+        for (name, body) in [("nmcli", NMCLI), ("ip", IP), ("tc", TC)] {
             let p = bin.join(name);
             std::fs::write(&p, body.replace("@UUID@", UUID)).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // The drop-in that keeps the hotspot's DNS server from forwarding.
+        let dnsd = root.join("etc/NetworkManager/dnsmasq-shared.d");
+        std::fs::create_dir_all(&dnsd).unwrap();
+        std::fs::write(dnsd.join("lablink-no-upstream.conf"), "no-resolv\n").unwrap();
         Env { _dir: dir, root }
     }
 
@@ -112,6 +137,7 @@ impl Env {
             .env("LABLINK_SOCKET", self.root.join("run/none.sock"))
             // An empty /proc: this machine's own connections stay out.
             .env("LABLINK_TEST_PROC_ROOT", self.root.join("proc"))
+            .env("LABLINK_TEST_ETC_ROOT", self.root.join("etc"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -278,6 +304,71 @@ fn preflight_refusals_exit_7_and_change_nothing() {
 }
 
 #[test]
+fn start_takes_the_hotspot_down_when_isolation_cannot_be_verified() {
+    let e = Env::new();
+    enable(&e);
+    // NetworkManager activates the profile but its rules never appear.
+    std::fs::write(e.bin().join("no-rule"), "").unwrap();
+    let o = e.run(
+        &[
+            "hotspot",
+            "start",
+            "--yes",
+            "--ssid",
+            "LL Test",
+            "--password-stdin",
+        ],
+        Some(&format!("{PSK}\n")),
+    );
+    assert_ne!(o.status.code(), Some(0), "{}{}", out(&o), err(&o));
+    assert!(
+        err(&o).contains("isolation could not be verified")
+            && err(&o).contains("IPv4 isolation rule")
+            && err(&o).contains("The hotspot was stopped"),
+        "{}",
+        err(&o)
+    );
+    assert!(!e.up(), "the hotspot must not stay up");
+    let log = e.argv_log();
+    let up = log.find("connection up").unwrap();
+    assert!(log[up..].contains("connection down uuid"), "{log}");
+    let o = e.run(&["hotspot", "status", "--json"], None);
+    assert_eq!(json(&o)["status"]["active"], false);
+}
+
+#[test]
+fn isolated_start_is_refused_without_the_dns_drop_in() {
+    let e = Env::new();
+    enable(&e);
+    std::fs::remove_file(
+        e.root
+            .join("etc/NetworkManager/dnsmasq-shared.d/lablink-no-upstream.conf"),
+    )
+    .unwrap();
+    let o = e.run(&["hotspot", "start", "--yes", "--ssid", "LL Test"], None);
+    assert_eq!(o.status.code(), Some(7), "{}{}", out(&o), err(&o));
+    assert!(err(&o).contains("--allow-dns-relay"), "{}", err(&o));
+    assert!(!e.argv_log().contains("connection up"));
+    // Accepting it explicitly starts, isolated.
+    let o = e.run(
+        &[
+            "hotspot",
+            "start",
+            "--yes",
+            "--ssid",
+            "LL Test",
+            "--allow-dns-relay",
+            "--password-stdin",
+            "--json",
+        ],
+        Some(&format!("{PSK}\n")),
+    );
+    assert_eq!(o.status.code(), Some(0), "{}{}", out(&o), err(&o));
+    assert_eq!(json(&o)["started"]["isolated"], true);
+    assert_eq!(json(&o)["started"]["dns_relay"]["state"], "forwarded");
+}
+
+#[test]
 fn start_clients_password_stop_forget_end_to_end() {
     let e = Env::new();
     enable(&e);
@@ -326,9 +417,14 @@ fn start_clients_password_stop_forget_end_to_end() {
         "ipv4.method shared",
         "ipv4.addresses 10.77.0.1/24",
         "ipv6.method disabled",
+        "ipv4.routing-rules priority 0 iif wlan1 prohibit",
+        "ipv6.routing-rules priority 0 iif wlan1 prohibit",
     ] {
         assert!(add.contains(want), "{want}: {add}");
     }
+    assert_eq!(j["started"]["isolated"], true);
+    assert_eq!(j["started"]["isolation"]["verified"], true);
+    assert_eq!(j["started"]["dns_relay"]["state"], "off");
     assert!(!log.contains("busctl"), "no checkpoint without permission");
 
     // The roaming field-network site was added.
@@ -344,6 +440,7 @@ fn start_clients_password_stop_forget_end_to_end() {
     let s = &json(&o)["status"];
     assert_eq!(s["active"], true);
     assert_eq!(s["out_of_sync"], false);
+    assert_eq!(s["isolation"]["verified"], true);
     assert!(!out(&o).contains("horse"));
     let o = e.run(&["hotspot", "clients", "--json"], None);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));

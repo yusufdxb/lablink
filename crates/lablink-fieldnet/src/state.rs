@@ -72,6 +72,10 @@ pub struct FieldState {
     /// `net.ipv4.ip_forward` before LabLink started the hotspot, so `status`
     /// can say whether NetworkManager's shared mode changed it.
     pub ip_forward_before: Option<bool>,
+    /// Internet sharing was asked for: the profile carries no isolation
+    /// rules. `false` (also when absent) means isolated.
+    #[serde(default)]
+    pub sharing: bool,
 }
 
 pub const STATE_FILE: &str = "fieldnet.json";
@@ -154,6 +158,7 @@ mod tests {
             active: true,
             started_ms: Some(1),
             ip_forward_before: Some(false),
+            sharing: false,
         }
     }
 

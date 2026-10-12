@@ -41,11 +41,12 @@ pub struct Request {
     pub ssid: String,
     pub subnet: Option<Ipv4Net>,
     pub security: Security,
+    /// Share this machine's internet and networks with hotspot clients:
+    /// the profile gets no isolation rules. Off by default.
     pub allow_internet_sharing: bool,
-    /// Accept that hotspot clients can be routed to the other networks this
-    /// machine reaches (VPN, containers, LAN), which shared mode's
-    /// forwarding allows unless a firewall stops it.
-    pub allow_routing: bool,
+    /// Accept that NetworkManager's dnsmasq answers hotspot clients' DNS
+    /// queries from this machine's resolvers (no `no-resolv` drop-in).
+    pub allow_dns_relay: bool,
 }
 
 /// A registered device currently reached from this machine (from the
@@ -67,6 +68,8 @@ pub struct Preflight {
     pub would_disconnect: Option<ActiveConnection>,
     /// The hotspot (LabLink's profile) is already running on the adapter.
     pub already_running: bool,
+    /// Internet sharing was asked for: no isolation rules.
+    pub sharing: bool,
     pub findings: Vec<Finding>,
 }
 
@@ -113,6 +116,7 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
         gateway: None,
         would_disconnect: None,
         already_running: false,
+        sharing: req.allow_internet_sharing,
         findings: Vec::new(),
     };
     let block = |f: &mut Vec<Finding>, code, message: String| {
@@ -186,6 +190,14 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
     }
     // The profile is restricted to this user (connection.permissions), so
     // NetworkManager asks for settings.modify.own when it is added.
+    // A protected (WPA2/WPA3) access point with shared addressing.
+    if !nm.allowed("wifi.share.protected") {
+        block(
+            &mut f,
+            "permission",
+            "NetworkManager does not let this user share a protected Wi-Fi network without administrator authorization (polkit wifi.share.protected)".into(),
+        );
+    }
     if ctx.own_profile.is_none() && !nm.allowed("settings.modify.own") {
         block(
             &mut f,
@@ -327,54 +339,89 @@ pub fn check(facts: &HostFacts, req: &Request, ctx: &Context) -> Preflight {
             format!("{iface} carries this machine's only internet uplink: it is offline until the hotspot stops (the Field Network itself works offline)"),
         );
     }
-    if !others.is_empty() {
-        let names = others
-            .iter()
-            .map(|r| r.device.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if req.allow_internet_sharing {
+    let names = others
+        .iter()
+        .map(|r| r.device.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let exposed = crate::host::routed_elsewhere(&facts.routes, &iface);
+    if req.allow_internet_sharing {
+        // Asked for: no isolation rules, NAT onto every uplink.
+        if !others.is_empty() {
             warn(
                 &mut f,
                 "internet-sharing",
                 format!("hotspot clients will reach the internet through {names} (NetworkManager shared mode: NAT and IPv4 forwarding), as requested"),
             );
-        } else {
-            f.push(Finding {
-                level: Level::Block,
-                code: "internet-sharing",
-                message: format!("this machine has another internet uplink ({names}); NetworkManager's shared mode would NAT hotspot clients onto it. LabLink does not share internet access unless you ask."),
-                override_flag: Some("--allow-internet-sharing"),
-            });
         }
-    }
-    let exposed = crate::host::routed_elsewhere(&facts.routes, &iface);
-    if !exposed.is_empty() {
-        let message = format!(
-            "NetworkManager's shared mode enables IPv4 forwarding for hotspot clients. This machine also routes to {}; unless your firewall blocks forwarding from {iface}, hotspot clients can reach those networks through it. LabLink does not change firewall rules.",
-            exposed.join(", ")
-        );
-        if req.allow_routing {
+        if !exposed.is_empty() {
             warn(
                 &mut f,
                 "forwarding",
-                format!("{message} Allowed as requested."),
+                format!("with internet sharing on, LabLink adds no isolation rule: hotspot clients can also reach {} through this machine unless a firewall blocks forwarding from {iface}", exposed.join(", ")),
             );
-        } else {
-            f.push(Finding {
-                level: Level::Block,
-                code: "forwarding",
-                message,
-                override_flag: Some("--allow-routing"),
-            });
+        }
+    } else {
+        // Isolated (the default): the profile's rules refuse every packet
+        // from the adapter that is not for this machine.
+        let problems = facts.isolation.problems(&iface);
+        for p in &problems {
+            block(
+                &mut f,
+                "isolation",
+                format!("{p}; LabLink cannot guarantee that hotspot clients stay off other networks, so it does not start"),
+            );
+        }
+        if problems.is_empty() && (!others.is_empty() || !exposed.is_empty()) {
+            let mut nets: Vec<String> = others
+                .iter()
+                .map(|r| format!("the internet via {}", r.device))
+                .collect();
+            nets.extend(exposed.iter().cloned());
+            info(
+                &mut f,
+                "isolation",
+                format!("hotspot clients reach this machine and each other only; the isolation rule keeps them off {}", nets.join(", ")),
+            );
+        }
+        match &facts.isolation.dns {
+            Some(crate::isolation::DnsRelay::Off(_)) => {}
+            Some(crate::isolation::DnsRelay::Forwarded(why))
+            | Some(crate::isolation::DnsRelay::Unknown(why)) => {
+                let message = format!(
+                    "NetworkManager's DNS server on the hotspot forwards clients' queries to this machine's resolvers ({why}). That is not routing, but it lets clients resolve outside names through this machine. Install the drop-in {} containing `no-resolv` (see docs/FIELD_NETWORK.md)",
+                    crate::isolation::DNS_DROPIN
+                );
+                if req.allow_dns_relay {
+                    warn(
+                        &mut f,
+                        "dns-relay",
+                        format!("{message}; allowed as requested"),
+                    );
+                } else {
+                    f.push(Finding {
+                        level: Level::Block,
+                        code: "dns-relay",
+                        message,
+                        override_flag: Some("--allow-dns-relay"),
+                    });
+                }
+            }
+            None => {}
         }
     }
-    if facts.ip_forward == Some(true) {
-        info(
+    match facts.ip_forward {
+        Some(false) => warn(
+            &mut f,
+            "forwarding",
+            "NetworkManager's shared mode turns on IPv4 forwarding for the whole machine and does not turn it off when the hotspot stops. Hotspot clients are kept off it by the isolation rule, but traffic arriving on other interfaces could be forwarded until `sysctl net.ipv4.ip_forward=0` or a reboot.".into(),
+        ),
+        Some(true) => info(
             &mut f,
             "forwarding",
             "IPv4 forwarding is already enabled on this machine (by another service)".into(),
-        );
+        ),
+        None => {}
     }
 
     // Sessions and equipment reached over the adapter.
@@ -492,9 +539,7 @@ mod tests {
             subnet: None,
             security: Security::Wpa2,
             allow_internet_sharing: false,
-            // The fixture routes to tailscale and docker networks; the
-            // routing block has its own test.
-            allow_routing: true,
+            allow_dns_relay: false,
         }
     }
 
@@ -515,41 +560,129 @@ mod tests {
     }
 
     #[test]
-    fn single_adapter_host_warns_about_disconnect_uplink_and_forwarding() {
+    fn single_adapter_host_warns_about_disconnect_and_uplink_and_stays_isolated() {
         let pf = check(&facts(), &req(), &ctx(&[]));
         assert!(!pf.blocked(), "{:#?}", pf.findings);
+        assert!(!pf.sharing);
         assert_eq!(pf.interface.as_deref(), Some("wlan0"));
         assert_eq!(pf.subnet, Some("10.77.0.0/24".parse().unwrap()));
         assert_eq!(pf.gateway, Some(Ipv4Addr::new(10, 77, 0, 1)));
         assert_eq!(pf.would_disconnect.as_ref().unwrap().name, "Home WiFi");
         let w = codes(&pf, Level::Warn);
+        assert_eq!(w, vec!["disconnect", "uplink"], "{w:?}");
+        assert!(pf.needs_confirmation());
+        // The networks this machine routes to are named, as unreachable.
+        let iso = pf
+            .findings
+            .iter()
+            .find(|f| f.code == "isolation" && f.level == Level::Info)
+            .unwrap();
         assert!(
-            w.contains(&"disconnect") && w.contains(&"uplink") && w.contains(&"forwarding"),
+            iso.message.contains("100.64.0.0/10 (tailscale0)") && iso.message.contains("docker0"),
+            "{}",
+            iso.message
+        );
+        assert!(
+            codes(&pf, Level::Info).contains(&"forwarding"),
+            "ip_forward was already on"
+        );
+    }
+
+    #[test]
+    fn internet_sharing_warns_that_every_routed_network_is_exposed() {
+        let mut r = req();
+        r.allow_internet_sharing = true;
+        let mut h = facts();
+        h.routes.push(Route {
+            dest: "0.0.0.0/0".parse().unwrap(),
+            device: "eno1".into(),
+            via: Some("10.0.0.1".parse().unwrap()),
+            table: "main".into(),
+        });
+        let pf = check(&h, &r, &ctx(&[]));
+        assert!(!pf.blocked(), "{:#?}", pf.findings);
+        assert!(pf.sharing);
+        let w = codes(&pf, Level::Warn);
+        assert!(
+            w.contains(&"internet-sharing") && w.contains(&"forwarding"),
             "{w:?}"
         );
-        assert!(pf.needs_confirmation());
         let fw = pf
             .findings
             .iter()
             .find(|f| f.code == "forwarding" && f.level == Level::Warn)
             .unwrap();
-        assert!(fw.message.contains("tailscale0") && fw.message.contains("docker0"));
+        assert!(fw.message.contains("tailscale0") && fw.message.contains("no isolation rule"));
+        // Sharing needs neither the DNS drop-in nor a clean rule table.
+        h.isolation.dns = Some(crate::isolation::DnsRelay::Forwarded("none".into()));
+        h.isolation.rules4 = None;
+        assert!(!check(&h, &r, &ctx(&[])).blocked());
     }
 
     #[test]
-    fn routes_to_other_networks_block_unless_routing_is_explicit() {
-        let mut r = req();
-        r.allow_routing = false;
-        let pf = check(&facts(), &r, &ctx(&[]));
+    fn isolation_that_cannot_be_guaranteed_blocks_without_override() {
+        let rules = |t: &str| Some(crate::isolation::parse_rules(t));
+        // A priority-0 rule would be evaluated before the hotspot's rule.
+        let mut h = facts();
+        h.isolation.rules6 = rules(
+            "0:\tfrom all lookup local\n0:\tfrom all lookup 100\n32766:\tfrom all lookup main\n",
+        );
+        let pf = check(&h, &req(), &ctx(&[]));
         let b = pf.blockers();
         assert_eq!(b.len(), 1, "{b:#?}");
-        assert_eq!(b[0].code, "forwarding");
-        assert_eq!(b[0].override_flag, Some("--allow-routing"));
-        assert!(b[0].message.contains("100.64.0.0/10 (tailscale0)"));
-        // No other routes: nothing to allow.
+        assert_eq!((b[0].code, b[0].override_flag), ("isolation", None));
+        assert!(
+            b[0].message.contains("IPv6 rule '0: from all lookup 100'"),
+            "{}",
+            b[0].message
+        );
+        // Unreadable rules, a bridge master, an upper device, tc ingress.
         let mut h = facts();
-        h.routes.retain(|r| r.device == "wlan0");
-        assert!(!check(&h, &r, &ctx(&[])).blocked());
+        h.isolation.rules4 = None;
+        h.isolation.links = Some("3: wlan0: <UP> mtu 1500 qdisc noqueue master br0 state UP\n9: wlan0.5@wlan0: <UP> mtu 1500\n".into());
+        h.isolation.qdiscs = Some("qdisc clsact ffff: dev wlan0 parent ffff:fff1\n".into());
+        let pf = check(&h, &req(), &ctx(&[]));
+        let m: Vec<&str> = pf.blockers().iter().map(|f| f.message.as_str()).collect();
+        assert_eq!(m.len(), 4, "{m:#?}");
+        assert!(m[0].contains("cannot read the IPv4 routing rules"));
+        assert!(m[1].contains("attached to br0"));
+        assert!(m[2].contains("wlan0.5 is stacked on wlan0"));
+        assert!(m[3].contains("clsact"));
+        // A clsact on another device does not matter.
+        let mut h = facts();
+        h.isolation.qdiscs = Some("qdisc clsact ffff: dev docker0 parent ffff:fff1\nqdisc noqueue 0: dev wlan0 root refcnt 2\n".into());
+        assert!(!check(&h, &req(), &ctx(&[])).blocked());
+    }
+
+    #[test]
+    fn dns_relay_blocks_unless_accepted() {
+        let mut h = facts();
+        h.isolation.dns = Some(crate::isolation::DnsRelay::Forwarded("no drop-in".into()));
+        let pf = check(&h, &req(), &ctx(&[]));
+        let b = pf.blockers();
+        assert_eq!(b.len(), 1, "{b:#?}");
+        assert_eq!(
+            (b[0].code, b[0].override_flag),
+            ("dns-relay", Some("--allow-dns-relay"))
+        );
+        assert!(b[0].message.contains(crate::isolation::DNS_DROPIN));
+        let mut r = req();
+        r.allow_dns_relay = true;
+        let pf = check(&h, &r, &ctx(&[]));
+        assert!(!pf.blocked());
+        assert!(codes(&pf, Level::Warn).contains(&"dns-relay"));
+        h.isolation.dns = Some(crate::isolation::DnsRelay::Unknown("cannot read".into()));
+        assert_eq!(check(&h, &req(), &ctx(&[])).blockers()[0].code, "dns-relay");
+    }
+
+    #[test]
+    fn forwarding_left_on_by_shared_mode_is_a_warning_when_it_was_off() {
+        let mut h = facts();
+        h.ip_forward = Some(false);
+        let pf = check(&h, &req(), &ctx(&[]));
+        let fw = pf.findings.iter().find(|f| f.code == "forwarding").unwrap();
+        assert_eq!(fw.level, Level::Warn);
+        assert!(fw.message.contains("does not turn it off"));
     }
 
     #[test]
@@ -641,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn another_uplink_blocks_unless_sharing_is_explicit() {
+    fn another_uplink_is_kept_off_the_hotspot_unless_sharing_is_explicit() {
         let mut h = facts();
         h.routes.push(Route {
             dest: "0.0.0.0/0".parse().unwrap(),
@@ -649,18 +782,31 @@ mod tests {
             via: Some(Ipv4Addr::new(10, 1, 1, 254)),
             table: "main".into(),
         });
+        // Isolated (the default): the uplink stays up and stays off limits.
         let pf = check(&h, &req(), &ctx(&[]));
-        let b = pf.blockers();
-        assert_eq!(b.len(), 1, "{b:#?}");
-        assert_eq!(b[0].override_flag, Some("--allow-internet-sharing"));
+        assert!(!pf.blocked(), "{:#?}", pf.blockers());
+        assert!(!pf.sharing);
         assert!(
             !codes(&pf, Level::Warn).contains(&"uplink"),
             "another uplink remains"
         );
+        let kept = pf
+            .findings
+            .iter()
+            .find(|f| f.code == "isolation" && f.level == Level::Info)
+            .expect("the kept-off networks are named");
+        assert!(
+            kept.message.contains("the internet via eno1"),
+            "{}",
+            kept.message
+        );
+        assert!(!codes(&pf, Level::Warn).contains(&"internet-sharing"));
+        // Sharing is a separate, explicit mode.
         let mut r = req();
         r.allow_internet_sharing = true;
         let pf = check(&h, &r, &ctx(&[]));
         assert!(!pf.blocked());
+        assert!(pf.sharing);
         assert!(codes(&pf, Level::Warn).contains(&"internet-sharing"));
     }
 

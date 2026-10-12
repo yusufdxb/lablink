@@ -1188,6 +1188,15 @@ fn run(cli: Cli, client: &Client) -> R {
                             );
                         }
                     }
+                    for (dev, w) in &c.wake {
+                        println!(
+                            "  wake {:<16} {} on {} via {}  (kept for LabLink 0.1.x; this version does not send Wake-on-LAN packets)",
+                            output::printable(dev),
+                            output::printable(&w.mac),
+                            output::printable(&w.network),
+                            output::printable(&w.interface)
+                        );
+                    }
                     Ok(exit::OK)
                 }
                 Err(e) => Err(Fail::new(exit::USAGE, "invalid_config", e.to_string())),

@@ -137,6 +137,8 @@ pub trait System: Send + Sync {
     fn os(&self) -> Os;
     fn run(&self, cmd: &Cmd) -> io::Result<Output>;
     fn read_file(&self, path: &Path) -> Option<String>;
+    /// File names in a directory (`NotFound` when it does not exist).
+    fn list_dir(&self, path: &Path) -> io::Result<Vec<String>>;
     fn env(&self, key: &str) -> Option<String>;
     /// Cryptographically secure random bytes.
     fn random(&self, buf: &mut [u8]) -> io::Result<()>;
@@ -156,6 +158,24 @@ pub fn redact(text: &str, secret: Option<&str>) -> String {
 
 /// The real operating system.
 pub struct RealSystem;
+
+/// Debug builds only: end-to-end tests of the binary point `/proc` reads
+/// (`LABLINK_TEST_PROC_ROOT`) and `/etc` reads (`LABLINK_TEST_ETC_ROOT`) at
+/// fixture directories, so this machine's own connections (an SSH session
+/// into the build host) and configuration cannot change their outcome.
+/// Release builds always read the real paths.
+fn fixture_path(path: &Path) -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    for (var, prefix) in [
+        ("LABLINK_TEST_PROC_ROOT", "/proc"),
+        ("LABLINK_TEST_ETC_ROOT", "/etc"),
+    ] {
+        if let (Some(root), Ok(rest)) = (std::env::var_os(var), path.strip_prefix(prefix)) {
+            return Path::new(&root).join(rest);
+        }
+    }
+    path.to_path_buf()
+}
 
 impl System for RealSystem {
     fn os(&self) -> Os {
@@ -231,18 +251,16 @@ impl System for RealSystem {
     }
 
     fn read_file(&self, path: &Path) -> Option<String> {
-        // Debug builds only: end-to-end tests of the binary point `/proc`
-        // reads at a fixture directory, so this machine's own connections
-        // (an SSH session into the build host) cannot change their outcome.
-        // Release builds always read the real `/proc`.
-        #[cfg(debug_assertions)]
-        if let (Some(root), Ok(rest)) = (
-            std::env::var_os("LABLINK_TEST_PROC_ROOT"),
-            path.strip_prefix("/proc"),
-        ) {
-            return std::fs::read_to_string(Path::new(&root).join(rest)).ok();
+        std::fs::read_to_string(fixture_path(path)).ok()
+    }
+
+    fn list_dir(&self, path: &Path) -> io::Result<Vec<String>> {
+        let mut v = Vec::new();
+        for e in std::fs::read_dir(fixture_path(path))? {
+            v.push(e?.file_name().to_string_lossy().into_owned());
         }
-        std::fs::read_to_string(path).ok()
+        v.sort();
+        Ok(v)
     }
 
     fn env(&self, key: &str) -> Option<String> {
@@ -270,6 +288,7 @@ impl System for RealSystem {
 pub struct FakeSystem {
     pub os_family: Option<Os>,
     rules: Mutex<Vec<(String, Output)>>,
+    once: Mutex<Vec<(String, Output)>>,
     files: Mutex<HashMap<PathBuf, String>>,
     vars: Mutex<HashMap<String, String>>,
     calls: Mutex<Vec<Cmd>>,
@@ -298,6 +317,15 @@ impl FakeSystem {
 
     pub fn ok(&self, prefix: &str, stdout: &str) {
         self.on(prefix, Output::success(stdout));
+    }
+
+    /// Answer only the next command starting with `prefix`, ahead of the
+    /// standing rules (so a test can change the world between two calls).
+    pub fn once(&self, prefix: &str, stdout: &str) {
+        self.once
+            .lock()
+            .unwrap()
+            .push((prefix.to_string(), Output::success(stdout)));
     }
 
     pub fn file(&self, path: &str, text: &str) {
@@ -329,10 +357,21 @@ impl System for FakeSystem {
     fn run(&self, c: &Cmd) -> io::Result<Output> {
         self.calls.lock().unwrap().push(c.clone());
         let line = c.line();
+        let once = {
+            let mut once = self.once.lock().unwrap();
+            once.iter()
+                .position(|(p, _)| line.starts_with(p.as_str()))
+                .map(|i| once.remove(i))
+        };
         let rules = self.rules.lock().unwrap();
-        match rules.iter().find(|(p, _)| line.starts_with(p.as_str())) {
+        match once.or_else(|| {
+            rules
+                .iter()
+                .find(|(p, _)| line.starts_with(p.as_str()))
+                .cloned()
+        }) {
             Some((_, out)) => {
-                let mut out = out.clone();
+                let mut out = out;
                 if c.discard_stdout {
                     out.stdout.clear();
                 }
@@ -349,6 +388,22 @@ impl System for FakeSystem {
 
     fn read_file(&self, path: &Path) -> Option<String> {
         self.files.lock().unwrap().get(path).cloned()
+    }
+
+    fn list_dir(&self, path: &Path) -> io::Result<Vec<String>> {
+        let mut v: Vec<String> = self
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|p| p.parent() == Some(path))
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        if v.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no such directory"));
+        }
+        v.sort();
+        Ok(v)
     }
 
     fn env(&self, key: &str) -> Option<String> {
