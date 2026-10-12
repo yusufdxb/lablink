@@ -373,6 +373,18 @@ fn start_clients_password_stop_forget_end_to_end() {
     let e = Env::new();
     enable(&e);
 
+    // No lablinkd here: the warning says isolation goes unwatched.
+    let o = e.run(&["hotspot", "preflight", "--json"], None);
+    let j = json(&o);
+    let warn = j["preflight"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "equipment")
+        .unwrap_or_else(|| panic!("no equipment warning: {j}"));
+    let msg = warn["message"].as_str().unwrap();
+    assert!(msg.contains("re-check isolation"), "{msg}");
+
     let o = e.run(
         &[
             "hotspot",

@@ -146,7 +146,7 @@ pub fn plan(
         pf.findings.push(preflight::Finding {
             level: Level::Warn,
             code: "equipment",
-            message: "lablinkd is not running, so LabLink cannot tell which registered devices use this link. Make sure no robot is moving or depending on it.".into(),
+            message: "lablinkd is not running, so LabLink cannot tell which registered devices use this link, and nothing will re-check isolation while the hotspot runs (`status` checks only when you run it). Make sure no robot is moving or depending on it, and start lablinkd first.".into(),
             override_flag: None,
         });
         pf.findings.sort_by_key(|f| f.level);
