@@ -28,4 +28,12 @@ print(os.path.join(os.path.dirname(p["manifest_path"]),"fonts"))')
     echo
     echo "<!-- Cargo.lock sha256: $(sha256sum Cargo.lock | cut -d' ' -f1) -->"
 } > "$out"
+# Upstream license files can contain CRLF and trailing spaces. Normalize only
+# whitespace so generated notices remain reproducible and pass diff checks.
+python3 - "$out" <<'PY_NORMALIZE'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
+PY_NORMALIZE
 echo "wrote $out ($(wc -l < "$out") lines)"

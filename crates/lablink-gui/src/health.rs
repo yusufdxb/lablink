@@ -3,7 +3,7 @@
 //! only lays them out, next to the daemon's live colors.
 
 use crate::flow;
-use crate::view::{self, Level};
+use crate::view::Level;
 use crate::worker::Fail;
 use eframe::egui::{self, Color32, RichText};
 use lablink_core::model::DeviceStatus;
@@ -67,7 +67,7 @@ pub fn check_rows(ui: &mut egui::Ui, d: &lablink_doctor::DeviceReport, id: &str)
         .show(ui, |ui| {
             for row in &v.rows {
                 ui.label(&row.label);
-                ui.colored_label(view::level_color(row.level), row.word);
+                ui.colored_label(crate::theme::level_color(ui, row.level), row.word);
                 ui.label(&row.detail);
                 ui.end_row();
             }
@@ -110,14 +110,14 @@ pub fn ui(ui: &mut egui::Ui, panel: &DoctorPanel, live: &[DeviceStatus]) -> Opti
         .map(|r| r.as_ref())
         .or(panel.last_all.as_deref());
     if let Some(Err(f)) = &panel.result {
-        ui.colored_label(view::RED, &f.message);
+        ui.colored_label(crate::theme::error(ui), &f.message);
     }
     if let Some(r) = report {
         let v = flow::doctor_view(r);
         ui.label(
             RichText::new(v.header)
                 .strong()
-                .color(view::level_color(v.level)),
+                .color(crate::theme::level_color(ui, v.level)),
         );
     }
     ui.add_space(4.0);
@@ -138,17 +138,20 @@ pub fn ui(ui: &mut egui::Ui, panel: &DoctorPanel, live: &[DeviceStatus]) -> Opti
                     open,
                 )
                 .show_header(ui, |ui| {
-                    dot(ui, view::state_color(d.color), 6.0);
+                    dot(ui, crate::theme::state_color(ui, d.color), 6.0);
                     ui.label(
                         RichText::new(format!("{:<12}", d.name))
                             .monospace()
                             .strong(),
                     );
-                    ui.colored_label(view::state_color(d.color), d.color.as_str());
+                    ui.colored_label(crate::theme::state_color(ui, d.color), d.color.as_str());
                     match checked {
                         Some(c) => {
                             ui.weak("  checks");
-                            ui.colored_label(view::state_color(c.color), c.color.as_str());
+                            ui.colored_label(
+                                crate::theme::state_color(ui, c.color),
+                                c.color.as_str(),
+                            );
                             let (bad, warn) = c.checks.iter().fold((0, 0), |(b, w), x| {
                                 match flow::check_level(x.status) {
                                     Level::Bad => (b + 1, w),
@@ -174,7 +177,10 @@ pub fn ui(ui: &mut egui::Ui, panel: &DoctorPanel, live: &[DeviceStatus]) -> Opti
                     }
                     if d.color != lablink_core::model::Color::Green {
                         for r in &d.reasons {
-                            ui.colored_label(view::level_color(Level::Warn), format!("- {r}"));
+                            ui.colored_label(
+                                crate::theme::level_color(ui, Level::Warn),
+                                format!("- {r}"),
+                            );
                         }
                     }
                     ui.horizontal(|ui| {

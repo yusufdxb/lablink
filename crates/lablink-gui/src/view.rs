@@ -5,10 +5,10 @@ use eframe::egui::Color32;
 use lablink_core::model::{AuthState, Color, DeviceStatus, IdentityState, NetworkState, PortState};
 use lablink_core::time::format_age;
 
-pub const GREEN: Color32 = Color32::from_rgb(46, 160, 67);
-pub const YELLOW: Color32 = Color32::from_rgb(214, 158, 22);
-pub const RED: Color32 = Color32::from_rgb(220, 53, 69);
-pub const GRAY: Color32 = Color32::from_rgb(128, 128, 128);
+pub const GREEN: Color32 = crate::theme::SUCCESS;
+pub const YELLOW: Color32 = crate::theme::WARNING;
+pub const RED: Color32 = crate::theme::ERROR;
+pub const GRAY: Color32 = crate::theme::MUTED;
 
 /// Traffic-light color for the big state dot.
 pub fn state_color(c: Color) -> Color32 {

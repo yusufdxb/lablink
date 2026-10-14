@@ -120,6 +120,7 @@ pub enum Event {
         status: Result<StatusReport, Fail>,
         version: Option<String>,
         build_warning: Option<String>,
+        files_warning: Option<String>,
     },
     Detail(String, Result<Box<DeviceDetail>, Fail>),
     History(String, Result<Vec<HistoryEvent>, Fail>),
@@ -199,16 +200,18 @@ impl Worker {
 }
 
 fn poll_once(client: &Client) -> Event {
-    let (version, build_warning) = match client.call(&Request::Ping) {
+    let (version, build_warning, files_warning) = match client.call(&Request::Ping) {
         Ok(v) => (
             Some(parse_version(&v)),
             daemon_build_warning(&v, lablink_core::GIT_SHA),
+            files_protocol_warning(&v),
         ),
         Err(e) => {
             return Event::Poll {
                 status: Err(e.into()),
                 version: None,
                 build_warning: None,
+                files_warning: None,
             };
         }
     };
@@ -224,6 +227,7 @@ fn poll_once(client: &Client) -> Event {
         status,
         version,
         build_warning,
+        files_warning,
     }
 }
 
@@ -505,6 +509,12 @@ fn daemon_build_warning(v: &Value, client_sha: Option<&str>) -> Option<String> {
     })
 }
 
+fn files_protocol_warning(v: &Value) -> Option<String> {
+    (v["files_protocol_version"].as_u64()
+        != Some(lablink_core::protocol::FILES_PROTOCOL_VERSION as u64))
+        .then(|| "The running daemon does not support this Files workspace. Start the matching development daemon.".into())
+}
+
 /// `History` returns `{"events": [...]}`.
 pub fn parse_events(v: &Value) -> Result<Vec<HistoryEvent>, Fail> {
     serde_json::from_value(v.get("events").cloned().unwrap_or(Value::Null))
@@ -650,6 +660,15 @@ mod tests {
         .is_some());
         assert!(daemon_build_warning(&json!({"version":lablink_core::VERSION}), None).is_none());
         assert!(daemon_build_warning(&json!({"version":"old-version"}), None).is_some());
+    }
+
+    #[test]
+    fn files_workspace_requires_explicit_daemon_protocol_capability() {
+        assert!(files_protocol_warning(&json!({"version":lablink_core::VERSION})).is_some());
+        assert!(files_protocol_warning(&json!({"files_protocol_version":0})).is_some());
+        assert!(files_protocol_warning(&json!({"files_protocol_version":
+            lablink_core::protocol::FILES_PROTOCOL_VERSION}))
+        .is_none());
     }
 
     #[test]

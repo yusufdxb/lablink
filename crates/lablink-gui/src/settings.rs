@@ -9,7 +9,7 @@
 //! OpenSSH options) is advanced and stays YAML-only.
 
 use crate::term;
-use crate::view::{self, Level};
+use crate::view::Level;
 use eframe::egui::{self, RichText};
 use lablink_core::config::{Config, NetworkConfig, SiteConfig};
 use lablink_core::model::{DeviceStatus, PortState};
@@ -204,7 +204,7 @@ impl Settings {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(820.0);
             if let Some(e) = &self.load_error {
-                ui.colored_label(view::RED, format!("The config file cannot be loaded, so it cannot be edited here: {e}"));
+                ui.colored_label(crate::theme::error(ui), format!("The config file cannot be loaded, so it cannot be edited here: {e}"));
                 ui.label(format!("Fix {} by hand (`lablink check-config` shows the problem), then press Reload.", self.path.display()));
                 if ui.button("Reload").clicked() {
                     actions.push(Action::Reload);
@@ -234,7 +234,7 @@ impl Settings {
     fn save_row(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let (_, errs) = self.candidate();
         for e in &errs {
-            ui.colored_label(view::RED, e);
+            ui.colored_label(crate::theme::error(ui), e);
         }
         ui.horizontal(|ui| {
             let can = self.dirty() && errs.is_empty() && !self.saving;
@@ -262,7 +262,14 @@ impl Settings {
             }
         });
         if let Some((ok, m)) = &self.message {
-            ui.colored_label(if *ok { view::GREEN } else { view::RED }, m);
+            ui.colored_label(
+                if *ok {
+                    crate::theme::success(ui)
+                } else {
+                    crate::theme::error(ui)
+                },
+                m,
+            );
         }
     }
 
@@ -272,7 +279,7 @@ impl Settings {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(860.0);
             if let Some(e) = &self.load_error {
-                ui.colored_label(view::RED, format!("The config file cannot be loaded, so it cannot be edited here: {e}"));
+                ui.colored_label(crate::theme::error(ui), format!("The config file cannot be loaded, so it cannot be edited here: {e}"));
                 if ui.button("Reload").clicked() {
                     actions.push(Action::Reload);
                 }
@@ -596,7 +603,11 @@ impl Settings {
                 } else {
                     ("stopped", Level::Bad)
                 };
-                ui.label(RichText::new(word).strong().color(view::level_color(level)));
+                ui.label(
+                    RichText::new(word)
+                        .strong()
+                        .color(crate::theme::level_color(ui, level)),
+                );
                 ui.weak(s.describe());
                 let busy = self.service_busy;
                 ui.horizontal(|ui| {

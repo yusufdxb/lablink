@@ -1758,7 +1758,9 @@ impl Registry {
         // A device in MISMATCH is asked too: the proof offers no
         // credentials, and it is how the genuine machine clears the stop
         // when it returns with the pinned key.
-        let mut r = self.resolve_inner(name, d.username(), true, true).ok()?;
+        let mut r = self
+            .resolve_inner(name, d.username(), true, true, false)
+            .ok()?;
         r.identity = IdentityState::Unknown;
         let t = Target::from_resolve(&r).ok()?;
         t.host_key_alias.is_some().then_some((ip, t))
@@ -2651,7 +2653,7 @@ impl Registry {
 
     /// Build the OpenSSH target for `name`.
     pub fn target_for(&self, name: &str, username: Option<String>) -> Result<Target, ApiError> {
-        let r = self.resolve_inner(name, username, true, false)?;
+        let r = self.resolve_inner(name, username, true, false, false)?;
         Target::from_resolve(&r).map_err(|e| ApiError::new(ErrorCode::IdentityMismatch, e))
     }
 
@@ -2659,7 +2661,14 @@ impl Registry {
     pub fn resolve(&self, name: &str, batch: bool) -> Result<ResolveResult, ApiError> {
         let name = self.require(name)?;
         let d = &self.devices[&name];
-        self.resolve_inner(&name, d.username(), batch, false)
+        self.resolve_inner(&name, d.username(), batch, false, false)
+    }
+
+    /// Files requires verified, unambiguous pins and a fresh gateway route.
+    pub fn resolve_files(&self, reference: &str) -> Result<ResolveResult, ApiError> {
+        let id = self.require(reference)?;
+        let d = &self.devices[&id];
+        self.resolve_inner(&id, d.username(), true, false, true)
     }
 
     /// `batch_jump`: a ProxyCommand through a gateway must not prompt
@@ -2673,6 +2682,7 @@ impl Registry {
         username: Option<String>,
         batch_jump: bool,
         for_proof: bool,
+        for_files: bool,
     ) -> Result<ResolveResult, ApiError> {
         let d = self.devices.get(name).ok_or_else(|| {
             ApiError::new(
@@ -2680,6 +2690,25 @@ impl Registry {
                 format!("unknown device '{name}'"),
             )
         })?;
+        if for_files {
+            if d.identity != IdentityState::Verified || d.usable_pins().is_empty() {
+                return Err(ApiError::new(
+                    ErrorCode::IdentityMismatch,
+                    "Files requires a verified, pinned device identity",
+                ));
+            }
+            let pins = d.pinned_fingerprints();
+            if self
+                .devices
+                .values()
+                .any(|other| other.id != d.id && !pins.is_disjoint(&other.pinned_fingerprints()))
+            {
+                return Err(ApiError::new(
+                    ErrorCode::IdentityMismatch,
+                    "Files refuses ambiguous identity: host keys are pinned to multiple devices",
+                ));
+            }
+        }
         if !d.cfg.ssh {
             return Err(ApiError::new(
                 ErrorCode::Refused,
@@ -2743,7 +2772,7 @@ impl Registry {
                     ));
                 }
                 let gr = self
-                    .resolve_inner(&gw, g.username(), true, false)
+                    .resolve_inner(&gw, g.username(), true, false, for_files)
                     .map_err(|e| {
                         ApiError::new(
                             e.code,
@@ -2755,10 +2784,14 @@ impl Registry {
                     })?;
                 let mut gt = Target::from_resolve(&gr)
                     .map_err(|e| ApiError::new(ErrorCode::IdentityMismatch, e))?;
-                if batch_jump && !self.cfg.ssh.reuse_control_master {
+                if for_files || (batch_jump && !self.cfg.ssh.reuse_control_master) {
                     gt.options.insert("ControlPath".into(), "none".into());
                 }
-                Some(lablink_ssh::proxy_command_through(&gt, batch_jump))
+                Some(if for_files {
+                    lablink_ssh::proxy_command_through_files(&gt)
+                } else {
+                    lablink_ssh::proxy_command_through(&gt, batch_jump)
+                })
             }
             None => None,
         };
@@ -2783,7 +2816,7 @@ impl Registry {
         // set ControlPath, so this is the only one on the command line).
         let mut ssh_options = self.ssh_cfg().options.clone();
         let control_path = match (&alias, &self.control_dir) {
-            (Some(a), Some(dir)) if self.cfg.ssh.reuse_control_master => {
+            (Some(a), Some(dir)) if self.cfg.ssh.reuse_control_master && !for_files => {
                 let pins: Vec<&str> = d
                     .usable_pins()
                     .iter()
@@ -3594,7 +3627,7 @@ impl Registry {
             ));
         }
         let r = self
-            .resolve_inner(gw, g.username(), true, false)
+            .resolve_inner(gw, g.username(), true, false, false)
             .map_err(|e| e.message)?;
         Target::from_resolve(&r)
     }
@@ -4270,6 +4303,86 @@ mod security_tests {
             .find(|(k, _)| *k == "ambiguity_notes");
         let notes = notes.unwrap().1 as usize;
         assert!(notes > 0 && notes < n, "notes={notes}");
+    }
+
+    #[test]
+    fn files_resolution_preserves_site_identity_and_rejects_shared_pins() {
+        let mut r = reg("sites:\n  - id: alpha\n    name: Alpha\n    devices:\n      - name: workstation\n  - id: beta\n    name: Beta\n    devices:\n      - name: workstation\n");
+        assert_eq!(
+            r.resolve_files("workstation").unwrap_err().code,
+            ErrorCode::Ambiguous
+        );
+        assert!(r.resolve_files("alpha/workstation").is_err());
+        let key = fake_key("alpha");
+        for (id, ip) in [
+            ("alpha/workstation", "192.0.2.10"),
+            ("beta/workstation", "198.51.100.10"),
+        ] {
+            let d = r.device_mut(id).unwrap();
+            d.rec.current_ip = Some(ip.parse().unwrap());
+            d.identity = IdentityState::Verified;
+            d.rec.pinned.push(PinnedKey {
+                key_type: key.key_type.clone(),
+                fingerprint: key.fingerprint.clone(),
+                public_key: key.public_key.clone(),
+                source: "trust".into(),
+                pinned_at_ms: 1,
+            });
+        }
+        assert_eq!(
+            r.resolve_files("alpha/workstation").unwrap_err().code,
+            ErrorCode::IdentityMismatch
+        );
+        r.device_mut("beta/workstation").unwrap().rec.pinned.clear();
+        let resolved = r.resolve_files("alpha/workstation").unwrap();
+        assert_eq!(resolved.id, "alpha/workstation");
+        assert_eq!(
+            resolved.host_key_alias.as_deref(),
+            Some("lablink.alpha.workstation")
+        );
+        assert_eq!(resolved.ssh_options["ControlPath"], "none");
+        r.device_mut("alpha/workstation").unwrap().identity = IdentityState::Mismatch;
+        assert_eq!(
+            r.resolve_files("alpha/workstation").unwrap_err().code,
+            ErrorCode::IdentityMismatch
+        );
+    }
+
+    #[test]
+    fn files_gateway_is_fresh_batch_pinned_and_refuses_duplicate_gateway_pins() {
+        let mut r = reg("ssh:\n  reuse_control_master: true\ndevices:\n  - name: gateway\n  - name: payload\n    via: gateway\n    expected_ips: [192.0.2.20]\n  - name: other\n");
+        r.control_dir = Some(PathBuf::from("/run/user/7/lablink"));
+        for id in ["default/gateway", "default/payload"] {
+            let key = fake_key(id);
+            let d = r.device_mut(id).unwrap();
+            d.rec.current_ip = Some("192.0.2.10".parse().unwrap());
+            d.identity = IdentityState::Verified;
+            d.rec.pinned.push(PinnedKey {
+                key_type: key.key_type,
+                fingerprint: key.fingerprint,
+                public_key: key.public_key,
+                source: "trust".into(),
+                pinned_at_ms: 1,
+            });
+        }
+        let resolved = r.resolve_files("default/payload").unwrap();
+        let proxy = resolved.proxy_command.unwrap();
+        for required in [
+            "ControlPath=none",
+            "ControlMaster=no",
+            "BatchMode=yes",
+            "StrictHostKeyChecking=yes",
+            "HostKeyAlias=lablink.default.gateway",
+        ] {
+            assert!(proxy.contains(required), "{required}: {proxy}");
+        }
+        assert_eq!(resolved.ssh_options["ControlPath"], "none");
+        let pin = r.device("default/gateway").unwrap().rec.pinned[0].clone();
+        r.device_mut("default/other").unwrap().rec.pinned.push(pin);
+        assert_eq!(
+            r.resolve_files("default/payload").unwrap_err().code,
+            ErrorCode::IdentityMismatch
+        );
     }
 
     #[test]

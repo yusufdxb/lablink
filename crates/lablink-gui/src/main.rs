@@ -4,10 +4,12 @@
 //! socket. There is no network discovery or probing code in this crate.
 
 mod app;
+mod files;
 mod flow;
 mod health;
 mod settings;
 mod term;
+mod theme;
 mod view;
 mod wizard;
 mod worker;
@@ -19,7 +21,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("LabLink")
             .with_app_id("lablink-gui")
-            .with_inner_size([900.0, 700.0])
+            .with_inner_size([1120.0, 850.0])
             .with_min_inner_size([560.0, 400.0]),
         ..Default::default()
     };
