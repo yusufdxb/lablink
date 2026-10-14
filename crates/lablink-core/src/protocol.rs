@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on incompatible protocol changes.
 pub const PROTOCOL_VERSION: u32 = 1;
+/// Additive Files route contract. A release daemon without this cannot serve Files.
+pub const FILES_PROTOCOL_VERSION: u32 = 1;
 /// Requests larger than this are rejected without parsing.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 /// Responses larger than this are treated as a protocol error by clients.
@@ -63,6 +65,8 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         batch: bool,
     },
+    /// Fresh SFTP route: verified identity and site-aware pinned gateway only.
+    ResolveFiles { device: String },
     /// Scan the device's host keys. Without `confirm` this is a preview; with
     /// `confirm` set to the exact fingerprints the user approved, they are
     /// pinned if a fresh scan still returns exactly those keys.
