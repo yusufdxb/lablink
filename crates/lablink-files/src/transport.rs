@@ -146,6 +146,31 @@ impl AsyncWrite for Pipes {
     }
 }
 
+/// Session diagnostics, never an ownership capability or permission to delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteStageState {
+    CreationUnconfirmed,
+    Created,
+    PublicationRequested,
+    Published,
+    PublicationUncertain,
+}
+impl RemoteStageState {
+    pub fn diagnostic(self) -> &'static str {
+        match self {
+            Self::CreationUnconfirmed => "Remote staging creation unconfirmed; path may be absent or unrelated. No cleanup attempted; never delete by name or prefix.",
+            Self::Created => "Remote staging creation acknowledged; partial or verified data may remain. No ownership-safe SFTP cleanup primitive; no cleanup attempted.",
+            Self::PublicationRequested | Self::PublicationUncertain => "Remote publication outcome uncertain; staging and destination may remain. Inspect both before retrying; no cleanup attempted.",
+            Self::Published => "Remote publication acknowledged; staging hardlink retained. It may alias the published file; no ownership-safe SFTP cleanup primitive; no cleanup attempted.",
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct RemoteStage {
+    pub path: String,
+    pub state: RemoteStageState,
+}
+
 pub struct Connection {
     pub sftp: RawSftpSession,
     child: Child,
@@ -153,7 +178,7 @@ pub struct Connection {
     stderr_task: tokio::task::JoinHandle<()>,
     pub hardlink: bool,
     pub fsync: bool,
-    pub staging: Mutex<Vec<String>>,
+    staging: Mutex<Vec<RemoteStage>>,
 }
 impl Connection {
     pub async fn connect(target: &Target, cancel: &CancellationToken) -> Result<Self> {
@@ -243,8 +268,35 @@ impl Connection {
     /// acknowledged creations; never unlink a staging candidate by name.
     pub async fn cleanup(&self) { /* Deliberately no remote REMOVE requests. */
     }
-    pub fn retained_stages(&self) -> Vec<String> {
+    /// Record before OPEN is sent: a lost reply cannot prove creation failed.
+    pub(crate) fn plan_stage(&self, path: &str) {
+        self.staging.lock().unwrap().push(RemoteStage {
+            path: path.into(),
+            state: RemoteStageState::CreationUnconfirmed,
+        });
+    }
+    pub(crate) fn stage_state(&self, path: &str, state: RemoteStageState) {
+        if let Some(stage) = self
+            .staging
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|s| s.path == path)
+        {
+            stage.state = state;
+        }
+    }
+    pub fn stage_diagnostics(&self) -> Vec<RemoteStage> {
         self.staging.lock().unwrap().clone()
+    }
+    pub fn retained_stages(&self) -> Vec<String> {
+        self.staging
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.state != RemoteStageState::CreationUnconfirmed)
+            .map(|s| s.path.clone())
+            .collect()
     }
     fn connection_error(&self) -> Error {
         let data = self.diagnostic.lock().unwrap();

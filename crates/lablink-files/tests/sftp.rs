@@ -2424,3 +2424,331 @@ fn kernel_injected_local_enospc_never_publishes() {
 fn kernel_injected_local_fsync_eio_never_publishes() {
     local_syscall_failure_case("sync", libc::SYS_fsync, libc::EIO);
 }
+
+/// Drop an actual SFTP HANDLE reply after the disposable server creates the file.
+/// This tests uncertain creation, rather than injecting a failure before OPEN.
+#[test]
+fn lost_open_reply_reports_candidate_without_claiming_ownership_or_deleting() {
+    use lablink_files::transport::RemoteStageState;
+    let Some(mut server) = Server::new(true) else {
+        return;
+    };
+    let source = server.path("data");
+    let destination = server.path("destination");
+    std::fs::write(&source, b"complete source").unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    let wrapper = server.path("drop-handle-reply");
+    std::fs::write(
+        &wrapper,
+        r#"#!/usr/bin/python3
+import subprocess, sys
+child = subprocess.Popen(['/usr/bin/ssh', *sys.argv[1:]], stdout=subprocess.PIPE)
+try:
+    while True:
+        header = child.stdout.read(4)
+        if len(header) != 4:
+            break
+        packet = child.stdout.read(int.from_bytes(header, 'big'))
+        if packet and packet[0] == 102:
+            break
+        sys.stdout.buffer.write(header + packet)
+        sys.stdout.buffer.flush()
+finally:
+    child.kill()
+    child.wait()
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    server.target.binary = wrapper.to_str().unwrap().into();
+    runtime().block_on(async {
+        let c = CancellationToken::new();
+        let conn = Connection::connect(&server.target, &c).await.unwrap();
+        let h = hooks(ConflictAction::Skip);
+        assert!(transfer::run(&conn, &upload(&source, &destination), &h, &c)
+            .await
+            .is_err());
+        let records = conn.stage_diagnostics();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, RemoteStageState::CreationUnconfirmed);
+        assert!(conn.retained_stages().is_empty()); // acknowledged creations only
+        assert_eq!(std::fs::metadata(&records[0].path).unwrap().len(), 0);
+        assert!(!destination.join("data").exists());
+        conn.cleanup().await;
+        assert!(Path::new(&records[0].path).exists());
+        assert!(records[0].state.diagnostic().contains("unrelated"));
+    });
+    // Repeat through the worker to prove the uncertain path reaches GUI diagnostics.
+    let daemon = Daemon::new(&server);
+    runtime().block_on(async {
+        let h = hooks(ConflictAction::Skip);
+        assert!(worker::execute_job(
+            &daemon.socket,
+            &upload(&source, &destination),
+            &h,
+            &CancellationToken::new()
+        )
+        .await
+        .is_err());
+        let items = h.items.lock().unwrap();
+        assert!(items
+            .iter()
+            .any(|i| i.result.contains("creation unconfirmed") && Path::new(&i.path).exists()));
+    });
+}
+
+#[test]
+fn staging_lifecycle_distinguishes_cancellation_and_publication_acknowledgement() {
+    use lablink_files::{transport::RemoteStageState, Publication};
+    use transfer::Boundary;
+    let Some(server) = Server::new(true) else {
+        return;
+    };
+    let source = server.path("data");
+    std::fs::write(&source, b"verified bytes").unwrap();
+    for (boundary, state, published) in [
+        (Boundary::StageCreated, RemoteStageState::Created, false),
+        (Boundary::BeforePublish, RemoteStageState::Created, false),
+        (Boundary::Published, RemoteStageState::Published, true),
+    ] {
+        let destination = server.path(&format!("destination-{boundary:?}"));
+        std::fs::create_dir(&destination).unwrap();
+        runtime().block_on(async {
+            let c = CancellationToken::new();
+            let conn = Connection::connect(&server.target, &c).await.unwrap();
+            let mut h = hooks(ConflictAction::Skip);
+            let token = c.clone();
+            h.checkpoint = Some(Arc::new(move |p| {
+                if p.boundary == boundary {
+                    token.cancel();
+                }
+                Ok(())
+            }));
+            assert!(matches!(
+                transfer::run(&conn, &upload(&source, &destination), &h, &c).await,
+                Err(Error::Cancelled)
+            ));
+            let records = conn.stage_diagnostics();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].state, state);
+            assert_eq!(destination.join("data").exists(), published);
+            assert_eq!(
+                h.progress.lock().unwrap().publication,
+                if published {
+                    Publication::Confirmed
+                } else {
+                    Publication::NotRequested
+                }
+            );
+            conn.cleanup().await;
+            assert!(Path::new(&records[0].path).exists());
+            if published {
+                assert_eq!(
+                    std::fs::read(destination.join("data")).unwrap(),
+                    b"verified bytes"
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn publication_refusal_has_uncertain_stage_diagnostic_and_preserves_competitor() {
+    use lablink_files::transport::RemoteStageState;
+    use transfer::Boundary;
+    let Some(server) = Server::new(true) else {
+        return;
+    };
+    let source = server.path("data");
+    let destination = server.path("destination");
+    std::fs::write(&source, b"ours").unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    runtime().block_on(async {
+        let c = CancellationToken::new();
+        let conn = Connection::connect(&server.target, &c).await.unwrap();
+        let mut h = hooks(ConflictAction::Skip);
+        let competing = destination.join("data");
+        h.checkpoint = Some(Arc::new(move |p| {
+            if p.boundary == Boundary::RemoteStageVerified {
+                std::fs::write(&competing, b"competitor").unwrap();
+            }
+            Ok(())
+        }));
+        assert!(transfer::run(&conn, &upload(&source, &destination), &h, &c)
+            .await
+            .is_err());
+        assert_eq!(
+            conn.stage_diagnostics()[0].state,
+            RemoteStageState::PublicationUncertain
+        );
+        conn.cleanup().await;
+        assert_eq!(
+            std::fs::read(destination.join("data")).unwrap(),
+            b"competitor"
+        );
+    });
+}
+
+/// REMOVE denial is a server capability test. LabLink does not attempt cleanup,
+/// so this is evidence of explicit retention, not successful remote deletion.
+#[test]
+fn remote_remove_denied_retains_successful_alias_without_cleanup_requests() {
+    use lablink_files::transport::RemoteStageState;
+    let Some(server) = Server::with_sftp_policy(Some("-P remove,rmdir")) else {
+        return;
+    };
+    let source = server.path("data");
+    let destination = server.path("destination");
+    std::fs::write(&source, b"published").unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    runtime().block_on(async {
+        let c = CancellationToken::new();
+        let conn = Connection::connect(&server.target, &c).await.unwrap();
+        let h = hooks(ConflictAction::Skip);
+        transfer::run(&conn, &upload(&source, &destination), &h, &c).await.unwrap();
+        let stages = conn.stage_diagnostics();
+        assert_eq!(stages[0].state, RemoteStageState::Published);
+        // Explicit test-only denial probe on the disposable server.
+        assert!(matches!(conn.sftp.remove(stages[0].path.clone()).await, Err(russh_sftp::client::error::Error::Status(s)) if s.status_code == russh_sftp::protocol::StatusCode::PermissionDenied));
+        conn.cleanup().await;
+        conn.cleanup().await;
+        assert_eq!(std::fs::read(&stages[0].path).unwrap(), b"published");
+        assert_eq!(std::fs::read(destination.join("data")).unwrap(), b"published");
+        assert!(stages[0].state.diagnostic().contains("hardlink retained"));
+    });
+}
+
+#[test]
+fn missing_destination_directories_fail_before_staging_or_publication() {
+    let Some(server) = Server::new(true) else {
+        return;
+    };
+    let source = server.path("data");
+    std::fs::write(&source, b"ours").unwrap();
+    let missing = server.path("missing/destination");
+    runtime().block_on(async {
+        let c = CancellationToken::new();
+        let conn = Connection::connect(&server.target, &c).await.unwrap();
+        for job in [upload(&source, &missing), download(&source, &missing)] {
+            let h = hooks(ConflictAction::Skip);
+            assert!(transfer::run(&conn, &job, &h, &c).await.is_err());
+            assert_eq!(h.progress.lock().unwrap().files_done, 0);
+            assert!(conn.stage_diagnostics().is_empty());
+            assert!(!missing.exists());
+        }
+        assert_eq!(std::fs::read(&source).unwrap(), b"ours");
+    });
+}
+
+#[test]
+fn interrupted_download_reports_failed_local_cleanup_without_deleting_foreign_entry() {
+    use transfer::Boundary;
+    let Some(server) = Server::new(true) else {
+        return;
+    };
+    let source = server.path("data");
+    let destination = server.path("destination");
+    std::fs::write(&source, b"ours").unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    let foreign = Arc::new(Mutex::new(None));
+    runtime().block_on(async {
+        let c = CancellationToken::new();
+        let conn = Connection::connect(&server.target, &c).await.unwrap();
+        let mut h = hooks(ConflictAction::Skip);
+        let token = c.clone();
+        let root = destination.clone();
+        let saved = foreign.clone();
+        h.checkpoint = Some(Arc::new(move |p| {
+            if p.boundary == Boundary::StageCreated {
+                let entry = root.join(p.staging.unwrap()).join("foreign");
+                std::fs::write(&entry, b"foreign evidence").unwrap();
+                *saved.lock().unwrap() = Some(entry);
+                token.cancel();
+            }
+            Ok(())
+        }));
+        assert!(matches!(
+            transfer::run(&conn, &download(&source, &destination), &h, &c).await,
+            Err(Error::Cancelled)
+        ));
+        assert!(!destination.join("data").exists());
+        assert!(h
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|i| i.result.contains("directory cleanup failed")));
+        assert_eq!(
+            std::fs::read(foreign.lock().unwrap().as_ref().unwrap()).unwrap(),
+            b"foreign evidence"
+        );
+    });
+}
+
+/// The server really commits the hardlink; only its reply is suppressed.
+#[test]
+fn lost_publication_reply_reports_uncertainty_with_complete_destination() {
+    use lablink_files::{transport::RemoteStageState, Publication};
+    let Some(mut server) = Server::new(true) else {
+        return;
+    };
+    let source = server.path("data");
+    let destination = server.path("destination");
+    std::fs::write(&source, b"complete verified bytes").unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    let wrapper = server.path("drop-publication-reply");
+    std::fs::write(&wrapper, r#"#!/usr/bin/python3
+import subprocess, sys, threading
+child = subprocess.Popen(['/usr/bin/ssh', *sys.argv[1:]], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+publication = set()
+def requests():
+    while True:
+        header = sys.stdin.buffer.read(4)
+        if len(header) != 4:
+            break
+        packet = sys.stdin.buffer.read(int.from_bytes(header, 'big'))
+        if packet and packet[0] == 200 and b'hardlink@openssh.com' in packet:
+            publication.add(packet[1:5])
+        child.stdin.write(header + packet)
+        child.stdin.flush()
+threading.Thread(target=requests, daemon=True).start()
+try:
+    while True:
+        header = child.stdout.read(4)
+        if len(header) != 4:
+            break
+        packet = child.stdout.read(int.from_bytes(header, 'big'))
+        if packet and packet[0] == 101 and packet[1:5] in publication:
+            break
+        sys.stdout.buffer.write(header + packet)
+        sys.stdout.buffer.flush()
+finally:
+    child.kill()
+    child.wait()
+"#).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    server.target.binary = wrapper.to_str().unwrap().into();
+    let daemon = Daemon::new(&server);
+    runtime().block_on(async {
+        let h = hooks(ConflictAction::Skip);
+        assert!(worker::execute_job(
+            &daemon.socket,
+            &upload(&source, &destination),
+            &h,
+            &CancellationToken::new()
+        )
+        .await
+        .is_err());
+        let progress = h.progress.lock().unwrap();
+        assert_eq!(progress.publication, Publication::Uncertain);
+        assert_eq!(progress.files_done, 0); // no acknowledgement of this real commit
+        let items = h.items.lock().unwrap();
+        assert!(items.iter().any(|i| i.result
+            == RemoteStageState::PublicationUncertain.diagnostic()
+            && std::fs::read(&i.path).unwrap() == b"complete verified bytes"));
+        assert_eq!(
+            std::fs::read(destination.join("data")).unwrap(),
+            b"complete verified bytes"
+        );
+    });
+}

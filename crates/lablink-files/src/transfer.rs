@@ -1,5 +1,5 @@
 use crate::staging::{same_inode, LocalLease, LocalStage};
-use crate::transport::Connection;
+use crate::transport::{Connection, RemoteStageState};
 use crate::{
     check_cancel, fs, remote_join, validate_name, ConflictAction, Direction, Error, Job, Kind,
     Outcome, Progress, Publication, Result,
@@ -485,6 +485,7 @@ impl Engine<'_> {
         self.verify()?;
         fs::remote_dir(&self.connection.sftp, parent).await?;
         self.verify()?;
+        self.connection.plan_stage(&temporary);
         let handle = self
             .connection
             .sftp
@@ -498,12 +499,8 @@ impl Engine<'_> {
             )
             .await?
             .handle;
-        // Only acknowledged exclusive creation is recorded. Candidates are never removed.
         self.connection
-            .staging
-            .lock()
-            .unwrap()
-            .push(temporary.clone());
+            .stage_state(&temporary, RemoteStageState::Created);
         self.progress.publication = Publication::NotRequested;
         self.checkpoint(Boundary::StageCreated, dest, Some(&temporary))?;
         self.verify()?;
@@ -661,6 +658,8 @@ impl Engine<'_> {
         }
         self.verify()?;
         self.progress.publication = Publication::Requested;
+        self.connection
+            .stage_state(&temporary, RemoteStageState::PublicationRequested);
         self.publish("Publishing; interruption can leave outcome uncertain");
         let result = self
             .connection
@@ -670,10 +669,14 @@ impl Engine<'_> {
         if let Err(error) = result {
             // Errors do not prove a remote/network filesystem did not commit.
             self.progress.publication = Publication::Uncertain;
+            self.connection
+                .stage_state(&temporary, RemoteStageState::PublicationUncertain);
             self.publish("Publication failed; staging retained");
             return Err(error.into());
         }
         self.progress.publication = Publication::Confirmed;
+        self.connection
+            .stage_state(&temporary, RemoteStageState::Published);
         self.progress.files_done += 1;
         record_item(
             &self.hooks.items,
@@ -860,6 +863,16 @@ impl Engine<'_> {
             return Err(Error::Refused("Remote source changed while opening".into()));
         }
         let mut stage = LocalStage::create(parent)?;
+        let items = self.hooks.items.clone();
+        stage.set_cleanup_reporter(Arc::new(move |path, message| {
+            record_item(
+                &items,
+                ItemResult {
+                    path,
+                    result: message,
+                },
+            );
+        }));
         let temporary = stage.name().to_owned();
         self.progress.publication = Publication::NotRequested;
         self.checkpoint(Boundary::StageCreated, &node.remote_path, Some(&temporary))?;

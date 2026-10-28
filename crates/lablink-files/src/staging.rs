@@ -5,6 +5,9 @@ use crate::{fs, validate_name, Error, Result};
 use cap_fs_ext::DirExt;
 use cap_std::fs::{Dir, DirBuilder, DirBuilderExt, File, Metadata, MetadataExt};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::sync::Arc;
+
+type CleanupReporter = Arc<dyn Fn(String, String) + Send + Sync>;
 
 pub struct LocalLease {
     _directory: Dir,
@@ -43,6 +46,7 @@ pub struct LocalStage {
     directory_identity: Metadata,
     name: String,
     pub file: File,
+    cleanup_reporter: Option<CleanupReporter>,
 }
 impl LocalStage {
     pub fn create(parent: &Dir) -> Result<Self> {
@@ -73,10 +77,20 @@ impl LocalStage {
             directory_identity,
             name,
             file,
+            cleanup_reporter: None,
         })
     }
     pub fn name(&self) -> &str {
         &self.name
+    }
+    /// Report retention and failed cleanup without granting deletion authority.
+    pub fn set_cleanup_reporter(&mut self, reporter: CleanupReporter) {
+        self.cleanup_reporter = Some(reporter);
+    }
+    fn report_cleanup(&self, message: String) {
+        if let Some(report) = &self.cleanup_reporter {
+            report(self.name.clone(), message);
+        }
     }
     pub fn verify(&self) -> Result<()> {
         let entry = self.directory.symlink_metadata("payload")?;
@@ -101,17 +115,45 @@ impl LocalStage {
 impl Drop for LocalStage {
     fn drop(&mut self) {
         // Never recurse, never scan prefixes, and never unlink an unproven entry.
-        if let Ok(entry) = self.directory.symlink_metadata("payload") {
-            if entry.is_file() && self.file.metadata().is_ok_and(|m| same_inode(&entry, &m)) {
-                let _ = self.directory.remove_file("payload");
+        match self.directory.symlink_metadata("payload") {
+            Ok(entry)
+                if entry.is_file()
+                    && self.file.metadata().is_ok_and(|m| same_inode(&entry, &m)) =>
+            {
+                if let Err(error) = self.directory.remove_file("payload") {
+                    self.report_cleanup(format!(
+                        "Local staging payload cleanup failed; retained for inspection: {}",
+                        Error::Io(error).user_message()
+                    ));
+                }
             }
+            Ok(_) => self.report_cleanup(
+                "Local staging payload identity unproven; retained without deletion".into(),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => self.report_cleanup(format!(
+                "Local staging payload inspection failed; no deletion attempted: {}",
+                Error::Io(error).user_message()
+            )),
         }
-        if self
-            .parent
-            .symlink_metadata(&self.name)
-            .is_ok_and(|m| m.is_dir() && same_inode(&m, &self.directory_identity))
-        {
-            let _ = self.parent.remove_dir(&self.name); // refuses non-empty directories
+        match self.parent.symlink_metadata(&self.name) {
+            Ok(entry) if entry.is_dir() && same_inode(&entry, &self.directory_identity) => {
+                // Refuses non-empty directories. Never recurse or retry by prefix.
+                if let Err(error) = self.parent.remove_dir(&self.name) {
+                    self.report_cleanup(format!(
+                        "Local staging directory cleanup failed; retained for inspection: {}",
+                        Error::Io(error).user_message()
+                    ));
+                }
+            }
+            Ok(_) => self.report_cleanup(
+                "Local staging directory identity unproven; retained without deletion".into(),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => self.report_cleanup(format!(
+                "Local staging directory inspection failed; no deletion attempted: {}",
+                Error::Io(error).user_message()
+            )),
         }
     }
 }

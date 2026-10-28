@@ -276,14 +276,12 @@ pub async fn execute_job(
             progress.publication = crate::Publication::Uncertain;
         }
     }
-    for path in connection.retained_stages() {
+    for stage in connection.stage_diagnostics() {
         record_item(
             &hooks.items,
             ItemResult {
-                path,
-                result:
-                    "Private remote staging retained; no ownership-safe SFTP deletion primitive"
-                        .into(),
+                path: stage.path,
+                result: stage.state.diagnostic().into(),
             },
         );
     }
@@ -358,11 +356,36 @@ async fn browse(socket: &std::path::Path, command: BrowseCmd, cancel: &Cancellat
         }
     }
     .await
-    .map_err(|e: Error| e.to_string());
+    .map_err(browse_error);
     Event::Listed {
         generation,
         device,
         side,
         result,
+    }
+}
+
+fn browse_error(error: Error) -> String {
+    error.user_message()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn browse_status_errors_hide_hostile_server_instructions() {
+        let error = Error::Sftp(russh_sftp::client::error::Error::Status(
+            russh_sftp::protocol::Status {
+                id: 1,
+                status_code: russh_sftp::protocol::StatusCode::PermissionDenied,
+                error_message: "server\u{202e}\nspoofed instructions".into(),
+                language_tag: String::new(),
+            },
+        ));
+        let text = browse_error(error);
+        assert!(text.contains("permission denied"));
+        assert!(!text.contains("spoofed"));
+        assert!(!text.chars().any(char::is_control));
+        assert!(!text.contains('\u{202e}'));
     }
 }

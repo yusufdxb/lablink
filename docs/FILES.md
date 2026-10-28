@@ -44,8 +44,11 @@ operations. Recursive transfers are not transactional: completed siblings and
 created directories can remain after a later failure.
 
 Remote staging files are retained, including successful hardlink aliases and
-interrupted partial uploads. No prefix-based cleanup is attempted. Remove them
+interrupted partial uploads. No prefix-based cleanup is attempted. Inspect them
 only when their ownership and lack of active use are independently established.
+The queue distinguishes unconfirmed creation, acknowledged staging and uncertain
+or confirmed publication. A diagnostic path is never permission to delete.
+Local staging cleanup failures are visible in item diagnostics.
 Cancellation or trust revocation cannot undo already acknowledged server writes
 or publication. Trust is checked periodically and is not an instantaneous lease.
 
@@ -56,6 +59,9 @@ rereads narrow these windows but do not guarantee snapshot integrity or path
 containment against that actor. Local permissions and advisory locks likewise
 do not constrain hostile same-UID or root namespace mutation. These limitations
 are covered by deterministic reproduction tests and remain unresolved.
+
+See [architecture](files/ARCHITECTURE.md), [security review](files/SECURITY_REVIEW.md)
+and [validation](files/VALIDATION.md) for the lifecycle, threat boundary and tests.
 
 Linux validation does not establish native macOS, Wayland, physical storage
 exhaustion, power-loss durability or accessibility support. Refer to actual
