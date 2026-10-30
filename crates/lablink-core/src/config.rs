@@ -1942,11 +1942,14 @@ mod yaml_parser_migration_tests {
 
     #[test]
     fn released_example_survives_config_round_trip() {
-        let original = Config::parse(include_str!("../../../config/example.yaml"), "released-example")
-            .expect("published example must continue to parse");
+        let original = Config::parse(
+            include_str!("../../../config/example.yaml"),
+            "released-example",
+        )
+        .expect("published example must continue to parse");
         let emitted = original.to_yaml();
-        let reparsed = Config::parse(&emitted, "reparsed")
-            .expect("serialized example must remain readable");
+        let reparsed =
+            Config::parse(&emitted, "reparsed").expect("serialized example must remain readable");
         assert_eq!(original, reparsed);
     }
 
@@ -1954,10 +1957,12 @@ mod yaml_parser_migration_tests {
     fn legacy_layout_and_quoted_unicode_survive_migration() {
         let legacy = "networks:\n  - name: lan\n    cidr: 10.42.0.0/24\ndevices:\n  - name: robot-a\n    label: \"Rōbot: α\"\n";
         assert!(uses_legacy_layout(legacy));
-        let config = Config::parse(legacy, "legacy")
-            .expect("legacy site layout must be supported");
+        let config = Config::parse(legacy, "legacy").expect("legacy site layout must be supported");
         assert_eq!(config.sites[0].id, DEFAULT_SITE_ID);
-        assert_eq!(config.sites[0].devices[0].label.as_deref(), Some("Rōbot: α"));
+        assert_eq!(
+            config.sites[0].devices[0].label.as_deref(),
+            Some("Rōbot: α")
+        );
         let emitted = config.to_yaml();
         assert!(!uses_legacy_layout(&emitted));
         assert_eq!(config, Config::parse(&emitted, "migrated").unwrap());
@@ -1965,7 +1970,11 @@ mod yaml_parser_migration_tests {
 
     #[test]
     fn duplicate_keys_and_multiple_documents_are_not_silently_accepted() {
-        assert!(Config::parse("daemon:\n  check_interval_s: 5\n  check_interval_s: 6\n", "duplicate").is_err());
+        assert!(Config::parse(
+            "daemon:\n  check_interval_s: 5\n  check_interval_s: 6\n",
+            "duplicate"
+        )
+        .is_err());
         assert!(Config::parse("sites: []\n---\nssh: {}\n", "multidoc").is_err());
     }
 }
