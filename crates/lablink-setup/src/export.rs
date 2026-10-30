@@ -20,7 +20,7 @@ use lablink_core::config::{
 };
 use lablink_core::model::{DeviceDetail, PortState};
 use serde::{Deserialize, Serialize};
-use serde_yaml_ng::{Mapping, Value};
+use yaml_serde::{Mapping, Value};
 
 /// Export format version.
 pub const FORMAT: u32 = 1;
@@ -142,7 +142,7 @@ pub fn build(
 
 impl ExportDoc {
     pub fn to_yaml(&self) -> String {
-        let cfg: Value = serde_yaml_ng::from_str(&self.config.to_yaml()).unwrap_or(Value::Null);
+        let cfg: Value = yaml_serde::from_str(&self.config.to_yaml()).unwrap_or(Value::Null);
         let mut m = Mapping::new();
         m.insert("lablink_export".into(), Value::from(self.lablink_export));
         m.insert(
@@ -160,7 +160,7 @@ impl ExportDoc {
         );
         format!(
             "# LabLink export. Contains no private keys, passwords or secrets.\n# Import with: lablink import <file>   (host-key pins are dropped unless --trust-pins)\n{}",
-            serde_yaml_ng::to_string(&Value::Mapping(m)).unwrap_or_default()
+            yaml_serde::to_string(&Value::Mapping(m)).unwrap_or_default()
         )
     }
 }
@@ -175,7 +175,7 @@ pub fn parse(text: &str) -> Result<ExportDoc, String> {
     lablink_core::config::check_yaml_nesting(text)
         .map_err(|e| format!("not a LabLink export: {e}"))?;
     let doc: ExportDoc =
-        serde_yaml_ng::from_str(text).map_err(|e| format!("not a LabLink export: {e}"))?;
+        yaml_serde::from_str(text).map_err(|e| format!("not a LabLink export: {e}"))?;
     if doc.lablink_export != FORMAT {
         return Err(format!(
             "unsupported export format {} (this LabLink reads format {FORMAT})",
