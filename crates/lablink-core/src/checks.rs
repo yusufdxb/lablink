@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(f[2], CheckSpec::Reach(ReachCheck::default()));
         assert_eq!(f[3], CheckSpec::Ros2(Ros2Check::default()));
         // Serialization round-trips through the same parser.
-        let again = parse(&serde_yaml_ng::to_string(&c).unwrap()).unwrap();
+        let again = parse(&yaml_serde::to_string(&c).unwrap()).unwrap();
         assert_eq!(c, again);
     }
 

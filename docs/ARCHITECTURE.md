@@ -24,7 +24,7 @@ open items are listed at the end.
 
 | Crate | Kind | Responsibility | Notable dependencies |
 |---|---|---|---|
-| `lablink-core` | lib | Config parsing and validation (sites, migration of the single-site layout), CIDR allowlist and scan limits, health state machines, identity classification, site detection (`site`), status/color model, IPC protocol, blocking IPC client, exit codes. Pure and synchronous. | serde, serde_yaml_ng, ipnet |
+| `lablink-core` | lib | Config parsing and validation (sites, migration of the single-site layout), CIDR allowlist and scan limits, health state machines, identity classification, site detection (`site`), status/color model, IPC protocol, blocking IPC client, exit codes. Pure and synchronous. | serde, yaml_serde, ipnet |
 | `lablink-platform` | lib | Platform-specific, read-only site signals: default gateways (`/proc/net/route`), ARP lookups, Wi-Fi SSID (`SIOCGIWESSID`). See [PORTABILITY.md](PORTABILITY.md). | libc |
 | `lablink-ssh` | lib | Builds OpenSSH argument vectors, runs `ssh`/`ssh-keyscan`/`ssh-keygen` with timeouts and process-group kill, parses keys, computes `SHA256:` fingerprints, writes the pinned known_hosts file, classifies ssh failures. Synchronous. | sha2, base64, libc |
 | `lablink-discovery` | lib | rtnetlink dump and event monitor (links, addresses, neighbor table), unprivileged ICMP echo, TCP connect probe, bounded-concurrency sweep runner, mDNS browse and `.local` resolution. | tokio, socket2, mdns-sd |
