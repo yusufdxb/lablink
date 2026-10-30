@@ -1,0 +1,36 @@
+# Temporary release-preparation workflow. Must be deleted before the PR is merged.
+name: v0.3.2 dependency records bootstrap
+on:
+  push:
+    branches: [release/v0.3.2-prep]
+permissions:
+  contents: write
+jobs:
+  regenerate:
+    if: github.ref == 'refs/heads/release/v0.3.2-prep'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: true
+      - run: rustup toolchain install
+      - name: Update lockfile only for workspace release version
+        run: |
+          cargo metadata --format-version 1 > /dev/null
+          if grep -Eq '^name = "(serde_yaml_ng|unsafe-libyaml)"$' Cargo.lock; then
+            echo "Obsolete YAML dependency found" >&2
+            exit 1
+          fi
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-about
+      - run: scripts/third-party.sh
+      - name: Commit generated records to release branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock THIRD_PARTY_LICENSES.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "chore: regenerate v0.3.2 dependency and license records"
+          git push origin HEAD:release/v0.3.2-prep
