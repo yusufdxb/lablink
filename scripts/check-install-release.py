@@ -16,7 +16,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_URL = "https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh"
-INSTALL_COMMAND = f"curl -fsSL {SCRIPT_URL} | bash"
+INSTALL_COMMAND = f'bash -c \'installer=$(curl -fsSL {SCRIPT_URL}) && bash <<< "$installer"\''
 RELEASE_ROOT = "https://github.com/yusufdxb/lablink/releases/download"
 
 

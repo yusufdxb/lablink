@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Real release installation in a fresh disposable Ubuntu container. No mocks.
+# Real release installation in a fresh disposable Ubuntu container.
+# --local substitutes only the bootstrap response; release downloads are real.
 # BASE=ubuntu:22.04 scripts/test-install-linux-containers.sh
 # After publishing main, add --published to exercise the exact README command.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 base=${BASE:-ubuntu:22.04}
 mode=${1:---local}
-case "$mode" in --local|--published) ;; *) echo 'Usage: test-install-linux-containers.sh [--local|--published]' >&2; exit 2 ;; esac
+case "$mode" in --local|--branch|--published) ;; *) echo 'Usage: test-install-linux-containers.sh [--local|--branch|--published]' >&2; exit 2 ;; esac
 case "$base" in ubuntu:20.04|ubuntu:22.04|ubuntu:24.04) ;; *) echo 'Unsupported test BASE' >&2; exit 2 ;; esac
 command -v docker >/dev/null
 work_dir=$(mktemp -d)
@@ -26,6 +27,7 @@ FROM ${BASE}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates sudo \
     && useradd --create-home --uid 12345 --shell /bin/bash tester \
+    && useradd --create-home --uid 12346 --shell /bin/bash denied \
     && printf 'tester ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/tester \
     && chmod 0440 /etc/sudoers.d/tester
 USER tester
@@ -43,18 +45,54 @@ docker exec -u root "$container" bash -c '
 docker exec -i "$container" bash -s -- "$mode" <<'TEST'
 set -euo pipefail
 mode=$1
+# Run exactly the first command documented in README, in a normal shell that
+# does not inherit this harness's pipefail option.
+install_command=$(awk '/^```bash$/ { getline; print; exit }' /src/README.md)
+mkdir -m 0755 /tmp/bootstrap-bin
+cat > /tmp/bootstrap-bin/curl <<'CURL'
+#!/usr/bin/env bash
+url=${!#}
+if [[ $url == https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh ]]; then
+    case "$BOOTSTRAP_MODE" in
+        --local) cat /src/scripts/install-linux.sh; exit ;;
+        --branch)
+            arguments=("$@")
+            arguments[${#arguments[@]}-1]=https://raw.githubusercontent.com/yusufdxb/lablink/feat/linux-one-command-installer/scripts/install-linux.sh
+            exec /usr/bin/curl "${arguments[@]}"
+            ;;
+        404)
+            exec /usr/bin/curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/.installer-bootstrap-missing-test
+            ;;
+    esac
+fi
+exec /usr/bin/curl "$@"
+CURL
+chmod 0755 /tmp/bootstrap-bin/curl
+export PATH="/tmp/bootstrap-bin:$PATH" BOOTSTRAP_MODE="$mode"
 install_lablink() {
-    if [[ $mode == --published ]]; then
-        # Deliberately identical to the command published in README.md.
-        curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh | bash
-    else
-        # Local candidate, real HTTPS GitHub release assets and real sudo/apt.
-        cat /src/scripts/install-linux.sh | bash
-    fi
+    env -u SHELLOPTS /bin/bash --noprofile --norc -c "$install_command"
 }
 ! command -v lablink
 ! dpkg-query -W lablink 2>/dev/null
 for utility in rustc cargo git gh; do ! command -v "$utility"; done
+set +e
+BOOTSTRAP_MODE=404 install_lablink
+bootstrap_status=$?
+set -e
+[[ $bootstrap_status == 22 ]]
+printf 'PASS: exact README command returns 22 for real HTTP 404\n'
+# A real sudo denial, before the first successful install. No mock APT or
+# package data: this user cannot obtain administrator privileges.
+set +e
+sudo -u denied env HOME=/home/denied PATH="$PATH" BOOTSTRAP_MODE="$mode" \
+    /bin/bash --noprofile --norc -c "$install_command" > /tmp/denied-install.log 2>&1
+denied_status=$?
+set -e
+[[ $denied_status != 0 ]]
+grep -q 'apt installation failed' /tmp/denied-install.log
+! dpkg-query -W lablink 2>/dev/null
+! find /tmp -maxdepth 1 -name 'lablink-install.*' | grep .
+printf 'PASS: exact README command returns nonzero on denied sudo; no package installed\n'
 install_lablink
 printf 'PASS: clean installation of the official release\n'
 for binary in lablink lablinkd lablink-gui; do

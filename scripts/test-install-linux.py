@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ VERSION = SOURCE.split("readonly RELEASE_VERSION='")[1].split("'")[0]
 PACKAGE = f"lablink_{VERSION}_amd64.deb"
 PAYLOAD = b"isolated package fixture\n"
 DIGEST = hashlib.sha256(PAYLOAD).hexdigest()
+INSTALL_COMMAND = re.search(r"```bash\n([^\n]+)\n```", (ROOT / "README.md").read_text()).group(1)
 
 DISPATCH = r'''
 import hashlib, json, os, pathlib, signal, subprocess, sys
@@ -50,6 +52,15 @@ elif name == 'dpkg-deb':
     print(cfg.get('metadata', {}).get(key, {'Package': 'lablink', 'Version': version, 'Architecture': 'amd64'}[key]))
 elif name == 'curl':
     url = args[-1]
+    if url == 'https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh':
+        mode = cfg.get('bootstrap', '')
+        if mode == '404': sys.exit(22)
+        if mode == 'interrupted':
+            # A valid executable prefix must never run after a failed transfer.
+            print('printf executed > "$INSTALL_FIXTURE/partial-executed"', flush=True)
+            sys.exit(18)
+        sys.stdout.write((root / 'install.sh').read_text())
+        sys.exit(0)
     asset = url.rsplit('/', 1)[-1]
     assert url == 'https://github.com/yusufdxb/lablink/releases/download/v' + version + '/' + asset
     assert args[args.index('--proto') + 1] == '=https'
@@ -116,7 +127,7 @@ class InstallerTests(unittest.TestCase):
         (self.root / "dispatcher").write_text(self.dispatcher)
         for utility in ("uname", "curl", "dpkg", "dpkg-query", "dpkg-deb", "sudo", "apt"):
             self.stub(self.root / "tools" / utility)
-        for utility in ("sha256sum", "mktemp", "rm", "chmod", "awk"):
+        for utility in ("bash", "sha256sum", "mktemp", "rm", "chmod", "awk"):
             (self.root / "tools" / utility).symlink_to(shutil.which(utility))
         self.stub(self.root / "loader")
         (self.root / "ca-certificates.crt").write_text("fixture CA presence check\n")
@@ -146,11 +157,13 @@ class InstallerTests(unittest.TestCase):
         for name in ("lablink", "lablinkd", "lablink-gui"):
             self.stub(self.root / "binaries" / name)
 
-    def run_installer(self, success=False):
+    def run_installer(self, success=False, bootstrap=True):
         (self.root / "scenario.json").write_text(json.dumps(self.cfg))
-        # Piped execution checks that the installer reads its complete source
-        # before sudo and prevents apt from consuming any remaining script.
-        result = subprocess.run(["/bin/bash"], input=self.script.read_text(), text=True, capture_output=True, env=self.env, timeout=15)
+        # Execute the literal README command, including both nested shells.
+        # Only curl and the existing isolated OS/package fixtures are replaced.
+        command = ["/bin/bash", "--noprofile", "--norc", "-c", INSTALL_COMMAND] if bootstrap else ["/bin/bash"]
+        result = subprocess.run(command, input=None if bootstrap else self.script.read_text(),
+                                text=True, capture_output=True, env=self.env, timeout=15)
         self.output = result.stdout + result.stderr
         if success:
             self.assertEqual(result.returncode, 0, self.output)
@@ -188,7 +201,20 @@ class InstallerTests(unittest.TestCase):
         self.existing()
         self.run_installer(success=True)
         self.no_install()
-        self.assertFalse(any(e[0] == "curl" for e in self.events))
+        self.assertFalse(any(e[0] == "curl" and "/releases/download/" in e[-1] for e in self.events))
+
+    def test_documented_command_returns_nonzero_on_http_404(self):
+        self.cfg["bootstrap"] = "404"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 22)
+        self.no_install()
+
+    def test_documented_command_never_executes_an_interrupted_download(self):
+        self.cfg["bootstrap"] = "interrupted"
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 18)
+        self.assertFalse((self.root / "partial-executed").exists())
+        self.no_install()
 
     def test_newer_installed_release_is_not_downgraded(self):
         self.existing("99.0.0")
@@ -238,9 +264,15 @@ class InstallerTests(unittest.TestCase):
 
     def test_missing_curl_has_actionable_error(self):
         (self.root / "tools" / "curl").unlink()
-        self.run_installer()
+        self.run_installer(bootstrap=False)
         self.assertIn("Missing prerequisite: curl", self.output)
         self.assertIn("sudo apt install", self.output)
+        self.no_install()
+
+    def test_documented_command_reports_missing_curl(self):
+        (self.root / "tools" / "curl").unlink()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 127)
         self.no_install()
 
     def test_missing_ca_certificates_has_actionable_error(self):

@@ -13,7 +13,7 @@ For **Ubuntu 20.04, 22.04 or 24.04 LTS on x86_64 (AMD64)**, paste this into
 a terminal as your normal user:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh | bash
+bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh) && bash <<< "$installer"'
 ```
 
 Then set up your first site:

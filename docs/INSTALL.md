@@ -9,8 +9,11 @@ supported by this installer. No Rust, Cargo, Git or GitHub CLI is required.
 Open a terminal as your normal user and paste:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh | bash
+bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh) && bash <<< "$installer"'
 ```
+
+The command executes the script only after its download finishes successfully.
+Download and installation failures return a nonzero exit status.
 
 Then complete the supported onboarding process:
 

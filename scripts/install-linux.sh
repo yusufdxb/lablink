@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install an official release. Update this only after that release's assets
 # are published; the public main/scripts/install-linux.sh URL stays unchanged.
-# Keep the whole program in main so curl | bash reads it before running sudo.
+# The documented bootstrap downloads the complete script before execution.
 main() (
     set -Eeuo pipefail
     umask 077
