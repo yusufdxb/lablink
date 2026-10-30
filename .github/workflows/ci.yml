@@ -82,7 +82,8 @@ jobs:
       - run: |
           docker run --rm -v "$PWD:/repo:ro" \
             zricethezav/gitleaks:v8.21.2@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46 \
-            git /repo --log-opts=--all --config /repo/.gitleaks.toml --redact
+            git /repo --log-opts=--all --config /repo/.gitleaks.toml \
+            --gitleaks-ignore-path /repo/.gitleaksignore --redact
 
   release:
     # Artifacts are built by scripts/release.sh in the pinned Ubuntu 20.04

@@ -1,0 +1,5 @@
+# Invalid PEM strings used to test redaction, not usable private keys.
+# Reviewed at the exact historical commit and line; OpenSSL rejects both.
+# New findings in these files or other commits remain subject to scanning.
+1431b14731d3117d1c0d69814676e25341864862:crates/lablink-ros/src/diagnose/tests.rs:private-key:577
+1431b14731d3117d1c0d69814676e25341864862:crates/lablink-ros/src/redact.rs:private-key:182

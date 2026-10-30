@@ -7,7 +7,9 @@ all-features = false
 [advisories]
 # Every RustSec advisory fails the check unless it is listed here with a
 # reason after investigation.
-ignore = []
+# Temporary unmaintained-parser exception; remove after the YAML migration:
+# https://github.com/yusufdxb/lablink/issues/13
+ignore = ["RUSTSEC-2024-0449"]
 
 [licenses]
 # Licenses compatible with distributing LabLink under Apache-2.0.

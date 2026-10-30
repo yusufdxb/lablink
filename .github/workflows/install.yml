@@ -1,0 +1,61 @@
+name: Linux installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/install-linux.sh
+      - scripts/test-install-linux*
+      - scripts/check-install-release.py
+      - README.md
+      - docs/INSTALL.md
+      - docs/RELEASING.md
+      - .github/workflows/install.yml
+  pull_request:
+    paths:
+      - scripts/install-linux.sh
+      - scripts/test-install-linux*
+      - scripts/check-install-release.py
+      - README.md
+      - docs/INSTALL.md
+      - docs/RELEASING.md
+      - .github/workflows/install.yml
+  workflow_dispatch:
+  schedule:
+    - cron: '19 9 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: shellcheck scripts/install-linux.sh scripts/test-install-linux-containers.sh
+      - run: python3 scripts/test-install-linux.py
+      # Assets are already published before RELEASE_VERSION is advanced.
+      - run: python3 scripts/check-install-release.py
+      - if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python3 scripts/check-install-release.py --published
+
+  ubuntu-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [ubuntu:20.04, ubuntu:22.04, ubuntu:24.04]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # The checkout script downloads and installs real official assets.
+      - run: BASE=${{ matrix.base }} scripts/test-install-linux-containers.sh
+      # Test exactly the public README command only after publication.
+      - if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: BASE=${{ matrix.base }} scripts/test-install-linux-containers.sh --published

@@ -7,6 +7,29 @@ allow, proves it is the machine you trusted (by its SSH host key, never by
 its IP address), tells you whether it is healthy, and connects you to it by
 name even after DHCP hands it a new address.
 
+## Quick Install
+
+For **Ubuntu 20.04, 22.04 or 24.04 LTS on x86_64 (AMD64)**, paste this into
+a terminal as your normal user:
+
+```bash
+bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh) && bash <<< "$installer"'
+```
+
+Then set up your first site:
+
+```bash
+lablink init
+```
+
+The installer downloads the official GitHub release, verifies its SHA-256
+checksum, and uses `sudo apt install` to install the package and dependencies.
+No Rust, Cargo, Git or GitHub CLI is required. ARM64 and other distributions
+are not supported by this installer. Desktop users can also open **LabLink**
+from their applications menu.
+
+See [installation, upgrades and troubleshooting](docs/INSTALL.md).
+
 It is a small per-user daemon (`lablinkd`), a CLI (`lablink`) and a desktop
 app (`lablink-gui`), written in Rust for Linux. The daemon runs as you (a
 systemd user service, no root), uses a few megabytes of memory and a fraction
@@ -31,10 +54,8 @@ lablink: jetson-a -> ops@10.42.0.31:22 (host key pinned by LabLink)
 
 ## Core workflow
 
-```text
-Install -> lablink init -> select/create a Site -> Discover -> Adopt
-        -> verify/trust the host key -> copy your SSH key -> Connect
-```
+After installation, create a site with `lablink init`, discover and adopt a
+device, verify its host key, copy your SSH key, and connect.
 
 ```bash
 lablink init                         # name this site, choose its networks, start the service
@@ -124,19 +145,9 @@ A **site** is a place you work at: a robotics lab, an office, a workshop, a
 club, a test facility, a home network. Each site has its own networks and
 devices:
 
-```text
-Site Alpha
-├── lab network        10.42.0.0/24
-├── robot network      192.168.50.0/24
-├── jetson-a
-├── robot-a            (reached through jetson-a)
-└── gpu-workstation
-
-Site Beta
-├── club network       10.20.30.0/24
-├── jetson
-└── robot-b
-```
+For example, Site Alpha can contain a lab network, a robot network, a
+workstation and a robot reached through another device. Site Beta can use
+different networks and devices, even if some device names overlap.
 
 - **Auto (the default).** LabLink infers where you are from non-secret
   signals: the subnets this computer is attached to, interface names, the
@@ -184,35 +195,13 @@ A configuration written before sites existed (top-level `networks:` and
 cache is migrated on first start. LabLink writes the `sites:` layout the next
 time it saves the file.
 
-## Install
+## Advanced installation alternatives
 
-Supported: **Ubuntu 20.04, 22.04 and 24.04 LTS** (x86_64). No Rust toolchain
-is needed. Download the release files and check them against `SHA256SUMS`:
-
-```bash
-sha256sum -c SHA256SUMS --ignore-missing
-```
-
-**Debian package** (installs `lablink`, `lablinkd`, `lablink-gui`, a systemd
-user unit, bash completion, a menu entry and an icon; pulls in the OpenSSH
-client; nothing starts until you run setup):
-
-```bash
-sudo apt install ./lablink_0.3.1_amd64.deb
-```
-
-**Tarball** (any x86_64 Linux with glibc 2.31 or newer, installs into
-`~/.local`, no root):
-
-```bash
-tar xzf lablink-0.3.1-x86_64-linux.tar.gz
-cd lablink-0.3.1-x86_64-linux && ./install.sh
-```
-
-Then run `lablink init` or open **LabLink** from the applications menu.
-Removing the package (or `./uninstall.sh`) keeps your configuration and
-pinned keys; see [docs/INSTALL.md](docs/INSTALL.md) for removal, purging and
-building from source.
+The [installation guide](docs/INSTALL.md#manual-installation-alternatives)
+includes verified downloads of the official `.deb` package and a rootless
+tarball. These are alternatives to [Quick Install](#quick-install).
+Removing either installation keeps your configuration and pinned keys unless
+you explicitly delete them.
 
 ## The desktop app
 

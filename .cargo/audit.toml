@@ -1,0 +1,4 @@
+[advisories]
+# Temporary unmaintained-parser exception; remove after the YAML migration:
+# https://github.com/yusufdxb/lablink/issues/13
+ignore = ["RUSTSEC-2024-0449"]
