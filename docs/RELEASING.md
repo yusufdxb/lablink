@@ -78,13 +78,61 @@ In CI, a `v*` tag also gets a Sigstore build-provenance attestation for the
   artifact's `SHA256SUMS` equals a local `scripts/release.sh` build, verify
   the attestations (below), then attach those files to the GitHub release.
 
+## Maintaining the one-command installer
+
+`scripts/install-linux.sh` selects an explicitly published release with its
+`RELEASE_VERSION` constant, initially `0.3.1`. It uses the existing release
+asset names, `lablink_0.3.1_amd64.deb` and `SHA256SUMS`, without a separate
+package host or APT repository. It always downloads the selected release's
+manifest; never embed a package checksum in the installer. Explicit tag
+selection supports prereleases and does not depend on `/releases/latest`.
+
+After a future release's assets have been published and verified:
+
+1. Update `RELEASE_VERSION` to that version in `scripts/install-linux.sh`.
+2. Update versioned manual download examples in `docs/INSTALL.md` and the
+   provenance example below to the same release. The public README command
+   remains unchanged.
+3. Run the installer regression checks:
+
+   ```bash
+   python3 scripts/test-install-linux.py
+   python3 scripts/check-install-release.py
+   for test_base in ubuntu:20.04 ubuntu:22.04 ubuntu:24.04; do
+       BASE="$test_base" scripts/test-install-linux-containers.sh
+   done
+   ```
+
+   The release check accesses GitHub to verify asset availability, download
+   URLs, checksums and documentation consistency. The Docker check uses real
+   release packages on clean Ubuntu 20.04, 22.04 and 24.04 containers. Failure
+   scenarios run in isolation; they must never alter the developer's own
+   package installation or LabLink configuration.
+4. Publish the installer update to `main` through the normal review process.
+   Test the exact README command on a fresh supported Ubuntu installation
+   after publication:
+
+   ```bash
+   python3 scripts/check-install-release.py --published
+   BASE=ubuntu:22.04 scripts/test-install-linux-containers.sh --published
+   ```
+
+   A local script test cannot prove that the raw `main` URL serves the
+   reviewed script.
+
+Keep the previously selected release while a new tag is being built or its
+assets are not yet available. Tagged CI builds and the installer target do
+not have to advance in the same commit; this avoids selecting assets before
+they have been published.
+
 ## Verifying a download
 
 ```bash
-sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify lablink_<version>_amd64.deb --repo yusufdxb/lablink \
+awk '$2 == "lablink_0.3.1_amd64.deb" || $2 == "./lablink_0.3.1_amd64.deb"' SHA256SUMS > package.sha256
+test "$(wc -l < package.sha256)" -eq 1 && sha256sum --check --strict package.sha256
+gh attestation verify lablink_0.3.1_amd64.deb --repo yusufdxb/lablink \
     --signer-workflow yusufdxb/lablink/.github/workflows/ci.yml \
-    --source-ref refs/tags/v<version> --deny-self-hosted-runners
+    --source-ref refs/tags/v0.3.1 --deny-self-hosted-runners
 ```
 
 The attestation proves the file was built by this repository's CI workflow
