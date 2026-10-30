@@ -112,7 +112,7 @@ jobs:
         run: |
           cd dist && sha256sum -c SHA256SUMS
           for f in *; do [ "$f" = SHA256SUMS ] || grep -q " ./$f$" SHA256SUMS || { echo "unlisted: $f"; exit 1; }; done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lablink-dist
           path: dist/
@@ -164,7 +164,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: BASE=${{ matrix.base }} scripts/cleanroom.sh "$RUNNER_TEMP/cleanroom"
       - if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cleanroom-${{ strategy.job-index }}
           path: ${{ runner.temp }}/cleanroom/
@@ -198,7 +198,7 @@ jobs:
           ref: 17a0e1f0d2104bac67e79df3a5fc98dac5640d5b
           persist-credentials: false
       - run: scripts/release.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lablink-baseline-0.3.0
           path: dist/lablink_0.3.0_amd64.deb
@@ -228,7 +228,7 @@ jobs:
           path: baseline/
       - run: BASE=${{ matrix.base }} scripts/upgrade-test.sh baseline/lablink_0.3.0_amd64.deb "$RUNNER_TEMP/upgrade"
       - if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: upgrade-${{ strategy.job-index }}
           path: ${{ runner.temp }}/upgrade/
