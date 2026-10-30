@@ -4,6 +4,36 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-10-30
+
+Patch beta release focused on repeatable Linux installation and configuration
+dependency maintenance. Existing device configuration and trust remain
+user-controlled; the installer does not initialize sites or start services.
+
+### Added
+
+- One-command Ubuntu 20.04, 22.04 and 24.04 AMD64 installation from GitHub
+  Releases, with HTTPS download, checksum verification, and failure-safe setup.
+- Public installation instructions, repeat-installation checks, and CI tests
+  for clean machines and installation failures.
+
+### Changed
+
+- Replace the unmaintained `serde_yaml_ng` / `unsafe-libyaml` dependency
+  chain with `yaml_serde` / maintained `libyaml-rs`.
+- Remove the temporary `RUSTSEC-2024-0449` audit waivers. This removes the
+  unmaintained dependency warning, but is not a claim of memory-safety proof.
+- Add tests covering released configuration examples, legacy single-site
+  migration, Unicode configuration values, and malformed YAML.
+
+### Upgrade notes
+
+- No automatic configuration, SSH trust or service changes during package
+  installation. Restart an already-running per-user daemon manually after
+  upgrading: `systemctl --user restart lablinkd`.
+- The public installation command remains unchanged. Its release selector
+  must be advanced **only after** v0.3.2 artifacts are published and verified.
+
 ## [0.3.1] - 2026-10-10
 
 Installing 0.3.1 over an earlier 0.3.0 build is no longer a same-version no-op.
@@ -187,5 +217,6 @@ Earlier in the 0.3.0 cycle:
 - LabLink no longer starts, restarts or stops a systemd user service whose
   manager runs with a different home or config directory.
 
+[0.3.2]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.2
 [0.3.1]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.1
 [0.3.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.0
