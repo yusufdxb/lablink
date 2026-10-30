@@ -87,7 +87,9 @@ pub async fn icmp_echo(ip: IpAddr, timeout: Duration) -> IcmpOutcome {
     if let Err(e) = sock.connect(&SocketAddr::new(IpAddr::V4(v4), 0).into()) {
         return IcmpOutcome::Unsupported(e.to_string());
     }
-    let fd = match AsyncFd::new(sock) {
+    // SAFETY: AsyncFd owns this Socket; its descriptor is never replaced or
+    // closed independently while registered, and access below is by shared reference.
+    let fd = match unsafe { AsyncFd::register(sock) } {
         Ok(f) => f,
         Err(e) => return IcmpOutcome::Unsupported(e.to_string()),
     };

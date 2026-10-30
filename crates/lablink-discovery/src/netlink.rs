@@ -515,7 +515,9 @@ impl Monitor {
             );
         }
         Ok(Self {
-            fd: tokio::io::unix::AsyncFd::new(fd)?,
+            // SAFETY: AsyncFd owns this OwnedFd. No code replaces or closes
+            // its descriptor independently while the registration is alive.
+            fd: unsafe { tokio::io::unix::AsyncFd::register(fd) }?,
             buf: vec![0u8; 64 * 1024],
         })
     }
