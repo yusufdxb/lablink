@@ -12,7 +12,7 @@ publish.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
+yaml_serde.workspace = true
 thiserror.workspace = true
 ipnet.workspace = true
 libc.workspace = true
