@@ -642,7 +642,7 @@ impl Config {
         let cfg: Config = if text.trim().is_empty() {
             Config::default()
         } else {
-            serde_yaml_ng::from_str(text).map_err(|e| ConfigError::Parse {
+            yaml_serde::from_str(text).map_err(|e| ConfigError::Parse {
                 path: origin.to_string(),
                 message: e.to_string(),
             })?
@@ -788,14 +788,14 @@ impl Config {
     /// file written by LabLink (init, settings, import) stays as short as a
     /// hand-written one. Parsing the result gives back an equal `Config`.
     pub fn to_yaml(&self) -> String {
-        use serde_yaml_ng::Value;
+        use yaml_serde::Value;
         fn prune(v: &mut Value, default: &Value) {
             if let (Value::Mapping(m), Value::Mapping(d)) = (v, default) {
                 m.retain(|k, val| d.get(k) != Some(val));
             }
         }
         fn to<T: Serialize>(x: &T) -> Value {
-            serde_yaml_ng::to_value(x).unwrap_or(Value::Null)
+            yaml_serde::to_value(x).unwrap_or(Value::Null)
         }
         fn non_empty(v: &Value) -> bool {
             match v {
@@ -846,7 +846,7 @@ impl Config {
         if root.as_mapping().is_some_and(|m| m.is_empty()) {
             return String::new();
         }
-        let yaml = serde_yaml_ng::to_string(&root).unwrap_or_default();
+        let yaml = yaml_serde::to_string(&root).unwrap_or_default();
         if check_yaml_nesting(&yaml).is_ok() {
             return yaml;
         }
@@ -1215,7 +1215,7 @@ fn validate_site(cfg: &Config, site: &SiteConfig, at_site: &str, errs: &mut Vec<
 /// True when `text` uses the single-site layout (top-level `networks`,
 /// `devices` or `checks`), which LabLink reads as site `default`.
 pub fn uses_legacy_layout(text: &str) -> bool {
-    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text)
+    yaml_serde::from_str::<yaml_serde::Value>(text)
         .ok()
         .and_then(|v| {
             v.as_mapping().map(|m| {
@@ -1933,5 +1933,39 @@ mod via_tests {
         assert!(e[0].contains("needs expected_ips"), "{e:?}");
         let e = errs("devices:\n  - name: a\n    via: a\n    expected_ips: [10.0.0.2]\n");
         assert!(e[0].contains("own gateway"), "{e:?}");
+    }
+}
+
+#[cfg(test)]
+mod yaml_parser_migration_tests {
+    use super::*;
+
+    #[test]
+    fn released_example_survives_config_round_trip() {
+        let original = Config::parse(include_str!("../../../config/example.yaml"), "released-example")
+            .expect("published example must continue to parse");
+        let emitted = original.to_yaml();
+        let reparsed = Config::parse(&emitted, "reparsed")
+            .expect("serialized example must remain readable");
+        assert_eq!(original, reparsed);
+    }
+
+    #[test]
+    fn legacy_layout_and_quoted_unicode_survive_migration() {
+        let legacy = "networks:\n  - name: lan\n    cidr: 10.42.0.0/24\ndevices:\n  - name: robot-a\n    label: \"Rōbot: α\"\n";
+        assert!(uses_legacy_layout(legacy));
+        let config = Config::parse(legacy, "legacy")
+            .expect("legacy site layout must be supported");
+        assert_eq!(config.sites[0].id, DEFAULT_SITE_ID);
+        assert_eq!(config.sites[0].devices[0].label.as_deref(), Some("Rōbot: α"));
+        let emitted = config.to_yaml();
+        assert!(!uses_legacy_layout(&emitted));
+        assert_eq!(config, Config::parse(&emitted, "migrated").unwrap());
+    }
+
+    #[test]
+    fn duplicate_keys_and_multiple_documents_are_not_silently_accepted() {
+        assert!(Config::parse("daemon:\n  check_interval_s: 5\n  check_interval_s: 6\n", "duplicate").is_err());
+        assert!(Config::parse("sites: []\n---\nssh: {}\n", "multidoc").is_err());
     }
 }
