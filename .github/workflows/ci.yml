@@ -197,7 +197,16 @@ jobs:
         with:
           ref: 17a0e1f0d2104bac67e79df3a5fc98dac5640d5b
           persist-credentials: false
-      - run: scripts/release.sh
+      # 0.3.0's package.sh pipes `lablink version` into `head -1` under
+      # pipefail, which can randomly exit 141 (SIGPIPE; fixed after 0.4.0).
+      # The source is frozen, so retry that one exit code only.
+      - run: |
+          for attempt in 1 2 3; do
+            rc=0; scripts/release.sh || rc=$?
+            [ "$rc" -ne 141 ] && exit "$rc"
+            echo "baseline: release.sh exited 141 (SIGPIPE race), attempt $attempt of 3"
+          done
+          exit 141
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lablink-baseline-0.3.0
