@@ -312,13 +312,19 @@ pub fn onboarding_command(
     }
     let mut cmd = lablink_core::program::command(found)
         .map_err(|_| "Terminal is unavailable.".to_string())?;
+    // `--opt=value`, never `--opt value`: Qt (so Konsole) takes `--session
+    // <name>` anywhere in argv, even after -e, as its own session-restore
+    // option, and then runs the default shell instead of LabLink.
+    let joined = |opt: &str, value: &Path| {
+        let mut s = std::ffi::OsString::from(opt);
+        s.push(value);
+        s
+    };
     cmd.args(flags)
         .arg(lablink)
-        .arg("--socket")
-        .arg(socket)
+        .arg(joined("--socket=", socket))
         .arg("onboard-ssh")
-        .arg("--session")
-        .arg(session)
+        .arg(joined("--session=", session))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -395,8 +401,10 @@ mod onboarding_tests {
             let cmd = onboarding_command(fake.to_str().unwrap(), &cli, &socket, &session).unwrap();
             let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
             assert_eq!(&args[..flags.len()], flags.as_slice());
-            assert!(args.contains(&socket.to_str().unwrap()));
-            assert!(args.contains(&session.to_str().unwrap()));
+            assert!(args.contains(&format!("--socket={}", socket.display()).as_str()));
+            assert!(args.contains(&format!("--session={}", session.display()).as_str()));
+            // Qt consumes a separate `--session <name>` pair (Konsole bug).
+            assert!(!args.iter().any(|a| *a == "--session" || *a == "-session"));
             assert!(!args.contains(&"-c"));
             assert!(args.contains(&"onboard-ssh"));
         }
