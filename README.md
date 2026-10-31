@@ -74,7 +74,11 @@ its console: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
 The desktop app walks through the same steps: a first-run wizard (site name,
 networks, service), a **Discovered** list with **Inspect / Adopt**, a
 two-step **Trust host key** panel, **SSH Setup**, **Open SSH terminal**,
-a **Health** dashboard and a **Sites** tab.
+a **Health** dashboard and a **Sites** tab. The **Files** workspace adds
+dual-pane SFTP browsing, file and folder transfers, a transfer queue and
+cancellation/retry for trusted devices. Appearance settings include True Black,
+Light and System Default. See [Files workspace](docs/FILES.md) for supported
+operations and security limits.
 
 ## Common commands
 

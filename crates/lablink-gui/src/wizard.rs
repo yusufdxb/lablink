@@ -2,7 +2,7 @@
 //! no configuration file. It drives the same `lablink_setup::init` steps as
 //! `lablink init`; nothing is selected or scanned until the user says so.
 
-use crate::view::{self, Level};
+use crate::view::Level;
 use eframe::egui::{self, RichText};
 use lablink_core::config::NetworkConfig;
 use lablink_setup::ifaces::{self, LocalNetwork};
@@ -214,7 +214,7 @@ impl Wizard {
         if !self.site_name.trim().is_empty()
             && !lablink_core::config::valid_display_name(self.site_name.trim())
         {
-            ui.colored_label(view::RED, "1-64 printable characters");
+            ui.colored_label(crate::theme::error(ui), "1-64 printable characters");
         }
         ui.add_space(8.0);
         ui.label("This takes about a minute:");
@@ -232,7 +232,7 @@ impl Wizard {
         ui.label("LabLink only looks at networks you tick. Active scanning pings every address of a small private network to find devices; without it LabLink still sees devices your computer already talks to.");
         ui.add_space(6.0);
         if self.choices.is_empty() {
-            ui.colored_label(view::YELLOW, "No IPv4 networks are attached to this computer right now. Connect to your lab network, or type one below.");
+            ui.colored_label(crate::theme::warning(ui), "No IPv4 networks are attached to this computer right now. Connect to your lab network, or type one below.");
         }
         egui::Grid::new("wizard_nets")
             .striped(true)
@@ -282,7 +282,7 @@ impl Wizard {
             }
         });
         if let Some(e) = &self.manual_error {
-            ui.colored_label(view::RED, e);
+            ui.colored_label(crate::theme::error(ui), e);
         }
         ui.add_space(10.0);
         let n = self.networks().len();
@@ -363,11 +363,10 @@ impl Wizard {
             })
             .strong()
             .size(18.0)
-            .color(view::level_color(if failed {
-                Level::Warn
-            } else {
-                Level::Good
-            })),
+            .color(crate::theme::level_color(
+                ui,
+                if failed { Level::Warn } else { Level::Good },
+            )),
         );
         for s in &steps {
             let l = match s.status {
@@ -377,7 +376,7 @@ impl Wizard {
             };
             ui.horizontal(|ui| {
                 ui.label(RichText::new(s.name).strong());
-                ui.colored_label(view::level_color(l), s.status.word());
+                ui.colored_label(crate::theme::level_color(ui, l), s.status.word());
             });
             ui.add(egui::Label::new(RichText::new(&s.detail).weak()).wrap());
             ui.add_space(4.0);

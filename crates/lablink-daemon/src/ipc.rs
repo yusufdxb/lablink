@@ -215,6 +215,7 @@ async fn dispatch(state: &Arc<State>, req: Request) -> Result<serde_json::Value,
     match req {
         Request::Ping => Ok(serde_json::json!({
             "protocol_version": PROTOCOL_VERSION,
+            "files_protocol_version": lablink_core::protocol::FILES_PROTOCOL_VERSION,
             "version": env!("CARGO_PKG_VERSION"),
             "git_sha": lablink_core::GIT_SHA,
             "pid": std::process::id(),
@@ -336,6 +337,11 @@ async fn dispatch(state: &Arc<State>, req: Request) -> Result<serde_json::Value,
             if r.host_key_alias.is_some() {
                 ensure_known_hosts(state).await;
             }
+            to_value(&r)
+        }
+        Request::ResolveFiles { device } => {
+            let r = state.reg().resolve_files(&device)?;
+            ensure_known_hosts(state).await;
             to_value(&r)
         }
         Request::Trust {

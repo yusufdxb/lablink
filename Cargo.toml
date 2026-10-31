@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lablink-core",
     "crates/lablink-ssh",
+    "crates/lablink-files",
     "crates/lablink-platform",
     "crates/lablink-discovery",
     "crates/lablink-doctor",
@@ -24,6 +25,7 @@ publish = false
 [workspace.dependencies]
 lablink-core = { path = "crates/lablink-core" }
 lablink-ssh = { path = "crates/lablink-ssh" }
+lablink-files = { path = "crates/lablink-files" }
 lablink-discovery = { path = "crates/lablink-discovery" }
 lablink-platform = { path = "crates/lablink-platform" }
 lablink-doctor = { path = "crates/lablink-doctor" }
