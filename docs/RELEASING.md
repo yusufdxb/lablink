@@ -81,8 +81,8 @@ In CI, a `v*` tag also gets a Sigstore build-provenance attestation for the
 ## Maintaining the one-command installer
 
 `scripts/install-linux.sh` selects an explicitly published release with its
-`RELEASE_VERSION` constant, initially `0.3.1`. It uses the existing release
-asset names, `lablink_0.3.1_amd64.deb` and `SHA256SUMS`, without a separate
+`RELEASE_VERSION` constant, currently `0.4.0`. It uses the existing release
+asset names, `lablink_0.4.0_amd64.deb` and `SHA256SUMS`, without a separate
 package host or APT repository. It always downloads the selected release's
 manifest; never embed a package checksum in the installer. Explicit tag
 selection supports prereleases and does not depend on `/releases/latest`.
@@ -128,11 +128,11 @@ they have been published.
 ## Verifying a download
 
 ```bash
-awk '$2 == "lablink_0.3.1_amd64.deb" || $2 == "./lablink_0.3.1_amd64.deb"' SHA256SUMS > package.sha256
+awk '$2 == "lablink_0.4.0_amd64.deb" || $2 == "./lablink_0.4.0_amd64.deb"' SHA256SUMS > package.sha256
 test "$(wc -l < package.sha256)" -eq 1 && sha256sum --check --strict package.sha256
-gh attestation verify lablink_0.3.1_amd64.deb --repo yusufdxb/lablink \
+gh attestation verify lablink_0.4.0_amd64.deb --repo yusufdxb/lablink \
     --signer-workflow yusufdxb/lablink/.github/workflows/ci.yml \
-    --source-ref refs/tags/v0.3.1 --deny-self-hosted-runners
+    --source-ref refs/tags/v0.4.0 --deny-self-hosted-runners
 ```
 
 The attestation proves the file was built by this repository's CI workflow

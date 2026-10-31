@@ -4,6 +4,63 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-10-31
+
+The desktop app can now take a new Ubuntu user from install to a verified
+device without a terminal: create or pick a site, find or add a device,
+confirm its host key, set up key login and test it. Every step that trusts a
+host, creates a key, scans a network or changes SSH configuration still asks
+first. Upgrading from 0.3.x keeps the configuration, state and pinned host
+keys; restart the daemon afterwards with `systemctl --user restart lablinkd`.
+
+### Added
+
+- Guided SSH onboarding in the desktop app: the host key fingerprint is shown
+  for explicit confirmation, a key is created only with consent (never
+  overwriting an existing one), the public key is installed through OpenSSH's
+  own password prompt in a terminal, and key login is tested before the device
+  is shown as ready. LabLink never sees, stores or logs the password.
+- `lablink remove` and a Remove device action in the app. Removal only changes
+  this computer: nothing is sent to the device. Adopted devices are deleted by
+  the daemon; configured devices are deleted from `config.yaml` with a backup
+  of the previous file. It is separate from forget (reset trust), turning
+  monitoring off and dismissing a discovery result.
+- Add a device by hostname, Tailscale name or routed IP address. Nothing is
+  scanned or trusted when the device is added; its host key is verified
+  afterwards like any other device.
+- The Discovered tab says how devices were found. Passive discovery is the
+  default; a one-time scan is offered only for networks already approved in
+  the configuration that this computer is directly connected to, and only
+  after confirmation. Results never claim a complete inventory.
+- Files workspace: a two-pane SFTP browser for copying files to and from a
+  device. Each session opens a fresh SSH connection that requires the
+  device's verified, pinned host key.
+- True Black, Light and System Default themes.
+- `lablink-gui --version` and `--help`, which work without a display.
+- `scripts/install-linux.sh --migrate`, `--dry-run` and `--package FILE`.
+  An older tarball or source installation in your home folder is moved into
+  a timestamped backup with a manifest and a `restore.sh`; configuration,
+  state, pinned keys and `~/.ssh` are never touched.
+
+### Changed
+
+- One logo source generates every icon, window icon and version display, so
+  Linux and macOS builds show the same mark.
+- The installer checks every tool it uses before changing anything, verifies
+  the desktop app by running `lablink-gui --version`, and always prints the
+  command-line next steps.
+
+### Security
+
+- Files transfers use SFTP version 3, which cannot open a file without
+  following symlinks or publish one atomically. A process that can write to
+  the remote or local folders while a transfer runs can redirect it. See
+  `SECURITY.md`.
+- `cargo audit` and `cargo deny` ignore RUSTSEC-2026-0370, RUSTSEC-2026-0371
+  and RUSTSEC-2026-0372: unmaintained (not vulnerable) crates pulled in by the
+  GUI toolkit's accessibility layer, with no maintained replacement available
+  yet. The reasons are recorded in `.cargo/audit.toml` and `deny.toml`.
+
 ## [0.3.1] - 2026-10-10
 
 Installing 0.3.1 over an earlier 0.3.0 build is no longer a same-version no-op.
@@ -187,5 +244,6 @@ Earlier in the 0.3.0 cycle:
 - LabLink no longer starts, restarts or stops a systemd user service whose
   manager runs with a different home or config directory.
 
+[0.4.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.0
 [0.3.1]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.1
 [0.3.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.0
