@@ -45,7 +45,7 @@ keys; restart the daemon afterwards with `systemctl --user restart lablinkd`.
 ### Changed
 
 - One logo source generates every icon, window icon and version display, so
-  Linux and macOS builds show the same mark.
+  every Linux build shows the same mark.
 - The installer checks every tool it uses before changing anything, verifies
   the desktop app by running `lablink-gui --version`, and always prints the
   command-line next steps.

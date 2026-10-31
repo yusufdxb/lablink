@@ -136,6 +136,10 @@ docker exec "$robotB" bash -c 'rm -f /etc/ssh/ssh_host_* && ssh-keygen -A >/dev/
 start_desktop "$desk" lab-desktop "$netA" "$preA.10"
 pass "fresh machine" "$base, user tester, systemd user session up"
 # GUI_ONLY=1 skips straight to the GUI-only section (repeat runs of that test).
+# TERM_APP=konsole runs that section's SSH setup in Konsole instead of xterm.
+# PASSPHRASE=... gives the new key a passphrase there (default: empty).
+term_app=${TERM_APP:-xterm}
+passphrase=${PASSPHRASE:-}
 if [ -z "${GUI_ONLY:-}" ]; then
 as_tester 'for t in cargo rustc ssh lablink; do command -v $t && exit 1; done; exit 0' || fail "fresh machine" "unexpected tools present"
 pass "no Rust, no ssh, no LabLink" "cargo, rustc, ssh, lablink all absent"
@@ -287,9 +291,9 @@ wait_for 30 'lablink sites --json | grep -q "\"state\": \"away\""' || fail "AWAY
 # for 2 s), so an in-flight check is not mistaken for a probe of an AWAY site.
 logA0=-1
 for _ in $(seq 1 15); do
-    n=$(docker logs "$robotA" 2>&1 | grep -c "Connection from\|Accepted\|Connection closed" || true)
-    [ "$n" = "$logA0" ] && break
-    logA0=$n
+    lines=$(docker logs "$robotA" 2>&1 | grep -c "Connection from\|Accepted\|Connection closed" || true)
+    [ "$lines" = "$logA0" ] && break
+    logA0=$lines
     sleep 2
 done
 st=$(status_json site-alpha/robot); echo "$st" > "$out/status-away.json"
@@ -436,9 +440,9 @@ docker rm -f "$robotA" "$desk" >/dev/null
 docker run -d --name "$robotA" --hostname robot-bench --network "$netA" --ip "$preA.20" lablink-cr-robot >/dev/null
 start_desktop "$desk2" lab-desktop-2 "$netA" "$preA.11"
 docker cp "$deb" "$desk2:$xfer/lablink.deb"
-docker exec "$desk2" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/lablink.deb xterm" > "$out/apt-install-2.log" 2>&1 \
+docker exec "$desk2" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/lablink.deb $term_app" > "$out/apt-install-2.log" 2>&1 \
     || fail "GUI-only: install" "apt failed"
-pass "GUI-only: fresh user" "second container, .deb + xterm installed, no config"
+pass "GUI-only: fresh user" "second container, .deb + $term_app installed, no config"
 typein() { x "xdotool type --delay 40 '$1'"; }
 as_tester 'Xvfb :99 -screen 0 1280x860x24 >/tmp/xvfb.log 2>&1 &'
 sleep 1
@@ -479,10 +483,10 @@ shot gui-b5-key
 as_tester 'ls ~/.ssh/lablink-key-* 2>/dev/null' && fail "GUI-only: key" "key exists before consent"
 click 133 485                      # consent to create a new key
 click 238 552 1                    # Open authentication terminal
-wait_for 20 'DISPLAY=:99 xdotool search --onlyvisible --class xterm' \
+wait_for 20 "DISPLAY=:99 xdotool search --onlyvisible --class $term_app" \
     || { shot gui-b6-noterm; fail "GUI-only: SSH setup" "no terminal opened (gui-b6-noterm.png)"; }
 sleep 2                            # let ssh-keygen reach its passphrase prompt
-term=$(out_of 'DISPLAY=:99 xdotool search --onlyvisible --class xterm | tail -1')
+term=$(out_of "DISPLAY=:99 xdotool search --onlyvisible --class $term_app | tail -1")
 # Keys go through XTEST to the focused window. Focus is set explicitly
 # (XSetInputFocus): LabLink was focused earlier, so focus no longer follows the
 # pointer. `--window` would use XSendEvent, which xterm ignores (allowSendEvents
@@ -490,22 +494,54 @@ term=$(out_of 'DISPLAY=:99 xdotool search --onlyvisible --class xterm | tail -1'
 eval "$(out_of "DISPLAY=:99 xdotool getwindowgeometry --shell $term" | grep -E '^(X|Y|WIDTH|HEIGHT)=[0-9]+$')"
 [ -n "${WIDTH:-}" ] || { shot gui-b6-noterm; fail "GUI-only: SSH setup" "terminal closed early (gui-b6-noterm.png)"; }
 x "xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT / 2)); xdotool windowfocus --sync $term"; sleep 1
-for _ in 1 2; do x "xdotool key Return"; sleep 1; done   # empty passphrase x2 (no filename prompt)
-# ssh-copy-id's install step runs `ssh ... "exec sh -c ..."`. OpenSSH discards
-# typeahead when it shows the password prompt, so wait for that ssh and retype
-# while it is still waiting. ([e] keeps pgrep from matching its own shell.)
-wait_for 30 'pgrep -u tester -f "[e]xec sh -c" >/dev/null' \
-    || { shot gui-b6-nocopy; fail "GUI-only: SSH setup" "ssh-copy-id never reached its password step (gui-b6-nocopy.png)"; }
-for _ in 1 2 3; do
+for _ in 1 2; do typein "$passphrase"; x "xdotool key Return"; sleep 1; done   # passphrase x2 (no filename prompt)
+# Every later prompt belongs to one OpenSSH process: the robot's password to
+# ssh-copy-id's install step (`exec sh -c`), the key passphrase to the fresh
+# key-only test (IdentityAgent=none) and to ssh-copy-id's already-installed
+# check (PreferredAuthentications=publickey). OpenSSH discards typeahead when
+# it shows a prompt, so wait for that ssh and retype while it is still waiting.
+# ([e] etc. keep pgrep from matching its own shell.)
+wait_for 30 'pgrep -u tester -f "[e]xec sh -c|[P]referredAuthentications=publickey" >/dev/null' \
+    || { shot gui-b6-nocopy; fail "GUI-only: SSH setup" "ssh-copy-id never reached an OpenSSH prompt (gui-b6-nocopy.png)"; }
+answered=""
+for _ in $(seq 1 12); do
     sleep 2
-    x "xdotool type --delay 40 robot-pass-1; xdotool key Return"
+    if as_tester 'pgrep -u tester -f "[e]xec sh -c" >/dev/null'; then answer=robot-pass-1; stage=password
+    elif as_tester 'pgrep -u tester -f "[I]dentityAgent=none" >/dev/null'; then answer=$passphrase; stage=test-passphrase
+    elif as_tester 'pgrep -u tester -f "[P]referredAuthentications=publickey" >/dev/null'; then answer=$passphrase; stage=check-passphrase
+    else break
+    fi
+    answered="$answered $stage"
+    x "xdotool type --delay 40 '$answer'; xdotool key Return"
     sleep 4
-    as_tester 'pgrep -u tester -f "[e]xec sh -c" >/dev/null' || break
 done
+echo "prompts answered:$answered" > "$out/gui-ssh-prompts.txt"
 docker logs "$robotA" > "$out/robot-a-sshd-gui.log" 2>&1 || true
-wait_for 30 "lablink status $dev --json | grep -q '\"color\": \"green\"'" || { shot gui-b6-fail; fail "GUI-only: SSH setup" "not GREEN"; }
-as_tester 'ls ~/.ssh/lablink-key-*' >/dev/null || fail "GUI-only: key" "no LabLink key created"
-pass "GUI-only: SSH setup" "key created after consent, password only in the OpenSSH prompt, real login test GREEN"
+if [ -z "$passphrase" ]; then
+    wait_for 30 "lablink status $dev --json | grep -q '\"color\": \"green\"'" || { shot gui-b6-fail; fail "GUI-only: SSH setup" "not GREEN"; }
+    as_tester 'ls ~/.ssh/lablink-key-*' >/dev/null || fail "GUI-only: key" "no LabLink key created"
+    pass "GUI-only: SSH setup" "key created after consent, password only in the OpenSSH prompt, real login test GREEN ($term_app)"
+else
+    # The setup itself must finish: the GUI saves the key (in the daemon's cache)
+    # only after the fresh test passed.
+    wait_for 30 'grep -aq lablink-key- ~/.local/state/lablink/cache.db*' || { shot gui-b6-fail; fail "GUI-only: SSH setup" "key not saved: the passphrase test did not pass (gui-b6-fail.png)"; }
+    key=$(out_of 'ls ~/.ssh/lablink-key-*/id_ed25519')
+    as_tester "ssh-keygen -y -P '' -f $key" >/dev/null 2>&1 && fail "GUI-only: key" "key is not encrypted"
+    shot gui-b6-passphrase
+    # The daemon's unattended check (BatchMode) cannot type a passphrase.
+    st=$(status_json "$dev"); printf '%s\n' "$st" > "$out/status-encrypted-no-agent.json"
+    color=$(grep -o '"color": "[a-z]*"' <<<"$st" | head -1)
+    pass "GUI-only: SSH setup" "encrypted key created after consent; passphrase and password typed only into OpenSSH prompts (${answered# }); key saved after the fresh test; daemon without an agent: $color"
+    # The user unlocks the key in their own agent; the user manager learns its socket.
+    as_tester "eval \$(ssh-agent -a /run/user/1000/lablink-test-agent.sock) >/dev/null; printf '#!/bin/sh\necho %s\n' '$passphrase' > /tmp/askpass; chmod 700 /tmp/askpass; SSH_ASKPASS=/tmp/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=:99 ssh-add $key </dev/null; rm -f /tmp/askpass; systemctl --user set-environment SSH_AUTH_SOCK=/run/user/1000/lablink-test-agent.sock" > "$out/ssh-add.txt" 2>&1 \
+        || fail "GUI-only: agent" "ssh-add failed (ssh-add.txt)"
+    as_tester "lablink set $dev --recheck" >/dev/null 2>&1 || true
+    sleep 5
+    before=$(grep -o '"color": "[a-z]*"' <<<"$(status_json "$dev")" | head -1)
+    as_tester 'systemctl --user restart lablinkd'
+    wait_for 30 "lablink status $dev --json | grep -q '\"color\": \"green\"'" || fail "GUI-only: agent" "not GREEN after unlocking the key and restarting lablinkd (was $before before the restart)"
+    pass "GUI-only: agent" "key unlocked with ssh-add, SSH_AUTH_SOCK set in the user manager: running daemon $before; after restarting lablinkd: GREEN"
+fi
 sleep 3
 x 'xdotool windowfocus --sync $(xdotool search --name LabLink | head -1)'
 click 266 383; typein 'Bench robot'
