@@ -45,8 +45,8 @@ main() (
 
     [[ $EUID -ne 0 ]] || fail 'Run this installer as your normal user, without sudo. Only the package installation requests administrator privileges.'
     local utility
-    for utility in uname curl sha256sum mktemp rm mv chmod awk timeout readlink dpkg dpkg-query dpkg-deb apt sudo; do
-        command -v "$utility" >/dev/null 2>&1 || fail "Missing prerequisite: $utility. On Ubuntu run: sudo apt update && sudo apt install curl ca-certificates coreutils mawk dpkg apt sudo"
+    for utility in uname curl sha256sum mktemp rm mv cp mkdir cat date dirname basename chmod awk grep timeout readlink dpkg dpkg-query dpkg-deb apt sudo; do
+        command -v "$utility" >/dev/null 2>&1 || fail "Missing prerequisite: $utility. On Ubuntu run: sudo apt update && sudo apt install curl ca-certificates coreutils grep mawk dpkg apt sudo"
     done
     [[ -s /etc/ssl/certs/ca-certificates.crt ]] || fail 'Missing TLS CA certificates. Run: sudo apt update && sudo apt install ca-certificates'
     [[ $(uname -s) == Linux ]] || fail 'Only Ubuntu Linux 20.04, 22.04 and 24.04 LTS is supported.'
@@ -240,7 +240,7 @@ main() (
         backup="$data/lablink-migration/$(date -u +%Y%m%dT%H%M%SZ)"
         mkdir -p -- "$backup/files"
         : > "$backup/manifest"
-        write_restore
+        write_restore "$backup"
         local p dest
         for p in "${legacy[@]}"; do
             dest="$backup/files$p"
@@ -292,17 +292,19 @@ main() (
     elif [[ $install_needed == 1 && -n "$installed" ]]; then
         printf '\nIf your LabLink daemon was already running, restart it when ready:\n  systemctl --user restart lablinkd\n'
     fi
+    printf '\nNext steps:\n\n  lablink init\n  lablink doctor\n  lablink status\n'
     if [[ -z ${DISPLAY:-} && -z ${WAYLAND_DISPLAY:-} ]]; then
-        printf '\nNo graphical session detected. The command line is ready now:\n  lablink init\n  lablink status\nOpen LabLink from the applications menu once you log in to a desktop.\n'
+        printf '\nNo graphical session detected. Open LabLink from the applications menu once you log in to a desktop.\n'
     else
-        printf '\nOpen LabLink from your applications menu (or run lablink-gui) to set up your site and devices.\n'
+        printf '\nOr open LabLink from your applications menu (or run lablink-gui) to set up your site and devices.\n'
     fi
 )
 
 # The restore script written next to a migration backup. Reads the manifest
 # and moves every file back unless something new now occupies its place.
-# Called from main's subshell, which shares this definition.
+# Called from main with the backup directory.
 write_restore() {
+    local backup=$1
     cat > "$backup/restore.sh" <<'RESTORE'
 #!/bin/sh
 # Put back the LabLink installation that install-linux.sh --migrate moved here.

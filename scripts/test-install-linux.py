@@ -3,7 +3,7 @@
 
 Only operating-system metadata, install paths and temporary paths are redirected
 in a copy of the production script. Network and package-manager commands use
-fixtures. sha256sum, mktemp, awk and the shell itself are real. Real release and
+fixtures. sha256sum, awk, grep, the coreutils the installer uses and the shell itself are real. Real release and
 Ubuntu installation coverage lives in the companion release/container checks.
 """
 
@@ -103,10 +103,10 @@ elif name == 'lablink':
 elif name == 'lablinkd':
     if cfg.get('daemon_failure'): sys.exit(1)
     print('lablinkd ' + cfg.get('daemon_version', (root / 'installed').read_text()))
-elif name == 'loader':
-    assert args[0] == '--list'
-    assert args[1] == str(root / 'binaries' / 'lablink-gui')
+elif name == 'lablink-gui':
+    assert args == ['--version'], args
     if cfg.get('gui_failure'): sys.exit(127)
+    print('lablink-gui ' + cfg.get('gui_version', (root / 'installed').read_text()))
 else:
     raise AssertionError('unexpected fixture command: ' + name)
 '''
@@ -127,18 +127,20 @@ class InstallerTests(unittest.TestCase):
         (self.root / "dispatcher").write_text(self.dispatcher)
         for utility in ("uname", "curl", "dpkg", "dpkg-query", "dpkg-deb", "sudo", "apt"):
             self.stub(self.root / "tools" / utility)
-        for utility in ("bash", "sha256sum", "mktemp", "rm", "chmod", "awk"):
+        for utility in ("bash", "sha256sum", "mktemp", "rm", "mv", "cp", "mkdir", "cat", "date", "dirname", "basename", "chmod", "awk", "grep", "timeout", "readlink"):
             (self.root / "tools" / utility).symlink_to(shutil.which(utility))
-        self.stub(self.root / "loader")
         (self.root / "ca-certificates.crt").write_text("fixture CA presence check\n")
         source = SOURCE.replace("/etc/os-release", str(self.os_release))
         source = source.replace("/etc/ssl/certs/ca-certificates.crt", str(self.root / "ca-certificates.crt"))
         source = source.replace("/usr/bin/", str(self.root / "binaries") + "/")
-        source = source.replace("/lib64/ld-linux-x86-64.so.2", str(self.root / "loader"))
         source = source.replace("/tmp/lablink-install.", str(self.root / "downloads" / "lablink-install."))
         self.script = self.root / "install.sh"
         self.script.write_text(source)
-        self.env = dict(os.environ, PATH=f"{self.root}/tools:{self.root}/binaries", HOME=str(self.root / "home"), INSTALL_FIXTURE=str(self.root))
+        # XDG_* would point the legacy-install scan at the real home; a
+        # display would change the closing message.
+        base = {k: v for k, v in os.environ.items()
+                if not k.startswith("XDG_") and k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+        self.env = dict(base, PATH=f"{self.root}/tools:{self.root}/binaries", HOME=str(self.root / "home"), INSTALL_FIXTURE=str(self.root))
         self.sentinels = {}
         for relative in (".config/lablink/config.yaml", ".local/state/lablink/cache.db", ".local/state/lablink/known_hosts", ".ssh/id_ed25519", ".ssh/known_hosts"):
             path = self.root / "home" / relative
@@ -185,11 +187,10 @@ class InstallerTests(unittest.TestCase):
     def test_clean_install_checks_executables_and_preserves_config(self):
         self.run_installer(success=True)
         self.assertEqual(sum(e[0] == "apt" for e in self.events), 1)
-        self.assertTrue(any(e[0] == "loader" for e in self.events))
+        self.assertIn(("lablink-gui", "--version"), [tuple(e[:2]) for e in self.events])
         self.assertIn("lablink init", self.output)
         self.assertIn("lablink doctor", self.output)
         self.assertIn("lablink status", self.output)
-        self.assertFalse(any(e[0] == "lablink-gui" for e in self.events))
 
     def test_supported_ubuntu_releases(self):
         for version in ("20.04", "22.04", "24.04"):
@@ -343,10 +344,10 @@ class InstallerTests(unittest.TestCase):
         self.run_installer()
         self.assertIn("interrupted", self.output)
 
-    def test_missing_dynamic_loader_fails_verification(self):
-        (self.root / "loader").unlink()
+    def test_gui_version_mismatch_is_reported(self):
+        self.cfg["gui_version"] = "0.0.0"
         self.run_installer()
-        self.assertIn("dynamic loader is missing", self.output)
+        self.assertIn("Unexpected desktop app version", self.output)
 
     def test_missing_gui_executable_fails_verification(self):
         self.cfg["missing_binary"] = "lablink-gui"
@@ -368,7 +369,7 @@ class InstallerTests(unittest.TestCase):
         self.run_installer()
         self.assertIn("Unexpected daemon version", self.output)
 
-    def test_gui_loader_failure_is_reported(self):
+    def test_gui_start_failure_is_reported(self):
         self.cfg["gui_failure"] = True
         self.run_installer()
         self.assertIn("missing runtime libraries", self.output)
