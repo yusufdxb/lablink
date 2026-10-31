@@ -43,7 +43,7 @@ ipnet = { version = "2.9", features = ["serde"] }
 libc = "0.2"
 socket2 = { version = "0.6", features = ["all"] }
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 rusqlite = { version = "0.40", features = ["bundled"] }
 mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
 tempfile = "3"
