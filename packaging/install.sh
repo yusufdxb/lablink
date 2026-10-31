@@ -62,6 +62,11 @@ for b in lablink lablinkd lablink-gui; do
     install -m 755 "$here/bin/$b" "$prefix/bin/$b"
 done
 install -m 644 "$here/share/icons/hicolor/scalable/apps/lablink.svg" "$data/icons/hicolor/scalable/apps/"
+for png in "$here"/share/icons/hicolor/*/apps/lablink.png; do
+    [ -f "$png" ] || continue
+    size=$(basename "$(dirname "$(dirname "$png")")")
+    install -D -m 644 "$png" "$data/icons/hicolor/$size/apps/lablink.png"
+done
 install -m 644 "$here/share/bash-completion/completions/lablink" "$data/bash-completion/completions/lablink"
 # Rename complete files in their destination directories. Replace existing links
 # rather than writing through them, and do not inherit an old writable mode.

@@ -57,6 +57,13 @@ reported=$("$rel/lablink" version | head -1)
 }
 
 rm -rf dist && mkdir -p dist
+# Every icon comes from packaging/lablink.svg (scripts/build-icons.sh).
+scripts/build-icons.sh --check
+install_pngs() {
+    for s in 16 24 32 48 64 128 256 512; do
+        install -D -m 644 "packaging/icons/lablink-$s.png" "$1/${s}x$s/apps/lablink.png"
+    done
+}
 doc_files="README.md LICENSE NOTICE THIRD_PARTY_LICENSES.md CHANGELOG.md SECURITY.md config/example.yaml"
 
 # ---- tarball (per-user install, no root) -----------------------------------
@@ -66,6 +73,7 @@ mkdir -p "$t/bin" "$t/share/applications" "$t/share/icons/hicolor/scalable/apps"
 install -m 755 $bins "$t/bin/"
 install -m 644 packaging/lablink-gui.desktop "$t/share/applications/"
 install -m 644 packaging/lablink.svg "$t/share/icons/hicolor/scalable/apps/"
+install_pngs "$t/share/icons/hicolor"
 "$rel/lablink" completions bash > "$t/share/bash-completion/completions/lablink"
 install -m 755 packaging/install.sh packaging/uninstall.sh "$t/"
 # shellcheck disable=SC2086
@@ -90,6 +98,7 @@ cmp "$d/usr/lib/systemd/user/lablinkd.service" packaging/lablinkd.service
 "$rel/lablink" completions bash > "$d/usr/share/bash-completion/completions/lablink"
 install -m 644 packaging/lablink-gui.desktop "$d/usr/share/applications/"
 install -m 644 packaging/lablink.svg "$d/usr/share/icons/hicolor/scalable/apps/"
+install_pngs "$d/usr/share/icons/hicolor"
 # shellcheck disable=SC2086
 install -m 644 $doc_files "$d/usr/share/doc/lablink/"
 cat > "$d/usr/share/doc/lablink/copyright" <<COPYRIGHT

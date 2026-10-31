@@ -56,6 +56,7 @@ if [ -f "$entry" ]; then
     actual=$(sed -n '/^Exec=/p' "$entry")
     if [ "$actual" = "Exec=/usr/bin/env $exec_word" ] || [ "$actual" = "Exec=$exec_word" ] || [ "$actual" = "Exec=$prefix/bin/lablink-gui" ]; then
         rm -f "$entry" "$data/icons/hicolor/scalable/apps/lablink.svg" "$data/bash-completion/completions/lablink"
+        for s in 16 24 32 48 64 128 256 512; do rm -f "$data/icons/hicolor/${s}x$s/apps/lablink.png"; done
     fi
 fi
 rm -f "$prefix/bin/lablink" "$prefix/bin/lablinkd" "$prefix/bin/lablink-gui" "$prefix/share/lablink/data-dir"

@@ -158,6 +158,8 @@ pub struct App {
     discovered: Vec<DiscoveredHost>,
     discovered_error: Option<String>,
     discover_busy: bool,
+    /// The logo texture for the header, uploaded on first use.
+    logo: Option<egui::TextureHandle>,
     /// A one-time scan waiting for confirmation.
     scan_confirm: Option<scan::Offer>,
     /// The one-time scan running now, and when it started.
@@ -229,6 +231,7 @@ impl App {
             discovered: Vec::new(),
             discovered_error: None,
             discover_busy: false,
+            logo: None,
             scan_confirm: None,
             scanning: None,
             last_scans: Vec::new(),
@@ -576,7 +579,29 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if self.logo.is_none() {
+                if let Ok(icon) = eframe::icon_data::from_png_bytes(crate::LOGO_PNG) {
+                    let img = egui::ColorImage::from_rgba_unmultiplied(
+                        [icon.width as usize, icon.height as usize],
+                        &icon.rgba,
+                    );
+                    self.logo = Some(ui.ctx().load_texture(
+                        "lablink-logo",
+                        img,
+                        Default::default(),
+                    ));
+                }
+            }
+            if let Some(t) = &self.logo {
+                ui.add(
+                    egui::Image::new(t)
+                        .fit_to_exact_size(egui::vec2(24.0, 24.0))
+                        .alt_text("LabLink logo"),
+                );
+            }
             ui.heading("LabLink");
+            ui.weak(lablink_core::VERSION)
+                .on_hover_text(crate::version_line());
             self.site_selector(ui);
             ui.separator();
             if ui
