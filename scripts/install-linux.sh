@@ -313,6 +313,12 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 status=0
 while IFS= read -r p; do
+    # The migration's `systemctl --user enable` linked the packaged unit
+    # here; that link is the installer's own, not something new.
+    case $p in
+    */*.wants/lablinkd.service)
+        if [ -L "$p" ] && [ "$(readlink "$p")" = /usr/lib/systemd/user/lablinkd.service ]; then rm -f "$p"; fi ;;
+    esac
     if [ -e "$p" ] || [ -L "$p" ]; then
         echo "Kept $p: something new is there; the old copy is in $here/files$p" >&2
         status=1
