@@ -151,7 +151,7 @@ docker exec "$desk" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/
 v=$(out_of 'lablink version'); echo "$v" > "$out/version.txt"
 [ "$(head -1 <<<"$v")" = "lablink $version (commit $sha)" ] || fail "install .deb" "version says '$(head -1 <<<"$v")'"
 grep -q 'lablinkd not running' <<<"$v" || fail "install .deb" "$v"
-as_tester 'test -x /usr/bin/lablinkd && test -x /usr/bin/lablink-gui && test -f /usr/lib/systemd/user/lablinkd.service && test -f /usr/share/applications/lablink-gui.desktop && test -f /usr/share/icons/hicolor/scalable/apps/lablink.svg && test -f /usr/share/bash-completion/completions/lablink && test -f /usr/share/doc/lablink/copyright' \
+as_tester 'test -x /usr/bin/lablinkd && test -x /usr/bin/lablink-gui && test -f /usr/lib/systemd/user/lablinkd.service && test -f /usr/share/applications/lablink-gui.desktop && test -f /usr/share/icons/hicolor/256x256/apps/lablink.png && test ! -e /usr/share/icons/hicolor/scalable/apps/lablink.svg && test -f /usr/share/bash-completion/completions/lablink && test -f /usr/share/doc/lablink/copyright' \
     || fail "install .deb" "a packaged file is missing"
 pass "install .deb" "$(basename "$deb") via apt; '$(head -1 <<<"$v")'; binaries, user unit, desktop entry, icon, completion, copyright in place"
 
@@ -579,7 +579,7 @@ as_tester 'test ! -e ~/.config/lablink && test ! -e ~/.local/state/lablink' || f
 # Prefixes: "=" is refused, uninstalling one prefix keeps another prefix's menu
 # entry, and --purge never deletes a custom LABLINK_STATE_DIR wholesale.
 as_tester 'cd /var/tmp/lablink-*-x86_64-linux && mkdir -p "$HOME/a=b" && ! ./install.sh "$HOME/a=b"' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "a PREFIX containing = was accepted"
-as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./install.sh && ./install.sh "$HOME/opt-ll" && ./uninstall.sh && grep -q opt-ll ~/.local/share/applications/lablink-gui.desktop && test -f ~/.local/share/icons/hicolor/scalable/apps/lablink.svg && test -x ~/opt-ll/bin/lablink' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "uninstalling ~/.local removed another prefix's menu entry or files"
+as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./install.sh && ./install.sh "$HOME/opt-ll" && ./uninstall.sh && grep -q opt-ll ~/.local/share/applications/lablink-gui.desktop && test -f ~/.local/share/icons/hicolor/256x256/apps/lablink.png && test -x ~/opt-ll/bin/lablink' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "uninstalling ~/.local removed another prefix's menu entry or files"
 as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./uninstall.sh "$HOME/opt-ll" && mkdir -p ~/state && echo keep > ~/state/other.txt && LABLINK_STATE_DIR=$HOME/state ./uninstall.sh --purge && test -f ~/state/other.txt' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "--purge deleted a custom LABLINK_STATE_DIR"
 pass "tarball install / uninstall" "checksum, install.sh into ~/.local, '$tv', init + user unit, daemon, discover; uninstall kept config, --purge removed it; PREFIX with = refused; a second prefix's menu entry and a custom state dir survive"
 

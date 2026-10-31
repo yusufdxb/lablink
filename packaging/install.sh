@@ -41,7 +41,7 @@ exec_lines=$(printf '%s\n' "$prefix/bin/lablink-gui" | awk '
     }
     print "TryExec=" raw
 }')
-mkdir -p "$prefix/bin" "$prefix/share/lablink" "$data/applications"     "$data/icons/hicolor/scalable/apps" "$data/bash-completion/completions"
+mkdir -p "$prefix/bin" "$prefix/share/lablink" "$data/applications" "$data/bash-completion/completions"
 desktop_tmp=
 marker_tmp=
 cleanup() {
@@ -61,7 +61,8 @@ chmod 644 "$desktop_tmp" "$marker_tmp"
 for b in lablink lablinkd lablink-gui; do
     install -m 755 "$here/bin/$b" "$prefix/bin/$b"
 done
-install -m 644 "$here/share/icons/hicolor/scalable/apps/lablink.svg" "$data/icons/hicolor/scalable/apps/"
+# 0.3 shipped a scalable SVG logo; remove it so the PNG logo is the one shown.
+rm -f "$data/icons/hicolor/scalable/apps/lablink.svg"
 for png in "$here"/share/icons/hicolor/*/apps/lablink.png; do
     [ -f "$png" ] || continue
     size=$(basename "$(dirname "$(dirname "$png")")")

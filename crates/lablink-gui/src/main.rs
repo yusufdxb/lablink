@@ -18,7 +18,7 @@ mod worker;
 
 use eframe::egui;
 
-/// The logo every LabLink surface uses, rendered from packaging/lablink.svg
+/// The logo every LabLink surface uses, built from packaging/app-icon.png
 /// by scripts/build-icons.sh.
 pub const LOGO_PNG: &[u8] = include_bytes!("../../../packaging/icons/lablink-256.png");
 

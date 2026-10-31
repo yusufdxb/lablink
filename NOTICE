@@ -6,3 +6,7 @@ This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 The binaries include third-party components (Rust crates and the fonts
 bundled by the egui GUI toolkit) under their own licenses, listed with their
 license texts in THIRD_PARTY_LICENSES.md.
+
+The app icon (packaging/app-icon.png and the icons built from it) is the
+default application icon of the eframe crate 0.36.2 (data/icon.png),
+Copyright the egui authors, used under MIT OR Apache-2.0.

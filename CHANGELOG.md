@@ -44,8 +44,10 @@ keys; restart the daemon afterwards with `systemctl --user restart lablinkd`.
 
 ### Changed
 
-- One logo source generates every icon, window icon and version display, so
-  every Linux build shows the same mark.
+- One logo source, the black LabLink app icon (`packaging/app-icon.png`, the
+  same file as the macOS app icon), generates every icon, window icon and
+  version display, so every build shows the same mark. The 0.3 scalable SVG
+  logo is no longer shipped, and installing removes it.
 - The installer checks every tool it uses before changing anything, verifies
   the desktop app by running `lablink-gui --version`, and always prints the
   command-line next steps.

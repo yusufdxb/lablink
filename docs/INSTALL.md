@@ -71,7 +71,6 @@ The package also installs:
 | `/usr/lib/systemd/user/lablinkd.service` | systemd user unit |
 | `/usr/share/bash-completion/completions/lablink` | Bash completion |
 | `/usr/share/applications/lablink-gui.desktop` | Applications menu entry |
-| `/usr/share/icons/hicolor/scalable/apps/lablink.svg` | App icon |
 | `/usr/share/icons/hicolor/<size>/apps/lablink.png` | App icon, 16 to 512 px |
 | `/usr/share/doc/lablink/` | License, notices, README and example config |
 
