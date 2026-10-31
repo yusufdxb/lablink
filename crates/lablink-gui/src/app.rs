@@ -1,8 +1,11 @@
 //! Application state and UI. All device data comes from `lablinkd` via the
 //! worker; setup actions go through `lablink_setup` (also via the worker).
 
+use crate::files::Files;
 use crate::flow::{self, AdoptForm, StepState, TrustPlan};
 use crate::health::{self, DoctorPanel};
+use crate::onboarding::Onboarding;
+use crate::scan;
 use crate::settings::{self, DeviceEdit, Settings};
 use crate::term;
 use crate::view::{self, Level};
@@ -11,8 +14,8 @@ use crate::worker::{Cmd, Event, Fail, RunResult, Worker, POLL_INTERVAL};
 use eframe::egui::{self, Color32, RichText};
 use lablink_core::explain::{self, Action as Fix};
 use lablink_core::model::{
-    Color, DeviceDetail, DeviceStatus, DiscoverReport, DiscoveredHost, HistoryEvent, IdentityState,
-    PortState,
+    AuthState, Color, DeviceDetail, DeviceStatus, DiscoverReport, DiscoveredHost, HistoryEvent,
+    IdentityState, PortState,
 };
 use lablink_core::profile::Profile;
 use lablink_core::protocol::DeviceChanges;
@@ -21,10 +24,12 @@ use lablink_core::time::{format_age, now_ms};
 use lablink_setup::service::ServiceStatus;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Devices,
+    Files,
     Discovered,
     Health,
     Sites,
@@ -52,6 +57,43 @@ struct AdoptDialog {
     error: Option<String>,
 }
 
+/// Confirmation for removing one device from LabLink.
+struct RemoveDialog {
+    /// Canonical `site/name`.
+    device: String,
+    /// What people call it (label or name) plus its site, for the heading.
+    title: String,
+    /// From the loaded detail; `None` while unknown.
+    configured: Option<bool>,
+    monitoring: bool,
+    busy: bool,
+    error: Option<String>,
+}
+
+/// What the Remove dialog asked for.
+enum RemoveChoice {
+    Cancel,
+    Remove,
+    DisableMonitoring,
+}
+
+/// The consequences of removing a device, as the dialog lists them.
+fn removal_consequences(configured: Option<bool>) -> Vec<&'static str> {
+    let mut v = vec![
+        "LabLink stops monitoring it and deletes what this computer stored about it: pinned host keys, addresses and settings.",
+    ];
+    match configured {
+        Some(true) => v.push(
+            "It is defined in config.yaml: its entry and its doctor checks are deleted (the previous file is kept as a backup) and the LabLink service restarts.",
+        ),
+        Some(false) => v.push("It was added from discovery, so only LabLink's own records change."),
+        None => {}
+    }
+    v.push("Nothing on the device itself changes: its accounts, authorized SSH keys and files stay as they are.");
+    v.push("To use it again, add it from Discover and verify its host key again.");
+    v
+}
+
 /// State of the two-step trust flow for one device.
 struct TrustPanel {
     device: String,
@@ -76,6 +118,7 @@ struct TestSsh {
 }
 
 pub struct App {
+    files: Files,
     worker: Worker,
     rx: Receiver<Event>,
     socket: PathBuf,
@@ -91,6 +134,7 @@ pub struct App {
     sites_report: Option<Result<SitesReport, Fail>>,
     daemon_version: Option<String>,
     daemon_build_warning: Option<String>,
+    files_daemon_warning: Option<String>,
     daemon_uptime_s: Option<u64>,
     poll_error: Option<Fail>,
     /// Service state, fetched when the daemon becomes unreachable (not polled).
@@ -114,6 +158,14 @@ pub struct App {
     discovered: Vec<DiscoveredHost>,
     discovered_error: Option<String>,
     discover_busy: bool,
+    /// The logo texture for the header, uploaded on first use.
+    logo: Option<egui::TextureHandle>,
+    /// A one-time scan waiting for confirmation.
+    scan_confirm: Option<scan::Offer>,
+    /// The one-time scan running now, and when it started.
+    scanning: Option<(scan::Offer, Instant)>,
+    /// What the latest discovery actively scanned.
+    last_scans: Vec<String>,
     discover_report: Option<Result<DiscoverReport, Fail>>,
     show_discover: bool,
 
@@ -126,6 +178,8 @@ pub struct App {
     settings: Option<Settings>,
     /// Preferred terminal from the config's `preferences`.
     terminal: Option<String>,
+    onboarding: Option<Onboarding>,
+    remove: Option<RemoveDialog>,
 }
 
 fn load_terminal(path: &std::path::Path) -> Option<String> {
@@ -136,15 +190,14 @@ fn load_terminal(path: &std::path::Path) -> Option<String> {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Cards are click targets; selectable label text would swallow the clicks.
-        cc.egui_ctx
-            .all_styles_mut(|s| s.interaction.selectable_labels = false);
+        crate::theme::install(&cc.egui_ctx);
         let socket = lablink_core::paths::default_socket_path();
         let config_path = lablink_core::paths::default_config_path();
         let (worker, rx) = Worker::spawn(socket.clone(), cc.egui_ctx.clone());
         let wizard = lablink_setup::init::needs_setup(&config_path)
             .then(|| Wizard::new(config_path.clone(), socket.clone()));
         Self {
+            files: Files::new(socket.clone(), cc.egui_ctx.clone()),
             worker,
             rx,
             terminal: load_terminal(&config_path),
@@ -158,6 +211,7 @@ impl App {
             sites_report: None,
             daemon_version: None,
             daemon_build_warning: None,
+            files_daemon_warning: None,
             daemon_uptime_s: None,
             poll_error: None,
             service: None,
@@ -177,6 +231,10 @@ impl App {
             discovered: Vec::new(),
             discovered_error: None,
             discover_busy: false,
+            logo: None,
+            scan_confirm: None,
+            scanning: None,
+            last_scans: Vec::new(),
             discover_report: None,
             show_discover: false,
             banner: None,
@@ -185,6 +243,8 @@ impl App {
             doctor: DoctorPanel::default(),
             wizard,
             settings: None,
+            onboarding: None,
+            remove: None,
         }
     }
 
@@ -219,7 +279,16 @@ impl App {
 
     fn start_discover(&mut self) {
         self.discover_busy = true;
-        self.worker.send(Cmd::Discover);
+        self.worker.send(Cmd::Discover(None));
+    }
+
+    /// Passive discovery plus one scan of an approved, attached network the
+    /// person confirmed. The daemon re-checks the range before sending
+    /// anything.
+    fn start_scan(&mut self, offer: scan::Offer) {
+        self.discover_busy = true;
+        self.worker.send(Cmd::Discover(Some(offer.cidr.clone())));
+        self.scanning = Some((offer, Instant::now()));
     }
 
     fn start_doctor(&mut self, scope: String, devices: Vec<String>) {
@@ -273,6 +342,7 @@ impl App {
                 status,
                 version,
                 build_warning,
+                files_warning,
             } => match status {
                 Ok(report) => {
                     self.devices = report.devices;
@@ -285,6 +355,7 @@ impl App {
                     }
                     self.daemon_version = version;
                     self.daemon_build_warning = build_warning;
+                    self.files_daemon_warning = files_warning;
                     self.daemon_uptime_s = Some(report.daemon.uptime_s);
                     self.poll_error = None;
                     if let Some(d) = self.selected.clone() {
@@ -297,6 +368,7 @@ impl App {
                     self.sites.clear();
                     self.daemon_version = None;
                     self.daemon_build_warning = None;
+                    self.files_daemon_warning = None;
                     self.daemon_uptime_s = None;
                     if self.poll_error.is_none() && f.unavailable {
                         // Once per outage: how can the daemon be started?
@@ -337,8 +409,10 @@ impl App {
             },
             Event::DiscoverDone(result) => {
                 self.discover_busy = false;
+                self.scanning = None;
                 if let Ok(r) = &result {
                     self.discovered = r.discovered.clone();
+                    self.last_scans = scan::scanned(r);
                 }
                 self.discover_report = Some(result);
                 self.show_discover = true;
@@ -469,6 +543,28 @@ impl App {
                 self.worker.send(Cmd::Service);
                 self.worker.refresh();
             }
+            Event::Removed(device, r) => match r {
+                Ok(summary) => {
+                    self.remove = None;
+                    self.banner = Some((true, summary));
+                    // Stop showing it now; the next poll confirms.
+                    self.devices.retain(|d| d.id != device);
+                    if self.selected.as_deref() == Some(device.as_str()) {
+                        self.selected = None;
+                        self.detail = None;
+                    }
+                    self.worker.refresh();
+                    self.worker.send(Cmd::Discovered);
+                }
+                Err(e) => {
+                    if let Some(d) = self.remove.as_mut().filter(|d| d.device == device) {
+                        d.busy = false;
+                        d.error = Some(e);
+                    } else {
+                        self.banner = Some((false, format!("Could not remove {device}: {e}")));
+                    }
+                }
+            },
             Event::ConfigSaved(r) => {
                 if let Some(s) = self.settings.as_mut() {
                     s.saved(r);
@@ -483,30 +579,30 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("LabLink");
-            self.site_selector(ui);
-            let here = self.visible_devices().len();
-            for (tab, name) in [
-                (Tab::Devices, format!("Devices ({here})")),
-                (Tab::Discovered, "Discovered".to_string()),
-                (Tab::Health, "Health".to_string()),
-                (Tab::Sites, "Sites".to_string()),
-                (Tab::Settings, "Settings".to_string()),
-            ] {
-                if ui.selectable_value(&mut self.tab, tab, name).clicked() {
-                    match tab {
-                        Tab::Discovered => self.worker.send(Cmd::Discovered),
-                        Tab::Settings | Tab::Sites => {
-                            if self.settings.is_none() {
-                                self.settings = Some(Settings::load(self.config_path.clone()));
-                            }
-                            self.worker.send(Cmd::Service);
-                            self.worker.send(Cmd::Sites);
-                        }
-                        _ => self.refresh(),
-                    }
+            if self.logo.is_none() {
+                if let Ok(icon) = eframe::icon_data::from_png_bytes(crate::LOGO_PNG) {
+                    let img = egui::ColorImage::from_rgba_unmultiplied(
+                        [icon.width as usize, icon.height as usize],
+                        &icon.rgba,
+                    );
+                    self.logo = Some(ui.ctx().load_texture(
+                        "lablink-logo",
+                        img,
+                        Default::default(),
+                    ));
                 }
             }
+            if let Some(t) = &self.logo {
+                ui.add(
+                    egui::Image::new(t)
+                        .fit_to_exact_size(egui::vec2(24.0, 24.0))
+                        .alt_text("LabLink logo"),
+                );
+            }
+            ui.heading("LabLink");
+            ui.weak(lablink_core::VERSION)
+                .on_hover_text(crate::version_line());
+            self.site_selector(ui);
             ui.separator();
             if ui
                 .add_enabled(
@@ -520,7 +616,17 @@ impl App {
             }
             if self.discover_busy {
                 ui.spinner();
-                ui.label("discovering (up to about 60 s)...");
+                match &self.scanning {
+                    Some((o, t)) => ui.label(format!(
+                        "scanning {} ({} addresses), {} s...",
+                        o.cidr,
+                        o.hosts,
+                        t.elapsed().as_secs()
+                    )),
+                    None => ui.label("discovering (up to about 60 s)..."),
+                };
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(500));
             }
             if ui.button("Refresh").clicked() {
                 self.refresh();
@@ -538,19 +644,27 @@ impl App {
             );
         });
         if let Some(warning) = &self.daemon_build_warning {
-            ui.colored_label(view::YELLOW, warning);
+            ui.colored_label(crate::theme::warning(ui), warning);
         }
         if let Some(f) = self.poll_error.clone() {
             if f.unavailable {
                 self.daemon_down(ui);
             } else {
-                ui.colored_label(view::RED, format!("daemon error: {}", f.message));
+                ui.colored_label(
+                    crate::theme::error(ui),
+                    format!("daemon error: {}", f.message),
+                );
             }
         }
         let mut dismiss = false;
         if let Some((ok, msg)) = &self.banner {
             ui.horizontal(|ui| {
-                ui.colored_label(if *ok { view::GREEN } else { view::RED }, msg);
+                let color = if *ok {
+                    crate::theme::success(ui)
+                } else {
+                    crate::theme::error(ui)
+                };
+                ui.vertical(|ui| view::message_with_details(ui, color, msg));
                 dismiss = ui.small_button("dismiss").clicked();
             });
         }
@@ -560,17 +674,56 @@ impl App {
         ui.add_space(2.0);
     }
 
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.weak("WORKSPACE");
+        let here = self.visible_devices().len();
+        for (tab, name) in [
+            (Tab::Devices, format!("Devices ({here})")),
+            (Tab::Discovered, "Discovered".to_string()),
+            (Tab::Files, "Files".to_string()),
+            (Tab::Health, "Health".to_string()),
+            (Tab::Sites, "Sites".to_string()),
+            (Tab::Settings, "Settings".to_string()),
+        ] {
+            if ui
+                .add_sized(
+                    [ui.available_width(), 36.0],
+                    egui::Button::selectable(self.tab == tab, (name, egui::Atom::grow())),
+                )
+                .clicked()
+            {
+                self.tab = tab;
+                match tab {
+                    Tab::Discovered => self.worker.send(Cmd::Discovered),
+                    Tab::Settings | Tab::Sites => {
+                        if self.settings.is_none() {
+                            self.settings = Some(Settings::load(self.config_path.clone()));
+                        }
+                        self.worker.send(Cmd::Service);
+                        self.worker.send(Cmd::Sites);
+                    }
+                    _ => self.refresh(),
+                }
+            }
+        }
+        ui.add_space(20.0);
+        ui.separator();
+        ui.small("Secure connections");
+        ui.weak("OpenSSH / SFTP");
+    }
+
     /// What failed, what still works, and the one button that fixes it.
     fn daemon_down(&mut self, ui: &mut egui::Ui) {
         let no_config = lablink_setup::init::needs_setup(&self.config_path);
         let mut act: Option<&'static str> = None;
         let mut setup = false;
         egui::Frame::new()
-            .fill(Color32::from_rgb(150, 30, 40))
+            .fill(crate::theme::danger_fill(ui))
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                let white = |t: String| RichText::new(t).color(Color32::WHITE);
+                let foreground = crate::theme::danger_text(ui);
+                let white = |t: String| RichText::new(t).color(foreground);
                 ui.label(white("The LabLink daemon is not running".into()).strong());
                 ui.label(white(format!(
                     "Nothing is being monitored right now. Your devices, pinned keys and history are kept in {}.",
@@ -638,6 +791,8 @@ impl App {
         self.site_header(ui);
         let shown = self.visible_devices();
         let mut clicked = None;
+        let mut files_device = None;
+        let mut terminal_device = None;
         let mut goto: Option<SiteView> = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -646,13 +801,16 @@ impl App {
                     ui.weak("No devices here yet.");
                 }
                 for d in &shown {
-                    if card(
+                    match card(
                         ui,
                         d,
                         self.selected.as_deref() == Some(&d.id),
                         &self.devices,
                     ) {
-                        clicked = Some(d.id.clone());
+                        Some(CardAction::Details) => clicked = Some(d.id.clone()),
+                        Some(CardAction::Files) => files_device = Some(d.id.clone()),
+                        Some(CardAction::Terminal) => terminal_device = Some(d.id.clone()),
+                        None => {}
                     }
                 }
                 // Other sites: summarized, never as failures.
@@ -684,6 +842,13 @@ impl App {
                     }
                 }
             });
+        if let Some(device) = files_device {
+            self.files.open(device);
+            self.tab = Tab::Files;
+        }
+        if let Some(device) = terminal_device {
+            self.open_terminal(&["ssh", &device]);
+        }
         if let Some(v) = goto {
             self.view = v;
         }
@@ -814,7 +979,7 @@ impl App {
         for s in shown {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&s.name).strong().size(20.0));
-                let (word, color) = site_readiness(&s);
+                let (word, color) = site_readiness(ui, &s);
                 ui.label(RichText::new(word).strong().color(color));
                 ui.weak(format!(
                     "{}{}",
@@ -861,7 +1026,7 @@ impl App {
                         ui.horizontal(|ui| {
                             site_dot(ui, s);
                             ui.label(RichText::new(&s.name).strong().size(16.0));
-                            let (word, color) = site_readiness(s);
+                            let (word, color) = site_readiness(ui, s);
                             ui.label(RichText::new(word).strong().color(color));
                             ui.weak(&s.id);
                             ui.with_layout(
@@ -908,12 +1073,16 @@ impl App {
     fn getting_started(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         ui.label(RichText::new("No devices yet").strong().size(18.0));
-        ui.label(RichText::new("Discover  ->  Adopt  ->  Trust  ->  Connect").strong());
+        ui.label(RichText::new("Discover  ->  Verify identity  ->  Connect").strong());
         ui.add_space(6.0);
         ui.label("1. Discover finds hosts on the networks you allowed in Settings.");
-        ui.label("2. On the Discovered tab, Adopt the hosts you want and give each a name.");
-        ui.label("3. Trust each one after comparing its host-key fingerprint with the device.");
-        ui.label("4. Connect by name: Open SSH terminal, or `lablink ssh <name>`.");
+        ui.label(
+            "2. Select Connect securely on the Discovered tab, or enter an IP address or hostname.",
+        );
+        ui.label(
+            "3. Independently confirm the device fingerprint, then authenticate in the terminal.",
+        );
+        ui.label("4. Choose a friendly name. Your verified device is ready to connect.");
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui
@@ -921,6 +1090,14 @@ impl App {
                 .clicked()
             {
                 self.start_discover();
+            }
+            if ui.button("Connect by address or hostname…").clicked() {
+                let site = self
+                    .sites
+                    .iter()
+                    .find(|s| s.state == SiteState::Active)
+                    .map(|s| s.id.clone());
+                self.onboarding = Some(Onboarding::new(None, site));
             }
             if ui.button("Settings").clicked() {
                 self.tab = Tab::Settings;
@@ -953,7 +1130,7 @@ impl App {
             ui.label(
                 RichText::new(d.color.as_str())
                     .strong()
-                    .color(view::state_color(d.color)),
+                    .color(crate::theme::state_color(ui, d.color)),
             );
             if let Some(p) = d.profile {
                 ui.weak(p.title());
@@ -982,13 +1159,13 @@ impl App {
                     ui.weak("->");
                 }
                 let (c, l) = match s.state {
-                    StepState::Done => (view::GREEN, Level::Good),
-                    StepState::Next => (view::YELLOW, Level::Warn),
-                    StepState::Later => (view::GRAY, Level::Neutral),
-                    StepState::Stop => (view::RED, Level::Bad),
+                    StepState::Done => (crate::theme::success(ui), Level::Good),
+                    StepState::Next => (crate::theme::warning(ui), Level::Warn),
+                    StepState::Later => (crate::theme::muted(ui), Level::Neutral),
+                    StepState::Stop => (crate::theme::error(ui), Level::Bad),
                 };
                 dot(ui, c, 5.0);
-                ui.label(RichText::new(s.title).color(view::level_color(l)))
+                ui.label(RichText::new(s.title).color(crate::theme::level_color(ui, l)))
                     .on_hover_text(&s.hint);
             }
         });
@@ -999,6 +1176,14 @@ impl App {
 
         let ip = d.ip.clone();
         ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(files_device_ready(d), egui::Button::new("Open Files"))
+                .on_disabled_hover_text("Files requires a trusted device at an available site")
+                .clicked()
+            {
+                self.files.open(name.clone());
+                self.tab = Tab::Files;
+            }
             if ui
                 .add_enabled(
                     ssh && d.identity == IdentityState::Verified,
@@ -1063,12 +1248,39 @@ impl App {
                     },
                 );
             }
+            if ui
+                .button(RichText::new("Remove device...").color(crate::theme::error(ui)))
+                .on_hover_text(
+                    "Stop tracking this device in LabLink. Nothing on the device changes.",
+                )
+                .clicked()
+            {
+                let configured = self
+                    .detail
+                    .as_ref()
+                    .filter(|det| det.status.id == name)
+                    .map(|det| det.configured);
+                let shown = d.label.clone().unwrap_or_else(|| d.name.clone());
+                self.remove = Some(RemoveDialog {
+                    device: name.clone(),
+                    title: format!("{shown} ({})", d.site_name),
+                    configured,
+                    monitoring: d.monitoring,
+                    busy: false,
+                    error: None,
+                });
+            }
         });
         if let Some((ok, msg)) = &self.notice {
-            ui.colored_label(if *ok { view::GREEN } else { view::RED }, msg);
+            let color = if *ok {
+                crate::theme::success(ui)
+            } else {
+                crate::theme::error(ui)
+            };
+            view::message_with_details(ui, color, msg);
         }
         if let Some(e) = &self.detail_error {
-            ui.colored_label(view::RED, e);
+            ui.colored_label(crate::theme::error(ui), e);
         }
         self.trust_section(ui, &name);
         self.test_ssh_section(ui, &name);
@@ -1092,7 +1304,7 @@ impl App {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.strong("Doctor");
-                ui.colored_label(view::state_color(rep.color), rep.color.as_str());
+                ui.colored_label(crate::theme::state_color(ui, rep.color), rep.color.as_str());
                 ui.weak(format!("{} ms", rep.duration_ms));
             });
             health::check_rows(ui, rep, &name);
@@ -1110,10 +1322,10 @@ impl App {
     }
 
     fn explanation(&mut self, ui: &mut egui::Ui, d: &DeviceStatus, e: &explain::Explanation) {
-        let color = view::state_color(e.color);
+        let color = crate::theme::state_color(ui, e.color);
         let mut frame = egui::Frame::group(ui.style()).stroke(egui::Stroke::new(2.0, color));
         if e.security_stop {
-            frame = frame.fill(Color32::from_rgb(90, 15, 20));
+            frame = frame.fill(crate::theme::danger_fill(ui));
         }
         let mut fix: Option<Fix> = None;
         frame.show(ui, |ui| {
@@ -1153,7 +1365,7 @@ impl App {
             });
         });
         match fix {
-            Some(Fix::SshSetup) => self.open_terminal(&["copy-id", &d.id]),
+            Some(Fix::SshSetup) => self.onboarding = Some(Onboarding::for_device(d)),
             Some(Fix::Trust) | Some(Fix::TrustReplace) => self.start_trust(&d.id),
             Some(Fix::Discover) => self.start_discover(),
             Some(Fix::SwitchSite) => {
@@ -1191,7 +1403,7 @@ impl App {
         match &t.result {
             Some(Ok(r)) if r.exit_code == Some(0) => {
                 ui.colored_label(
-                    view::GREEN,
+                    crate::theme::success(ui),
                     format!(
                         "SSH login works ({:.1} s). LabLink re-checks it now.",
                         r.duration.as_secs_f32()
@@ -1200,17 +1412,25 @@ impl App {
             }
             Some(Ok(r)) => {
                 let why = lablink_ssh::classify_ssh_failure(&r.stderr);
-                ui.colored_label(view::RED, format!("SSH test failed: {}", why.describe()));
+                ui.colored_label(
+                    crate::theme::error(ui),
+                    format!("SSH test failed: {}", why.describe()),
+                );
                 ui.label(why.advice(name));
                 if matches!(why, lablink_ssh::SshFailure::AuthFailed { .. })
                     && ui.button("SSH Setup").clicked()
                 {
                     let n = name.to_string();
-                    self.open_terminal(&["copy-id", &n]);
+                    if let Some(d) = self.devices.iter().find(|d| d.id == n) {
+                        self.onboarding = Some(Onboarding::for_device(d));
+                    }
                 }
             }
             Some(Err(f)) => {
-                ui.colored_label(view::RED, format!("SSH test refused: {}", f.message));
+                ui.colored_label(
+                    crate::theme::error(ui),
+                    format!("SSH test refused: {}", f.message),
+                );
             }
             None => {}
         }
@@ -1218,6 +1438,130 @@ impl App {
 
     /// Two explicit steps: the scan result is shown first; pinning is a
     /// separate click that confirms exactly the scanned fingerprints.
+    /// Confirm a one-time scan: what is sent, to which addresses, and that
+    /// nothing on the devices changes.
+    fn scan_window(&mut self, ctx: &egui::Context) {
+        let Some(o) = self.scan_confirm.clone() else {
+            return;
+        };
+        let mut go = None;
+        let modal = egui::Modal::new(egui::Id::new("scan-once")).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            ui.heading(format!("Scan {} once?", o.cidr));
+            ui.add_space(6.0);
+            for line in [
+                format!(
+                    "LabLink sends a ping and an SSH port check to each of the {} addresses on {}, part of {}.",
+                    o.hosts, o.network, o.site_name
+                ),
+                "This happens once. Background scanning stays as it is.".to_string(),
+                "Nothing is installed or changed on any device, and nothing is trusted. You still verify each device before connecting.".to_string(),
+                "Devices that do not answer will not appear, so the result may not be complete.".to_string(),
+            ] {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("•");
+                    ui.label(line);
+                });
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    go = Some(false);
+                }
+                if ui.button(format!("Scan {}", o.cidr)).clicked() {
+                    go = Some(true);
+                }
+            });
+        });
+        if modal.should_close() && go.is_none() {
+            go = Some(false);
+        }
+        match go {
+            Some(true) => {
+                self.scan_confirm = None;
+                self.start_scan(o);
+            }
+            Some(false) => self.scan_confirm = None,
+            None => {}
+        }
+    }
+
+    fn remove_window(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = self.remove.as_mut() else {
+            return;
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::new("remove-device")).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            ui.heading(format!("Remove {}?", dlg.title));
+            ui.weak(&dlg.device);
+            ui.add_space(6.0);
+            for line in removal_consequences(dlg.configured) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("•");
+                    ui.label(line);
+                });
+            }
+            if dlg.monitoring {
+                ui.add_space(6.0);
+                ui.weak("Only want it to stop being checked? Disable monitoring keeps it listed with its trust.");
+            }
+            if let Some(e) = &dlg.error {
+                ui.add_space(6.0);
+                ui.colored_label(crate::theme::error(ui), format!("Not removed. {e}"));
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if dlg.busy {
+                    ui.spinner();
+                    ui.label("Removing...");
+                    return;
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(RemoveChoice::Cancel);
+                }
+                if dlg.monitoring && ui.button("Disable monitoring instead").clicked() {
+                    choice = Some(RemoveChoice::DisableMonitoring);
+                }
+                let remove = egui::Button::new(
+                    RichText::new("Remove device").color(crate::theme::danger_text(ui)),
+                )
+                .fill(crate::theme::danger_fill(ui));
+                if ui.add(remove).clicked() {
+                    choice = Some(RemoveChoice::Remove);
+                }
+            });
+        });
+        if modal.should_close() && !dlg.busy && choice.is_none() {
+            choice = Some(RemoveChoice::Cancel);
+        }
+        match choice {
+            Some(RemoveChoice::Cancel) => self.remove = None,
+            Some(RemoveChoice::DisableMonitoring) => {
+                let device = dlg.device.clone();
+                self.remove = None;
+                self.apply_changes(
+                    &device,
+                    DeviceChanges {
+                        monitoring: Some(false),
+                        ..Default::default()
+                    },
+                );
+            }
+            Some(RemoveChoice::Remove) => {
+                dlg.busy = true;
+                dlg.error = None;
+                self.worker.send(Cmd::Remove {
+                    device: dlg.device.clone(),
+                    config: self.config_path.clone(),
+                });
+            }
+            None => {}
+        }
+    }
+
     fn trust_section(&mut self, ui: &mut egui::Ui, name: &str) {
         let Some(panel) = self.trust.as_mut().filter(|p| p.device == name) else {
             return;
@@ -1231,10 +1575,10 @@ impl App {
             });
         }
         if let Some(e) = &panel.error {
-            ui.colored_label(view::RED, e);
+            ui.colored_label(crate::theme::error(ui), e);
         }
         if let Some(d) = &panel.done {
-            ui.colored_label(view::GREEN, d);
+            ui.colored_label(crate::theme::success(ui), d);
         }
         let mut pin: Option<(Vec<String>, bool)> = None;
         let mut close = false;
@@ -1261,7 +1605,7 @@ impl App {
             ui.monospace("  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub");
             if plan.warn() {
                 ui.colored_label(
-                    view::RED,
+                    crate::theme::error(ui),
                     "WARNING: the host key differs from what is pinned. This can mean a reinstalled machine or someone impersonating it.",
                 );
             }
@@ -1269,6 +1613,11 @@ impl App {
                 ui.checkbox(
                     &mut plan.verified_oob,
                     "I verified this host out of band; replace pinned keys",
+                );
+            } else {
+                ui.checkbox(
+                    &mut plan.verified_oob,
+                    "I independently verified every fingerprint above",
                 );
             }
             ui.horizontal(|ui| {
@@ -1317,7 +1666,7 @@ impl App {
                     .show(ui, |ui| event_list(ui, events.iter().rev()));
             }
             Some(Err(f)) => {
-                ui.colored_label(view::RED, &f.message);
+                ui.colored_label(crate::theme::error(ui), &f.message);
             }
             None => {}
         }
@@ -1416,16 +1765,16 @@ impl App {
                     "no exit status".to_string()
                 };
                 let color = if r.exit_code == Some(0) {
-                    view::GREEN
+                    crate::theme::success(ui)
                 } else {
-                    view::RED
+                    crate::theme::error(ui)
                 };
                 ui.colored_label(
                     color,
                     format!("{status} ({:.1} s)", r.duration.as_secs_f32()),
                 );
                 if r.truncated {
-                    ui.colored_label(view::YELLOW, "output truncated");
+                    ui.colored_label(crate::theme::warning(ui), "output truncated");
                 }
                 egui::ScrollArea::both()
                     .id_salt("run_out")
@@ -1439,7 +1788,7 @@ impl App {
                     });
             }
             Some(Err(f)) => {
-                ui.colored_label(view::RED, format!("refused: {}", f.message));
+                ui.colored_label(crate::theme::error(ui), format!("refused: {}", f.message));
             }
             None => {}
         }
@@ -1448,16 +1797,60 @@ impl App {
     // ---- discovered hosts + discovery report -----------------------------
 
     fn discovered_view(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(
+                self.onboarding.is_none(),
+                egui::Button::new("Connect by address or hostname…"),
+            )
+            .clicked()
+        {
+            let site = self
+                .sites
+                .iter()
+                .find(|s| s.state == SiteState::Active)
+                .map(|s| s.id.clone());
+            self.onboarding = Some(Onboarding::new(None, site));
+        }
         if let Some(e) = &self.discovered_error {
-            ui.colored_label(view::RED, e);
+            ui.colored_label(crate::theme::error(ui), e);
         }
         let (unmatched, matched) = flow::split_discovered(&self.discovered);
+        ui.add_space(4.0);
+        ui.strong(scan::headline(
+            unmatched.len(),
+            matched.len(),
+            &self.last_scans,
+        ));
+        ui.weak(scan::scanning_line(&self.sites));
+        let offers = scan::offers(&self.sites);
+        if offers.is_empty() {
+            ui.weak("No approved network is connected to this computer, so there is nothing LabLink may scan. Use Connect by address or hostname instead.");
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                for o in offers {
+                    let b = ui
+                        .add_enabled(
+                            !self.discover_busy && self.scan_confirm.is_none(),
+                            egui::Button::new(format!("Scan {} once…", o.cidr)),
+                        )
+                        .on_hover_text(format!(
+                            "Look for more devices on {}. Asks first.",
+                            o.label()
+                        ));
+                    if b.clicked() {
+                        self.scan_confirm = Some(o);
+                    }
+                }
+            });
+        }
+        ui.add_space(4.0);
         let mut adopt_req: Option<DiscoveredHost> = None;
+        let mut network_req: Option<DiscoveredHost> = None;
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.strong(format!(
-                    "Not tracked ({}): inspect a host, then adopt it to start monitoring",
+                    "Available devices ({}): select a device to connect securely",
                     unmatched.len()
                 ));
                 if unmatched.is_empty() {
@@ -1465,18 +1858,24 @@ impl App {
                 }
                 egui::Grid::new("discovered")
                     .striped(true)
-                    .num_columns(8)
+                    .num_columns(9)
                     .show(ui, |ui| {
                         for h in [
-                            "IP", "MAC", "Hostname", "SSH", "Network", "Sources", "Note", "",
+                            "Status", "IP", "MAC", "Hostname", "SSH", "Network", "Sources",
+                            "Note", "",
                         ] {
                             ui.strong(h);
                         }
                         ui.end_row();
                         for h in &unmatched {
+                            let (word, level) = scan::host_state(h);
+                            ui.colored_label(view::level_color(level), word);
                             host_cells(ui, h);
-                            if ui.button("Inspect / Adopt...").clicked() {
+                            if ui.button("Connect securely…").clicked() {
                                 adopt_req = Some((*h).clone());
+                            }
+                            if ui.small_button("Track without SSH…").clicked() {
+                                network_req = Some((*h).clone());
                             }
                             ui.end_row();
                         }
@@ -1503,6 +1902,23 @@ impl App {
                         });
                 }
             });
+        if let Some(h) = network_req {
+            let site = h.site.clone().or_else(|| {
+                self.sites
+                    .iter()
+                    .find(|s| s.state == SiteState::Active)
+                    .map(|s| s.id.clone())
+            });
+            let mut form = AdoptForm::for_host(&h);
+            form.ssh = false;
+            self.adopt = Some(AdoptDialog {
+                host: h,
+                form,
+                site,
+                busy: false,
+                error: None,
+            });
+        }
         if let Some(h) = adopt_req {
             // Default site: the one whose network the host is on, else the
             // active site.
@@ -1514,16 +1930,10 @@ impl App {
                     .collect();
                 match active.as_slice() {
                     [one] => Some(one.id.clone()),
-                    _ => self.sites.first().map(|s| s.id.clone()),
+                    _ => None,
                 }
             });
-            self.adopt = Some(AdoptDialog {
-                form: AdoptForm::for_host(&h),
-                host: h,
-                site,
-                busy: false,
-                error: None,
-            });
+            self.onboarding = Some(Onboarding::new(Some(&h), site));
         }
     }
 
@@ -1641,12 +2051,12 @@ impl App {
                 });
                 if !dlg.form.name.is_empty() {
                     if let Some(e) = &form_err {
-                        ui.colored_label(view::RED, e);
+                        ui.colored_label(crate::theme::error(ui), e);
                     }
                 }
                 ui.weak("Adopting only starts tracking. It never trusts the host key: you compare and pin it in the next step.");
                 if let Some(e) = &dlg.error {
-                    ui.colored_label(view::RED, e);
+                    ui.colored_label(crate::theme::error(ui), e);
                 }
                 if dlg.busy {
                     ui.horizontal(|ui| {
@@ -1694,15 +2104,12 @@ impl App {
             .default_size([560.0, 320.0])
             .show(ctx, |ui| match &self.discover_report {
                 Some(Ok(r)) => {
-                    let new = r
-                        .discovered
-                        .iter()
-                        .filter(|h| h.matched_device.is_none())
-                        .count();
-                    ui.label(format!(
-                        "probed {} host(s), {} responsive, {} not tracked yet",
-                        r.probed_hosts, r.responsive_hosts, new
-                    ));
+                    let (unmatched, matched) = flow::split_discovered(&r.discovered);
+                    let new = unmatched.len();
+                    ui.strong(scan::headline(new, matched.len(), &scan::scanned(r)));
+                    if scan::scanned(r).is_empty() {
+                        ui.weak("No network was actively scanned this time.");
+                    }
                     if new > 0 && ui.button(format!("Show the {new} new host(s)")).clicked() {
                         go_discovered = true;
                     }
@@ -1714,9 +2121,9 @@ impl App {
                         for s in &r.stages {
                             ui.label(&s.stage);
                             let c = match s.result.as_str() {
-                                "ok" => view::GREEN,
-                                "skipped" => view::GRAY,
-                                _ => view::RED,
+                                "ok" => crate::theme::success(ui),
+                                "skipped" => crate::theme::muted(ui),
+                                _ => crate::theme::error(ui),
                             };
                             ui.colored_label(c, &s.result);
                             ui.label(format!("{} ms", s.duration_ms));
@@ -1726,7 +2133,7 @@ impl App {
                     });
                 }
                 Some(Err(f)) => {
-                    ui.colored_label(view::RED, &f.message);
+                    ui.colored_label(crate::theme::error(ui), &f.message);
                 }
                 None => {}
             });
@@ -1756,6 +2163,21 @@ impl App {
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.strong("Appearance");
+            let mut appearance = self.files.appearance().to_string();
+            ui.horizontal_wrapped(|ui| {
+                for name in ["True Black", "Light", "System Default"] {
+                    ui.selectable_value(&mut appearance, name.to_string(), name);
+                }
+            });
+            if appearance != self.files.appearance() {
+                self.files.set_appearance(appearance.clone());
+                crate::theme::apply(ui.ctx(), &appearance);
+            }
+            ui.weak("Saved for the next launch. System Default follows desktop appearance.");
+        });
+        ui.add_space(12.0);
         if self.settings.is_none() {
             self.settings = Some(Settings::load(self.config_path.clone()));
             self.worker.send(Cmd::Service);
@@ -1800,8 +2222,10 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.files.drain();
+        crate::theme::apply(ctx, self.files.appearance());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1827,6 +2251,19 @@ impl eframe::App for App {
             return;
         }
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
+        egui::Panel::left("navigation")
+            .resizable(false)
+            .default_size(if ui.available_width() < 800.0 {
+                106.0
+            } else {
+                144.0
+            })
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().faint_bg_color)
+                    .inner_margin(12),
+            )
+            .show(ui, |ui| self.sidebar(ui));
         if self.selected.is_some() && self.tab == Tab::Devices {
             let max_width = (ui.available_width() * 0.65).max(240.0);
             egui::Panel::right("details")
@@ -1834,6 +2271,41 @@ impl eframe::App for App {
                 .default_size(460.0_f32.min(max_width))
                 .max_size(max_width)
                 .show(ui, |ui| self.details(ui));
+        }
+        if self.selected.is_none()
+            && self.tab == Tab::Devices
+            && self.view != SiteView::All
+            && ui.available_width() >= 1050.0
+        {
+            let devices = self.visible_devices();
+            egui::Panel::right("connection-overview")
+                .resizable(false)
+                .default_size(260.0)
+                .frame(egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(20))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(if matches!(self.view, SiteView::Site(_)) { "Site overview" } else { "At this site" }).strong().size(20.0));
+                    ui.weak("Live device overview");
+                    ui.add_space(16.0);
+                    for (name, count, color) in [
+                        ("Devices", devices.len(), crate::theme::muted(ui)),
+                        ("Verified identities", devices.iter().filter(|d| d.identity == IdentityState::Verified).count(), crate::theme::success(ui)),
+                        ("SSH authenticated", devices.iter().filter(|d| d.ssh_auth == AuthState::Ok).count(), crate::theme::success(ui)),
+                        ("Identity mismatches", devices.iter().filter(|d| d.identity == IdentityState::Mismatch).count(), crate::theme::error(ui)),
+                    ] {
+                        let color = if count == 0 { crate::theme::muted(ui) } else { color };
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(count.to_string()).strong().size(24.0).color(color));
+                            ui.label(name);
+                        });
+                    }
+                    ui.add_space(20.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("Transfer with confidence").strong());
+                    ui.label("Open Files on a verified device to browse both computers and transfer files or folders.");
+                    ui.add_space(8.0);
+                    ui.weak("Unknown host keys require explicit verification. Devices at other sites remain neutral while you are away.");
+                });
         }
         egui::CentralPanel::default_margins().show(ui, |ui| match self.tab {
             Tab::Devices => self.device_list(ui),
@@ -1855,9 +2327,50 @@ impl eframe::App for App {
             }
             Tab::Settings => self.settings_tab(ui),
             Tab::Sites => self.sites_tab(ui),
+            Tab::Files => {
+                self.site_header(ui);
+                if let Some(warning) = &self.files_daemon_warning {
+                    ui.colored_label(crate::theme::warning(ui), warning);
+                }
+                let devices = files_device_refs(&self.visible_devices());
+                let selected_ready = self
+                    .files
+                    .selected_device()
+                    .is_none_or(|id| devices.iter().any(|d| d == id));
+                let available = self.poll_error.is_none()
+                    && self.daemon_version.is_some()
+                    && self.daemon_build_warning.is_none()
+                    && self.files_daemon_warning.is_none()
+                    && selected_ready;
+                let height = ui.available_height();
+                egui::ScrollArea::vertical()
+                    .id_salt("files-workspace")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_max_height(height);
+                        self.files.ui(ui, &devices, available);
+                    });
+            }
         });
+        if let Some(device) = self.files.take_details_request() {
+            self.select(device);
+        }
         self.discover_window(&ctx);
+        self.scan_window(&ctx);
         self.adopt_window(&ctx);
+        self.remove_window(&ctx);
+        if let Some(w) = self.onboarding.as_mut() {
+            if w.show(
+                &ctx,
+                &self.socket,
+                &self.config_path,
+                &self.sites,
+                self.terminal.as_deref(),
+            ) {
+                self.onboarding = None;
+                self.refresh();
+            }
+        }
     }
 }
 
@@ -1909,9 +2422,9 @@ fn site_state_text(s: &SiteStatus) -> String {
 
 fn site_dot(ui: &mut egui::Ui, s: &SiteStatus) {
     let c = match s.state {
-        SiteState::Active => view::GREEN,
-        SiteState::Unknown => view::YELLOW,
-        SiteState::Away => view::GRAY,
+        SiteState::Active => crate::theme::success(ui),
+        SiteState::Unknown => crate::theme::warning(ui),
+        SiteState::Away => crate::theme::muted(ui),
     };
     if s.state == SiteState::Away {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
@@ -1923,80 +2436,146 @@ fn site_dot(ui: &mut egui::Ui, s: &SiteStatus) {
 }
 
 /// READY / DEGRADED / NOT READY for a site the user is at; AWAY is neutral.
-fn site_readiness(s: &SiteStatus) -> (String, Color32) {
+fn site_readiness(ui: &egui::Ui, s: &SiteStatus) -> (String, Color32) {
     let c = s.devices;
     match s.state {
-        SiteState::Away => ("AWAY".into(), view::GRAY),
-        SiteState::Unknown => ("NOT CONFIRMED".into(), view::YELLOW),
-        SiteState::Active if c.red > 0 => ("NOT READY".into(), view::RED),
-        SiteState::Active if c.yellow > 0 || c.gray > 0 => ("DEGRADED".into(), view::YELLOW),
-        SiteState::Active => ("READY".into(), view::GREEN),
+        SiteState::Away => ("AWAY".into(), crate::theme::muted(ui)),
+        SiteState::Unknown => ("NOT CONFIRMED".into(), crate::theme::warning(ui)),
+        SiteState::Active if c.red > 0 => ("NOT READY".into(), crate::theme::error(ui)),
+        SiteState::Active if c.yellow > 0 || c.gray > 0 => {
+            ("DEGRADED".into(), crate::theme::warning(ui))
+        }
+        SiteState::Active => ("READY".into(), crate::theme::success(ui)),
     }
 }
 
-/// One device card. Returns true when clicked. `all` is used to show
+#[derive(Clone, Copy)]
+enum CardAction {
+    Details,
+    Files,
+    Terminal,
+}
+
+fn files_device_ready(d: &DeviceStatus) -> bool {
+    d.ssh_port != PortState::Disabled
+        && d.identity == IdentityState::Verified
+        && d.site_state != SiteState::Away
+}
+
+fn files_device_refs(devices: &[DeviceStatus]) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|d| files_device_ready(d))
+        .map(|d| d.id.clone())
+        .collect()
+}
+
+/// One device card. Returns its requested action. `all` is used to show
 /// `site/name` when a name exists at several sites.
-fn card(ui: &mut egui::Ui, d: &DeviceStatus, selected: bool, all: &[DeviceStatus]) -> bool {
-    let mut frame = egui::Frame::group(ui.style());
+fn card(
+    ui: &mut egui::Ui,
+    d: &DeviceStatus,
+    selected: bool,
+    all: &[DeviceStatus],
+) -> Option<CardAction> {
+    let mut action = None;
+    let mut frame = egui::Frame::group(ui.style())
+        .fill(ui.visuals().extreme_bg_color)
+        .inner_margin(16)
+        .corner_radius(12);
     if selected {
-        frame = frame.stroke(egui::Stroke::new(2.0, ui.visuals().selection.bg_fill));
+        frame = frame.stroke(egui::Stroke::new(1.5, crate::theme::ACCENT));
     }
-    let inner = frame.show(ui, |ui| {
+    frame.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         if !d.monitoring {
             ui.set_opacity(0.5);
         }
-        ui.horizontal(|ui| {
-            dot(ui, view::state_color(d.color), 14.0);
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    let dup = all.iter().filter(|o| o.name == d.name).count() > 1;
-                    let title = if dup {
-                        format!("{} ({})", view::title_text(d), d.site_name)
-                    } else {
-                        view::title_text(d)
-                    };
-                    ui.label(RichText::new(title).strong().size(16.0));
-                    let away = d.site_state == SiteState::Away && d.color == Color::Gray;
-                    ui.label(
-                        RichText::new(if away { "AWAY" } else { d.color.as_str() })
-                            .strong()
-                            .color(view::state_color(d.color)),
-                    );
-                    if let Some(p) = d.profile {
-                        ui.weak(p.title());
-                    }
-                    if !d.monitoring {
-                        ui.weak("monitoring off");
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.monospace(d.ip.as_deref().unwrap_or("no address"));
-                    if let Some(gw) = &d.via {
-                        ui.weak(format!("via {gw}"));
-                    }
-                    ui.label(view::latency_text(d.latency_ms));
-                    ui.label(view::last_seen_text(d.last_seen_ms));
-                });
-                ui.horizontal_wrapped(|ui| {
-                    for ind in view::indicators(d) {
-                        dot(ui, view::level_color(ind.level), 5.0);
-                        ui.small(format!("{}: {}", ind.name, ind.word));
-                        ui.add_space(6.0);
-                    }
-                });
-                if let Some(e) = explain::explain(d) {
-                    ui.colored_label(
-                        view::state_color(e.color),
-                        format!("{}: {}", e.headline, e.next_step),
-                    );
+        let body = ui.scope(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                dot(ui, crate::theme::state_color(ui, d.color), 6.0);
+                let duplicate = all.iter().filter(|o| o.name == d.name).count() > 1;
+                let title = if duplicate {
+                    format!("{} ({})", view::title_text(d), d.site_name)
+                } else {
+                    view::title_text(d)
+                };
+                ui.label(RichText::new(title).strong().size(21.0));
+                let away = d.site_state == SiteState::Away && d.color == Color::Gray;
+                egui::Frame::new()
+                    .fill(ui.visuals().faint_bg_color)
+                    .inner_margin(egui::Margin::symmetric(9, 4))
+                    .corner_radius(6)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(if away { "AWAY" } else { d.color.as_str() })
+                                .strong()
+                                .color(crate::theme::state_color(ui, d.color)),
+                        );
+                    });
+                if let Some(profile) = d.profile {
+                    ui.weak(profile.title());
                 }
             });
+            ui.small(RichText::new(&d.id).color(crate::theme::muted(ui)));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(d.ip.as_deref().unwrap_or("no address"));
+                if let Some(gateway) = &d.via {
+                    ui.weak(format!("via {gateway}"));
+                }
+                ui.weak(format!("Latency {}", view::latency_text(d.latency_ms)));
+                ui.weak(view::last_seen_text(d.last_seen_ms));
+                if !d.monitoring {
+                    ui.weak("monitoring off");
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for indicator in view::indicators(d) {
+                    dot(ui, crate::theme::level_color(ui, indicator.level), 4.0);
+                    ui.small(format!("{}: {}", indicator.name, indicator.word));
+                    ui.add_space(6.0);
+                }
+            });
+            if let Some(explanation) = explain::explain(d) {
+                ui.colored_label(
+                    crate::theme::state_color(ui, explanation.color),
+                    format!("{}: {}", explanation.headline, explanation.next_step),
+                );
+            }
+        });
+        if ui
+            .interact(
+                body.response.rect,
+                ui.id().with(("card", &d.id)),
+                egui::Sense::click(),
+            )
+            .clicked()
+        {
+            action = Some(CardAction::Details);
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(files_device_ready(d), egui::Button::new("Open Files"))
+                .clicked()
+            {
+                action = Some(CardAction::Files);
+            }
+            if ui
+                .add_enabled(files_device_ready(d), egui::Button::new("Open Terminal"))
+                .clicked()
+            {
+                action = Some(CardAction::Terminal);
+            }
+            if ui.button("Device Details").clicked() {
+                action = Some(CardAction::Details);
+            }
         });
     });
-    let id = ui.id().with(("card", &d.id));
-    ui.interact(inner.response.rect, id, egui::Sense::click())
-        .clicked()
+    action
 }
 
 fn host_cells(ui: &mut egui::Ui, h: &DiscoveredHost) {
@@ -2051,7 +2630,7 @@ fn info_grid(ui: &mut egui::Ui, d: &DeviceDetail) {
             ui.label(or_dash(&s.label));
             ui.end_row();
             ui.label("State");
-            ui.colored_label(view::state_color(s.color), s.color.as_str());
+            ui.colored_label(crate::theme::state_color(ui, s.color), s.color.as_str());
             ui.end_row();
             ui.label("Hostname");
             let mut names: Vec<&str> = Vec::new();
@@ -2095,7 +2674,7 @@ fn info_grid(ui: &mut egui::Ui, d: &DeviceDetail) {
             }
             ui.label("Identity");
             let (iw, il) = view::identity_word(s.identity);
-            ui.colored_label(view::level_color(il), iw);
+            ui.colored_label(crate::theme::level_color(ui, il), iw);
             ui.end_row();
             ui.label("SSH");
             if s.ssh_port == PortState::Disabled {
@@ -2160,7 +2739,7 @@ fn info_grid(ui: &mut egui::Ui, d: &DeviceDetail) {
                     let (w, l) = view::service_word(sv.state);
                     ui.horizontal(|ui| {
                         ui.label(&sv.name);
-                        ui.colored_label(view::level_color(l), w);
+                        ui.colored_label(crate::theme::level_color(ui, l), w);
                         if let Some(dt) = &sv.detail {
                             ui.weak(dt);
                         }
@@ -2192,4 +2771,65 @@ fn info_grid(ui: &mut egui::Ui, d: &DeviceDetail) {
         .id_salt("recent")
         .max_height(140.0)
         .show(ui, |ui| event_list(ui, d.recent_events.iter().rev()));
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn removal_dialog_says_the_device_is_not_touched() {
+        for configured in [None, Some(false), Some(true)] {
+            let lines = removal_consequences(configured);
+            assert!(lines
+                .iter()
+                .any(|l| l.starts_with("Nothing on the device itself changes")));
+        }
+        assert!(removal_consequences(Some(true))
+            .iter()
+            .any(|l| l.contains("backup")));
+        assert!(!removal_consequences(Some(false))
+            .iter()
+            .any(|l| l.contains("config.yaml")));
+    }
+
+    #[test]
+    fn files_selector_keeps_duplicate_names_qualified_by_site() {
+        let mut first = placeholder();
+        first.name = "device".into();
+        first.id = "lab/device".into();
+        first.site = "lab".into();
+        first.identity = IdentityState::Verified;
+        first.ssh_port = PortState::Open;
+        let mut second = first.clone();
+        second.id = "home/device".into();
+        second.site = "home".into();
+        assert_eq!(
+            files_device_refs(&[first, second]),
+            ["lab/device", "home/device"]
+        );
+    }
+
+    #[test]
+    fn files_actions_require_verified_identity_and_available_site() {
+        let mut device = placeholder();
+        device.id = "lab/device".into();
+        device.identity = IdentityState::Verified;
+        device.ssh_port = PortState::Open;
+        assert!(files_device_ready(&device));
+        for identity in [
+            IdentityState::Unknown,
+            IdentityState::Unverified,
+            IdentityState::Mismatch,
+        ] {
+            device.identity = identity;
+            assert!(!files_device_ready(&device));
+        }
+        device.identity = IdentityState::Verified;
+        device.site_state = SiteState::Away;
+        assert!(!files_device_ready(&device));
+        device.site_state = SiteState::Active;
+        device.ssh_port = PortState::Disabled;
+        assert!(!files_device_ready(&device));
+    }
 }

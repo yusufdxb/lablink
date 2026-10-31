@@ -460,3 +460,80 @@ fn single_site_cache_is_migrated_to_site_ids() {
         .collect();
     assert_eq!(rows, ["default/bench", "default/jetson-a"]);
 }
+
+#[test]
+fn onboarding_identity_is_scoped_persisted_and_does_not_change_pins() {
+    use lablink_core::protocol::DeviceChanges;
+    let dir = tempfile::tempdir().unwrap();
+    let (net, cfg) = two_sites();
+    let d = TestDaemon::start(cfg.clone(), net.clone(), dir.path().into(), false).unwrap();
+    wait("alpha green", 20, || {
+        (status(&d, "site-alpha/jetson").color == Color::Green).then_some(())
+    });
+    let before = resolve(&d, "site-alpha/jetson").unwrap();
+    d.client()
+        .call(&Request::Set {
+            device: "site-alpha/jetson".into(),
+            changes: DeviceChanges {
+                identity_file: Some("/tmp/lablink-test-key".into()),
+                recheck: true,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    let after = resolve(&d, "site-alpha/jetson").unwrap();
+    assert_eq!(
+        after.ssh_options.get("IdentityFile").map(String::as_str),
+        Some("/tmp/lablink-test-key")
+    );
+    assert_eq!(after.host_key_alias, before.host_key_alias);
+    assert_eq!(after.known_hosts_file, before.known_hosts_file);
+    // Even a failed update must leave the previous choice and pins intact.
+    for hostile in [
+        "relative",
+        "-i/key",
+        "/tmp/$(id)",
+        "/tmp/a%h",
+        "/tmp/a b",
+        "/tmp/a\nb",
+    ] {
+        assert!(d
+            .client()
+            .call(&Request::Set {
+                device: "site-alpha/jetson".into(),
+                changes: DeviceChanges {
+                    identity_file: Some(hostile.into()),
+                    ..Default::default()
+                }
+            })
+            .is_err());
+    }
+    assert_eq!(
+        resolve(&d, "site-alpha/jetson").unwrap().ssh_options,
+        after.ssh_options
+    );
+    let beta: lablink_core::model::DeviceDetail = d
+        .client()
+        .call_typed(&Request::Inspect {
+            device: "site-beta/jetson".into(),
+        })
+        .unwrap();
+    assert_eq!(beta.status.site, "site-beta");
+    d.stop().unwrap();
+    let d = TestDaemon::start(cfg, net, dir.path().into(), false).unwrap();
+    wait("restored identity", 20, || {
+        resolve(&d, "site-alpha/jetson").ok()
+    });
+    assert_eq!(
+        resolve(&d, "site-alpha/jetson")
+            .unwrap()
+            .ssh_options
+            .get("IdentityFile"),
+        after.ssh_options.get("IdentityFile")
+    );
+    assert_eq!(
+        resolve(&d, "site-alpha/jetson").unwrap().host_key_alias,
+        before.host_key_alias
+    );
+    d.stop().unwrap();
+}

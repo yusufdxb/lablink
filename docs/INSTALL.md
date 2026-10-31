@@ -29,8 +29,8 @@ The installer downloads the selected official release's `.deb` and
 `SHA256SUMS` directly from GitHub Releases over HTTPS. It requires exactly
 one valid checksum entry for the selected package and verifies it before
 installation. A missing or mismatched checksum stops installation. The
-initial selected release is **v0.3.1**, a prerelease; the installer selects
-that tag explicitly rather than using GitHub's latest-release endpoint.
+selected release is **v0.4.0**; the installer selects that tag explicitly
+rather than using GitHub's latest-release endpoint.
 Maintainers can select future releases without changing the command above.
 
 Only the local package installation uses administrator privileges, through
@@ -58,11 +58,11 @@ dpkg-query -W -f='${Version}\n' lablink
 executables are `/usr/bin/lablink`, `/usr/bin/lablinkd` and
 `/usr/bin/lablink-gui`.
 
-The v0.3.1 desktop app does not have a `--version` or `--help` mode. The
-installer verifies that its executable and shared libraries load without
-opening a window or entering onboarding. To verify the graphical interface,
-open **LabLink** from the applications menu, or run `lablink-gui` in a desktop
-terminal. A working X11 or Wayland session is required to display the app.
+`lablink-gui --version` prints the desktop app's version without opening a
+window, so it also works over SSH without a display; the installer uses it to
+verify the app. To check the graphical interface itself, open **LabLink** from
+the applications menu, or run `lablink-gui` in a desktop terminal. A working
+X11 or Wayland session is required to display the app.
 
 The package also installs:
 
@@ -71,7 +71,7 @@ The package also installs:
 | `/usr/lib/systemd/user/lablinkd.service` | systemd user unit |
 | `/usr/share/bash-completion/completions/lablink` | Bash completion |
 | `/usr/share/applications/lablink-gui.desktop` | Applications menu entry |
-| `/usr/share/icons/hicolor/scalable/apps/lablink.svg` | App icon |
+| `/usr/share/icons/hicolor/<size>/apps/lablink.png` | App icon, 16 to 512 px |
 | `/usr/share/doc/lablink/` | License, notices, README and example config |
 
 ## Upgrading an existing installation
@@ -92,11 +92,37 @@ The installer does not restart it for you. An old daemon can remain running
 after a package upgrade; security-sensitive commands may refuse to use it
 until you restart it.
 
-For a previous tarball or source installation, check `type -a lablink
-lablinkd lablink-gui`. An executable in `~/.local/bin` can take precedence
-over `/usr/bin`. The installer reports this instead of deleting or replacing
-your existing installation. Use that installation's supported uninstaller,
-keeping configuration and state, then rerun the one-command installer.
+### Moving from a tarball or source installation
+
+An older per-user installation (programs in `~/.local/bin`, `~/bin` or
+`~/.cargo/bin`, a `~/.local/opt/lablink` build tree, a user systemd unit,
+desktop entry, icons or completion) can shadow the package's `/usr/bin`
+programs. The installer detects these and, by default, only reports them;
+it never deletes or overwrites them.
+
+Preview what would change, without changing anything:
+
+```bash
+bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh) && bash -s -- --dry-run <<< "$installer"'
+```
+
+Then move the older installation aside and install the package:
+
+```bash
+bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh) && bash -s -- --migrate <<< "$installer"'
+```
+
+`--migrate` moves (never deletes) those files into
+`~/.local/share/lablink-migration/<timestamp>/` (under `$XDG_DATA_HOME` when
+it is set) with a `manifest` and a `restore.sh`. Your configuration, daemon
+state, pinned host keys and `~/.ssh` are never touched. To go back, run
+that folder's `restore.sh`; it puts every moved file back unless something
+new now occupies its place, and leaves the package installed (remove it with
+`sudo apt remove lablink`).
+
+To install a `.deb` you already downloaded, pass `--package FILE`; the
+release's `SHA256SUMS` must be in the same folder, and it is checked the same
+way as a download.
 
 ## Uninstallation
 
@@ -147,7 +173,7 @@ OpenSSH configuration.
   to finish, then retry. Do not delete package-manager lock files.
 - **Missing packaged executable:** follow the manual Debian package download
   and verification steps below, using `sudo apt install --reinstall
-  ./lablink_0.3.1_amd64.deb` for the final command. There is no LabLink APT
+  ./lablink_0.4.0_amd64.deb` for the final command. There is no LabLink APT
   repository from which APT can download a replacement by package name.
 - **Interrupted installation:** downloads are cleaned up on ordinary
   interruption. If APT reports an interrupted dpkg transaction, follow its
@@ -165,10 +191,10 @@ OpenSSH configuration.
 
 ## Manual installation alternatives
 
-The [v0.3.1 release](https://github.com/yusufdxb/lablink/releases/tag/v0.3.1)
-contains `lablink_0.3.1_amd64.deb`,
-`lablink-0.3.1-x86_64-linux.tar.gz`, `SHA256SUMS`, `BUILDINFO` and
-`lablink-0.3.1.cdx.json` (the software bill of materials).
+The [v0.4.0 release](https://github.com/yusufdxb/lablink/releases/tag/v0.4.0)
+contains `lablink_0.4.0_amd64.deb`,
+`lablink-0.4.0-x86_64-linux.tar.gz`, `SHA256SUMS`, `BUILDINFO` and
+`lablink-0.4.0.cdx.json` (the software bill of materials).
 These alternatives require downloading and verifying files yourself.
 
 ### Manual Debian package
@@ -183,13 +209,13 @@ APT. Run the block as Bash:
     download_dir=$(mktemp -d)
     trap 'rm -rf "$download_dir"' EXIT
     cd "$download_dir"
-    release=https://github.com/yusufdxb/lablink/releases/download/v0.3.1
-    curl -fSL --proto '=https' --proto-redir '=https' -O "$release/lablink_0.3.1_amd64.deb"
+    release=https://github.com/yusufdxb/lablink/releases/download/v0.4.0
+    curl -fSL --proto '=https' --proto-redir '=https' -O "$release/lablink_0.4.0_amd64.deb"
     curl -fSL --proto '=https' --proto-redir '=https' -O "$release/SHA256SUMS"
-    awk '$2 == "lablink_0.3.1_amd64.deb" || $2 == "./lablink_0.3.1_amd64.deb"' SHA256SUMS > package.sha256
+    awk '$2 == "lablink_0.4.0_amd64.deb" || $2 == "./lablink_0.4.0_amd64.deb"' SHA256SUMS > package.sha256
     test "$(wc -l < package.sha256)" -eq 1
     sha256sum --check --strict package.sha256
-    sudo apt install ./lablink_0.3.1_amd64.deb
+    sudo apt install ./lablink_0.4.0_amd64.deb
 )
 ```
 
@@ -207,14 +233,14 @@ install them. Run the block as Bash:
     set -eu
     download_dir=$(mktemp -d)
     cd "$download_dir"
-    release=https://github.com/yusufdxb/lablink/releases/download/v0.3.1
-    curl -fSL --proto '=https' --proto-redir '=https' -O "$release/lablink-0.3.1-x86_64-linux.tar.gz"
+    release=https://github.com/yusufdxb/lablink/releases/download/v0.4.0
+    curl -fSL --proto '=https' --proto-redir '=https' -O "$release/lablink-0.4.0-x86_64-linux.tar.gz"
     curl -fSL --proto '=https' --proto-redir '=https' -O "$release/SHA256SUMS"
-    awk '$2 == "lablink-0.3.1-x86_64-linux.tar.gz" || $2 == "./lablink-0.3.1-x86_64-linux.tar.gz"' SHA256SUMS > package.sha256
+    awk '$2 == "lablink-0.4.0-x86_64-linux.tar.gz" || $2 == "./lablink-0.4.0-x86_64-linux.tar.gz"' SHA256SUMS > package.sha256
     test "$(wc -l < package.sha256)" -eq 1
     sha256sum --check --strict package.sha256
-    tar xzf lablink-0.3.1-x86_64-linux.tar.gz
-    cd lablink-0.3.1-x86_64-linux
+    tar xzf lablink-0.4.0-x86_64-linux.tar.gz
+    cd lablink-0.4.0-x86_64-linux
     ./install.sh
     printf 'Keep this directory for uninstalling: %s\n' "$PWD"
 )
@@ -237,9 +263,9 @@ For advanced verification with the GitHub CLI, before installation run this
 in the directory containing the downloaded `.deb`:
 
 ```bash
-gh attestation verify lablink_0.3.1_amd64.deb --repo yusufdxb/lablink \
+gh attestation verify lablink_0.4.0_amd64.deb --repo yusufdxb/lablink \
     --signer-workflow yusufdxb/lablink/.github/workflows/ci.yml \
-    --source-ref refs/tags/v0.3.1 --deny-self-hosted-runners
+    --source-ref refs/tags/v0.4.0 --deny-self-hosted-runners
 ```
 
 This checks that the package was built by the project's CI from the tagged

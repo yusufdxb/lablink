@@ -159,6 +159,14 @@ LabLink is a policy layer over OpenSSH and the operating system:
   exchange; it retains the identity proven when LabLink opened it.
 - Service checks (`services:` in the config) run the shell commands you
   configure on your devices.
+- **Files transfers and hostile remote writers.** SFTP v3 cannot bind a path
+  check to the file that is then opened or published. Someone who can write
+  to the remote source or destination folders during a transfer (another
+  process of your remote account, or another user with write access to those
+  folders) can swap a file in that window. Transfers are verified and never
+  overwrite existing files, but they do not guarantee a race-free snapshot
+  against that actor. Transfer only from and to folders that untrusted
+  parties cannot write. See [Files security review](docs/files/SECURITY_REVIEW.md).
 - Site detection uses signals anyone on the local network could imitate
   (subnet, gateway MAC, Wi-Fi name). Imitating them can at most make LabLink
   probe or scan that site's approved ranges, or report the wrong site; it can

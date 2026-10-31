@@ -10,4 +10,7 @@ pub mod configfile;
 pub mod export;
 pub mod ifaces;
 pub mod init;
+pub mod manual;
+pub mod onboarding;
+pub mod remove;
 pub mod service;

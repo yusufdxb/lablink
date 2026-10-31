@@ -21,17 +21,23 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
-#[command(name = "lablink", version, about = "LabLink: find lab machines and robots and SSH to them by name", long_about = None)]
+#[command(name = "lablink", version, about = "LabLink: find lab machines and robots and SSH to them by name", long_about = None, after_help = "Run lablink without a subcommand to open the desktop app. lablink-gui also opens it directly.")]
 struct Cli {
     /// Daemon socket [default: $LABLINK_SOCKET, else $XDG_RUNTIME_DIR/lablink/lablinkd.sock]
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Interactive GUI onboarding helper. Passwords go directly to OpenSSH.
+    #[command(hide = true)]
+    OnboardSsh {
+        #[arg(long)]
+        session: PathBuf,
+    },
     /// Health of the devices at your current site, or of one device
     /// (`name` or `site/name`; the exit code reflects that device's color).
     Status {
@@ -172,6 +178,17 @@ enum Cmd {
     /// Forget a device's pinned keys, addresses and runtime settings. An
     /// adopted device is removed; a configured one starts over unpinned.
     Forget {
+        device: String,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop tracking a device: an adopted device is deleted, a configured one
+    /// is deleted from config.yaml (with a backup) and the daemon restarted.
+    /// Nothing on the device itself is changed. Use `forget` to only reset trust.
+    Remove {
         device: String,
         /// Do not ask for confirmation.
         #[arg(long)]
@@ -540,14 +557,17 @@ fn main() {
             "lablink: ignoring ${v}: it is not an absolute path; the default location is used"
         );
     }
+    let Some(cmd) = cli.cmd else {
+        launch_gui(cli.socket.as_deref());
+    };
     let socket = cli
         .socket
         .clone()
         .unwrap_or_else(lablink_core::paths::default_socket_path);
     let client = Client::new(&socket);
-    let command = command_name(&cli.cmd);
+    let command = command_name(&cmd);
     let json_mode = matches!(
-        &cli.cmd,
+        &cmd,
         Cmd::Status { json: true, .. }
             | Cmd::Devices { json: true, .. }
             | Cmd::Sites { json: true }
@@ -560,6 +580,7 @@ fn main() {
             | Cmd::Exec { json: true, .. }
             | Cmd::Trust { json: true, .. }
             | Cmd::Forget { json: true, .. }
+            | Cmd::Remove { json: true, .. }
             | Cmd::Set { json: true, .. }
             | Cmd::Adopt { json: true, .. }
             | Cmd::Metrics { json: true }
@@ -567,7 +588,7 @@ fn main() {
             | Cmd::Doctor { json: true, .. }
             | Cmd::Version { json: true }
     );
-    let code = match run(cli, &client) {
+    let code = match run(cmd, &client) {
         Ok(c) => c,
         Err(f) => {
             if json_mode {
@@ -594,6 +615,29 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Use the GUI from this installation, never an unrelated binary on PATH.
+/// Replacing the process preserves GUI signals and its exit status.
+fn launch_gui(socket: Option<&std::path::Path>) -> ! {
+    use std::os::unix::process::CommandExt;
+    let result = (|| {
+        let executable = std::env::current_exe()?;
+        let gui = executable
+            .parent()
+            .ok_or_else(|| std::io::Error::other("cannot locate the LabLink installation"))?
+            .join("lablink-gui");
+        let mut command = std::process::Command::new(gui);
+        if let Some(socket) = socket {
+            command.env("LABLINK_SOCKET", socket);
+        }
+        Err::<(), _>(command.exec())
+    })();
+    eprintln!(
+        "lablink: could not open the desktop app: {}. Install lablink-gui beside lablink, or use a CLI subcommand (lablink --help).",
+        result.unwrap_err()
+    );
+    std::process::exit(exit::REFUSED);
+}
+
 /// The subcommand's name, for messages that suggest a command line.
 fn command_name(c: &Cmd) -> &'static str {
     match c {
@@ -610,6 +654,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::Exec { .. } => "exec",
         Cmd::Trust { .. } => "trust",
         Cmd::Forget { .. } => "forget",
+        Cmd::Remove { .. } => "remove",
         Cmd::Set { .. } => "set",
         Cmd::Adopt { .. } => "adopt",
         Cmd::Metrics { .. } => "metrics",
@@ -619,6 +664,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::Init { .. } => "init",
         Cmd::Version { .. } => "version",
         Cmd::CopyId { .. } => "copy-id",
+        Cmd::OnboardSsh { .. } => "onboard-ssh",
         Cmd::Export { .. } => "export",
         Cmd::Import { .. } => "import",
         Cmd::SupportBundle { .. } => "support-bundle",
@@ -630,33 +676,35 @@ fn command_name(c: &Cmd) -> &'static str {
     }
 }
 
-fn run(cli: Cli, client: &Client) -> R {
+fn run(cmd: Cmd, client: &Client) -> R {
     let socket = client.socket_path().to_path_buf();
     // Security-sensitive: these resolve, pin or trust host keys, or start SSH,
     // so an older daemon (missing fixes) is refused. The read-only views warn.
     let gated = matches!(
-        &cli.cmd,
+        &cmd,
         Cmd::Discover { .. }
             | Cmd::Resolve { .. }
             | Cmd::Ssh { .. }
             | Cmd::Exec { .. }
             | Cmd::Trust { .. }
             | Cmd::Forget { .. }
+            | Cmd::Remove { .. }
             | Cmd::Set { .. }
             | Cmd::Adopt { .. }
             | Cmd::Doctor { .. }
             | Cmd::CopyId { .. }
+            | Cmd::OnboardSsh { .. }
     );
     if gated
         || matches!(
-            &cli.cmd,
+            &cmd,
             Cmd::Status { .. } | Cmd::Devices { .. } | Cmd::Inspect { .. }
         )
     {
         setup_cmds::check_daemon_build(client, gated)
             .map_err(|why| Fail::new(exit::REFUSED, "daemon_build_mismatch", why))?;
     }
-    match cli.cmd {
+    match cmd {
         Cmd::Status {
             device,
             site,
@@ -888,6 +936,7 @@ fn run(cli: Cli, client: &Client) -> R {
             json,
         } => cmd_trust(client, &device, yes, &fingerprints, replace, json),
         Cmd::Forget { device, yes, json } => cmd_forget(client, &device, yes, json),
+        Cmd::Remove { device, yes, json } => cmd_remove(client, &device, yes, json),
         Cmd::Set {
             device,
             label,
@@ -902,6 +951,7 @@ fn run(cli: Cli, client: &Client) -> R {
             let s: DeviceStatus = client.call_typed(&Request::Set {
                 device,
                 changes: DeviceChanges {
+                    identity_file: None,
                     label,
                     username: user,
                     monitoring,
@@ -1215,6 +1265,11 @@ fn run(cli: Cli, client: &Client) -> R {
             config,
         ),
         Cmd::Version { json } => setup_cmds::cmd_version(client, json),
+        Cmd::OnboardSsh { session } => {
+            lablink_setup::onboarding::run_helper(client, &session)
+                .map_err(|e| Fail::new(exit::FAILURE, "onboarding", e))?;
+            Ok(exit::OK)
+        }
         Cmd::CopyId {
             device,
             user,
@@ -1572,6 +1627,50 @@ fn cmd_forget(client: &Client, device: &str, yes: bool, json: bool) -> Result<i3
         } else {
             println!("forgot {id}: pins and addresses cleared; run `lablink trust {id} --fingerprint SHA256:...` before using it");
         }
+    }
+    Ok(exit::OK)
+}
+
+fn cmd_remove(client: &Client, device: &str, yes: bool, json: bool) -> Result<i32, Fail> {
+    if !yes {
+        if json || !std::io::stdin().is_terminal() {
+            eprintln!("lablink: nothing removed; pass --yes to remove '{device}'");
+            return Ok(exit::REFUSED);
+        }
+        print!(
+            "Remove '{device}' from LabLink? Its pinned keys, addresses and settings on this computer are deleted; nothing on the device is changed. [y/N] "
+        );
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            eprintln!("lablink: nothing removed");
+            return Ok(exit::REFUSED);
+        }
+    }
+    let path = lablink_core::paths::default_config_path();
+    let r = lablink_setup::remove::remove_device(client, &path, device)
+        .map_err(|e| Fail::new(exit::FAILURE, "remove", e))?;
+    if json {
+        let (kind, backup, restart) = match &r {
+            lablink_setup::remove::Removed::Adopted { .. } => ("adopted", None, None),
+            lablink_setup::remove::Removed::Configured {
+                backup, restart, ..
+            } => (
+                "configured",
+                backup.as_ref().map(|b| b.display().to_string()),
+                Some(restart.clone()),
+            ),
+        };
+        print_json(&serde_json::json!({
+            "device": r.id(),
+            "removed": true,
+            "kind": kind,
+            "backup": backup,
+            "restart": restart,
+        }));
+    } else {
+        println!("{}", r.summary());
     }
     Ok(exit::OK)
 }

@@ -37,6 +37,9 @@ of a percent of one CPU core ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)),
 and answers the CLI and the app over a private Unix socket. There is no
 network listener.
 
+Run `lablink` without arguments to open the desktop app. `lablink-gui` is
+also available. Every CLI subcommand keeps its existing behavior.
+
 ```console
 $ lablink status
 Site Alpha  ACTIVE  READY  (confidence: high)
@@ -74,7 +77,11 @@ its console: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
 The desktop app walks through the same steps: a first-run wizard (site name,
 networks, service), a **Discovered** list with **Inspect / Adopt**, a
 two-step **Trust host key** panel, **SSH Setup**, **Open SSH terminal**,
-a **Health** dashboard and a **Sites** tab.
+a **Health** dashboard and a **Sites** tab. The **Files** workspace adds
+dual-pane SFTP browsing, file and folder transfers, a transfer queue and
+cancellation/retry for trusted devices. Appearance settings include True Black,
+Light and System Default. See [Files workspace](docs/FILES.md) for supported
+operations and security limits.
 
 ## Common commands
 

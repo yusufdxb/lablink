@@ -28,6 +28,24 @@ pub struct Config {
     /// Client preferences (GUI). The daemon ignores this section.
     #[serde(skip_serializing_if = "Preferences::is_default")]
     pub preferences: Preferences,
+    /// Retained legacy Wake-on-LAN settings. This build does not send wake packets.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wake: BTreeMap<String, LegacyWakeConfig>,
+}
+
+/// Compatibility data only, never an authority for discovery or SSH trust.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyWakeConfig {
+    pub mac: String,
+    pub network: String,
+    pub interface: String,
+    #[serde(default = "legacy_wake_port")]
+    pub port: u16,
+}
+
+fn legacy_wake_port() -> u16 {
+    9
 }
 
 /// Site id given to a configuration written in the single-site layout.
@@ -53,6 +71,8 @@ struct RawConfig {
     checks: BTreeMap<String, Vec<crate::checks::CheckSpec>>,
     #[serde(default)]
     preferences: Preferences,
+    #[serde(default)]
+    wake: BTreeMap<String, LegacyWakeConfig>,
 }
 
 impl TryFrom<RawConfig> for Config {
@@ -79,6 +99,7 @@ impl TryFrom<RawConfig> for Config {
             ssh: r.ssh,
             sites,
             preferences: r.preferences,
+            wake: r.wake,
         })
     }
 }
@@ -656,6 +677,27 @@ impl Config {
         let mut errs = Vec::new();
         let d = &self.daemon;
 
+        for (name, wake) in &self.wake {
+            let unicast = normalize_mac(&wake.mac)
+                .and_then(|m| u8::from_str_radix(&m[..2], 16).ok())
+                .is_some_and(|first| first & 1 == 0);
+            if !valid_name(name)
+                || !unicast
+                || !valid_name(&wake.network)
+                || wake.port == 0
+                || wake.interface.is_empty()
+                || wake.interface.len() > 15
+                || !wake
+                    .interface
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+            {
+                errs.push(format!(
+                    "wake.{name}: invalid retained Wake-on-LAN settings"
+                ));
+            }
+        }
+
         if d.check_interval_s == 0 {
             errs.push("daemon.check_interval_s must be at least 1".into());
         }
@@ -808,7 +850,7 @@ impl Config {
         let mut root = to(self);
         if let Value::Mapping(m) = &mut root {
             let dflt = to(&Config::default());
-            for key in ["daemon", "ssh", "preferences"] {
+            for key in ["daemon", "ssh", "preferences", "wake"] {
                 if let (Some(v), Some(d)) = (m.get_mut(key), dflt.get(key)) {
                     prune(v, d);
                 }
@@ -1728,6 +1770,19 @@ mod writer_tests {
 mod site_tests {
     use super::*;
 
+    #[test]
+    fn legacy_wake_settings_survive_site_migration_and_save() {
+        let text = "devices:\n  - name: workstation\nwake:\n  workstation:\n    mac: '02:00:00:00:00:01'\n    network: lab\n    interface: eth0\n";
+        let cfg = Config::parse(text, "legacy").unwrap();
+        assert_eq!(cfg.wake["workstation"].port, 9);
+        assert_eq!(Config::parse(&cfg.to_yaml(), "saved").unwrap(), cfg);
+        assert!(Config::parse(&text.replace("eth0", "eth0;command"), "invalid").is_err());
+        assert!(Config::parse(&text.replace("02:00", "03:00"), "invalid").is_err());
+        assert!(
+            Config::parse(&text.replace("interface: eth0", "unknown: eth0"), "invalid").is_err()
+        );
+    }
+
     fn errs(text: &str) -> Vec<String> {
         match Config::parse(text, "t") {
             Err(ConfigError::Invalid(v)) => v,
@@ -1977,4 +2032,14 @@ mod yaml_parser_migration_tests {
         .is_err());
         assert!(Config::parse("sites: []\n---\nssh: {}\n", "multidoc").is_err());
     }
+}
+
+/// Paths passed through OpenSSH config syntax and ssh-copy-id's shell script.
+/// Reject expansion, quoting, whitespace and option injection characters.
+pub fn valid_ssh_identity_path(path: &str) -> bool {
+    std::path::Path::new(path).is_absolute()
+        && path.len() <= 4096
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
 }

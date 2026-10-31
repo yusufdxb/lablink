@@ -71,6 +71,10 @@ pub enum Mode {
     /// stdin/stdout (`ProxyCommand=-`) by [`crate::prove_host_key`], which
     /// decides from the bytes ssh itself sends, never from printed text.
     KeyProof,
+    /// Binary SFTP subsystem on a fresh, noninteractive connection.
+    Sftp,
+    /// Fresh batch-mode forwarding for an SFTP gateway.
+    FilesForward,
 }
 
 /// Options for ssh sessions LabLink starts on its own (login checks, service
@@ -160,6 +164,9 @@ fn supports_known_hosts_command(binary: &str) -> bool {
 /// literal on every supported OpenSSH: `"` and `\` (quoting), `%` and `$`
 /// (expanded by 8.4 and later, not by 8.2), and control characters.
 pub fn ssh_path_word(p: &std::path::Path) -> Option<String> {
+    if !p.is_absolute() {
+        return None;
+    }
     let s = p.to_str()?;
     if s.chars().any(|c| c.is_control() || "\"\\%$".contains(c)) {
         return None;
@@ -234,6 +241,25 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
             a.push("-T".into());
             a.push("-n".into());
         }
+        Mode::Sftp | Mode::FilesForward => {
+            opt(&mut a, "BatchMode", "yes");
+            opt(&mut a, "ConnectTimeout", t.connect_timeout_s.to_string());
+            opt(&mut a, "ControlMaster", "no");
+            opt(&mut a, "ControlPath", "none");
+            opt(&mut a, "LogLevel", "ERROR");
+            opt(&mut a, "ServerAliveInterval", "10");
+            opt(&mut a, "ServerAliveCountMax", "2");
+            for o in AUTOMATED_SESSION_OPTIONS {
+                a.push("-o".into());
+                a.push(o.into());
+            }
+            a.push("-T".into());
+            if *mode == Mode::Sftp {
+                a.push("-s".into());
+            } else {
+                a.extend(["-W".into(), "%h:%p".into()]);
+            }
+        }
         Mode::KeyProof => {
             opt(&mut a, "BatchMode", "yes");
             opt(&mut a, "ConnectTimeout", t.connect_timeout_s.to_string());
@@ -295,6 +321,8 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
         Mode::Exec { command, .. } => a.push(command.clone()),
         Mode::AuthProbe => a.push("hostname".into()),
         Mode::KeyProof => a.push("true".into()),
+        Mode::Sftp => a.push("sftp".into()),
+        Mode::FilesForward => {}
     }
     a
 }
@@ -345,7 +373,34 @@ pub fn copy_id_args(t: &Target, pubkey: &std::path::Path) -> Result<Vec<String>,
     if t.host_key_alias.is_none() || t.known_hosts_file.is_none() {
         return Err("the device's host key is not pinned yet".into());
     }
-    let ssh = build_args(t, &Mode::Interactive, &[]);
+    if !pubkey
+        .to_str()
+        .is_some_and(lablink_core::config::valid_ssh_identity_path)
+        || t.ip.parse::<std::net::IpAddr>().is_err()
+        || !lablink_core::config::valid_hostname(&t.ssh_host)
+        || t.username
+            .as_deref()
+            .is_some_and(|u| !lablink_core::config::valid_username(u))
+    {
+        return Err("unsafe SSH target or public-key path".into());
+    }
+    // First options win in OpenSSH. Neither authentication nor host-key
+    // verification may reuse a master that authenticated an earlier peer.
+    let mut guarded = t.clone();
+    for (k, v) in [
+        ("ControlMaster", "no"),
+        ("ControlPath", "none"),
+        ("ForwardAgent", "no"),
+        ("ForwardX11", "no"),
+        ("ClearAllForwardings", "yes"),
+        ("PermitLocalCommand", "no"),
+    ] {
+        guarded
+            .options
+            .retain(|key, _| !key.eq_ignore_ascii_case(k));
+        guarded.options.insert(k.into(), v.into());
+    }
+    let ssh = build_args(&guarded, &Mode::Interactive, &[]);
     let mut a = vec!["-i".to_string(), pubkey.display().to_string()];
     let mut i = 0;
     while i < ssh.len() {
@@ -451,12 +506,13 @@ mod tests {
                 "{a:?}"
             );
         }
+        // Key installation never rides any master, not even the daemon's.
         assert_eq!(
             values(
                 &copy_id_args(&t, std::path::Path::new("/k.pub")).unwrap(),
                 "ControlPath"
             ),
-            ["/run/user/7/lablink/ab-%C"]
+            ["none"]
         );
         // The proof is always a fresh connection, first value wins.
         let a = build_args(&t, &Mode::KeyProof, &[]);
@@ -478,7 +534,7 @@ mod tests {
         );
         assert_ne!(
             Some(&p),
-            control_path(dir, "lablink.cares.dev1", &["SHA256:a", "SHA256:b"]).as_ref()
+            control_path(dir, "lablink.lab.dev1", &["SHA256:a", "SHA256:b"]).as_ref()
         );
         assert_ne!(
             Some(&p),
@@ -569,6 +625,39 @@ mod tests {
         assert_eq!(a.last().unwrap(), "uname -a; echo 'x y'");
         assert_eq!(a[a.len() - 2], "jetson-a");
         assert_eq!(a[a.len() - 3], "--");
+    }
+
+    #[test]
+    fn files_connections_override_config_and_never_reuse_a_master() {
+        for mode in [Mode::Sftp, Mode::FilesForward] {
+            let mut t = target(true);
+            for (key, value) in [
+                ("ControlPath", "/tmp/master"),
+                ("ControlMaster", "auto"),
+                ("BatchMode", "no"),
+                ("ForwardAgent", "yes"),
+                ("ForwardX11", "yes"),
+                ("PermitLocalCommand", "yes"),
+            ] {
+                t.options.insert(key.into(), value.into());
+            }
+            let a = build_args(&t, &mode, &[]);
+            for (key, expected) in [
+                ("ControlPath", "none"),
+                ("ControlMaster", "no"),
+                ("BatchMode", "yes"),
+                ("ForwardAgent", "no"),
+                ("ForwardX11", "no"),
+                ("PermitLocalCommand", "no"),
+            ] {
+                assert_eq!(values(&a, key)[0], expected, "{mode:?}: {a:?}");
+            }
+            assert_eq!(values(&a, "StrictHostKeyChecking")[0], "yes");
+            assert!(!a.contains(&"-n".into()), "binary stream needs stdin");
+            if mode == Mode::Sftp {
+                assert_eq!(a.last().unwrap(), "sftp");
+            }
+        }
     }
 
     #[test]
@@ -752,6 +841,8 @@ mod tests {
         // quotes and backslashes change the quoting. Such a path is refused,
         // and a Target built anyway gets a file that matches no key.
         for path in [
+            "relative/known_hosts",
+            "~/known_hosts",
             "/s/100%/known_hosts",
             "/s/%h/known_hosts",
             "/s/${HOME}/known_hosts",
@@ -812,6 +903,22 @@ pub fn proxy_command_through(gateway: &Target, batch: bool) -> String {
     let args = build_args(gateway, &Mode::Interactive, &extra);
     // ssh %-expands ProxyCommand before the shell runs it: a literal '%'
     // (e.g. in the known_hosts path) must be doubled, except in %h:%p.
+    std::iter::once(gateway.binary.as_str())
+        .chain(args.iter().map(String::as_str))
+        .map(|a| {
+            if a == "%h:%p" {
+                a.to_string()
+            } else {
+                shell_quote(&a.replace('%', "%%"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Fresh gateway connection with pinned identity and no multiplexing.
+pub fn proxy_command_through_files(gateway: &Target) -> String {
+    let args = build_args(gateway, &Mode::FilesForward, &[]);
     std::iter::once(gateway.binary.as_str())
         .chain(args.iter().map(String::as_str))
         .map(|a| {

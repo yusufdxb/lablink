@@ -63,7 +63,9 @@ pub enum Cmd {
     Inspect(String),
     History(String),
     Discovered,
-    Discover,
+    /// Passive discovery, plus a one-time scan of the given approved,
+    /// attached network when the person asked for one.
+    Discover(Option<String>),
     Apply {
         device: String,
         changes: DeviceChanges,
@@ -108,6 +110,12 @@ pub enum Cmd {
         confirm: Vec<String>,
         replace: bool,
     },
+    /// Remove a device from LabLink (adopted: daemon cache; configured:
+    /// config.yaml plus a daemon restart). Never touches the device.
+    Remove {
+        device: String,
+        config: std::path::PathBuf,
+    },
     /// Read-only doctor run. `scope` labels the result ("all" or a device).
     Doctor {
         scope: String,
@@ -120,6 +128,7 @@ pub enum Event {
         status: Result<StatusReport, Fail>,
         version: Option<String>,
         build_warning: Option<String>,
+        files_warning: Option<String>,
     },
     Detail(String, Result<Box<DeviceDetail>, Fail>),
     History(String, Result<Vec<HistoryEvent>, Fail>),
@@ -139,6 +148,8 @@ pub enum Event {
     ServiceDone(&'static str, Result<(), String>),
     ConfigSaved(Result<String, String>),
     TestSsh(String, Result<RunResult, Fail>),
+    /// `(device, summary or error)`.
+    Removed(String, Result<String, String>),
 }
 
 /// Handle held by the UI.
@@ -199,16 +210,18 @@ impl Worker {
 }
 
 fn poll_once(client: &Client) -> Event {
-    let (version, build_warning) = match client.call(&Request::Ping) {
+    let (version, build_warning, files_warning) = match client.call(&Request::Ping) {
         Ok(v) => (
             Some(parse_version(&v)),
             daemon_build_warning(&v, lablink_core::GIT_SHA),
+            files_protocol_warning(&v),
         ),
         Err(e) => {
             return Event::Poll {
                 status: Err(e.into()),
                 version: None,
                 build_warning: None,
+                files_warning: None,
             };
         }
     };
@@ -224,6 +237,7 @@ fn poll_once(client: &Client) -> Event {
         status,
         version,
         build_warning,
+        files_warning,
     }
 }
 
@@ -232,7 +246,7 @@ fn poll_once(client: &Client) -> Event {
 fn needs_current_daemon(cmd: &Cmd) -> bool {
     matches!(
         cmd,
-        Cmd::Discover
+        Cmd::Discover(_)
             | Cmd::Apply { .. }
             | Cmd::Run { .. }
             | Cmd::Adopt { .. }
@@ -240,13 +254,14 @@ fn needs_current_daemon(cmd: &Cmd) -> bool {
             | Cmd::TrustPreview(_)
             | Cmd::TrustPin { .. }
             | Cmd::Doctor { .. }
+            | Cmd::Remove { .. }
     )
 }
 
 fn refused_event(cmd: Cmd, why: String) -> Event {
     let f = Fail::msg(why);
     match cmd {
-        Cmd::Discover => Event::DiscoverDone(Err(f)),
+        Cmd::Discover(_) => Event::DiscoverDone(Err(f)),
         Cmd::Apply { device, .. } => Event::Applied(device, Err(f)),
         Cmd::Run { device, .. } => Event::Ran(device, Err(f)),
         Cmd::Adopt { ip, name, .. } => Event::Adopted(ip, name, Err(f)),
@@ -254,6 +269,7 @@ fn refused_event(cmd: Cmd, why: String) -> Event {
         Cmd::TrustPreview(device) => Event::TrustPreview(device, Err(f)),
         Cmd::TrustPin { device, .. } => Event::TrustPinned(device, Err(f)),
         Cmd::Doctor { scope, .. } => Event::Doctor(scope, Err(f)),
+        Cmd::Remove { device, .. } => Event::Removed(device, Err(f.message)),
         _ => unreachable!("only commands in needs_current_daemon are refused"),
     }
 }
@@ -301,10 +317,10 @@ fn execute_inner(socket: &PathBuf, cmd: Cmd) -> Event {
                 .and_then(|v| parse_discovered(&v));
             Event::Discovered(r)
         }
-        Cmd::Discover => {
+        Cmd::Discover(scan_cidr) => {
             let r = client
                 .with_timeout(DISCOVER_TIMEOUT)
-                .call_typed::<DiscoverReport>(&Request::Discover { scan_cidr: None })
+                .call_typed::<DiscoverReport>(&Request::Discover { scan_cidr })
                 .map_err(Fail::from);
             Event::DiscoverDone(r)
         }
@@ -380,6 +396,11 @@ fn execute_inner(socket: &PathBuf, cmd: Cmd) -> Event {
                 format!("{m}; {}", lablink_setup::service::restart_if_active())
             });
             Event::ConfigSaved(r)
+        }
+        Cmd::Remove { device, config } => {
+            let r = lablink_setup::remove::remove_device(&client, &config, &device)
+                .map(|r| r.summary());
+            Event::Removed(device, r)
         }
         Cmd::TestSsh(device) => {
             let r = run_remote(&client, &device, "true");
@@ -503,6 +524,12 @@ fn daemon_build_warning(v: &Value, client_sha: Option<&str>) -> Option<String> {
                 .into()
         })
     })
+}
+
+fn files_protocol_warning(v: &Value) -> Option<String> {
+    (v["files_protocol_version"].as_u64()
+        != Some(lablink_core::protocol::FILES_PROTOCOL_VERSION as u64))
+        .then(|| "The running daemon does not support this Files workspace. Start the matching development daemon.".into())
 }
 
 /// `History` returns `{"events": [...]}`.
@@ -650,6 +677,15 @@ mod tests {
         .is_some());
         assert!(daemon_build_warning(&json!({"version":lablink_core::VERSION}), None).is_none());
         assert!(daemon_build_warning(&json!({"version":"old-version"}), None).is_some());
+    }
+
+    #[test]
+    fn files_workspace_requires_explicit_daemon_protocol_capability() {
+        assert!(files_protocol_warning(&json!({"version":lablink_core::VERSION})).is_some());
+        assert!(files_protocol_warning(&json!({"files_protocol_version":0})).is_some());
+        assert!(files_protocol_warning(&json!({"files_protocol_version":
+            lablink_core::protocol::FILES_PROTOCOL_VERSION}))
+        .is_none());
     }
 
     #[test]

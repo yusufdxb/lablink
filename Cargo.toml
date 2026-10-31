@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lablink-core",
     "crates/lablink-ssh",
+    "crates/lablink-files",
     "crates/lablink-platform",
     "crates/lablink-discovery",
     "crates/lablink-doctor",
@@ -13,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -24,6 +25,7 @@ publish = false
 [workspace.dependencies]
 lablink-core = { path = "crates/lablink-core" }
 lablink-ssh = { path = "crates/lablink-ssh" }
+lablink-files = { path = "crates/lablink-files" }
 lablink-discovery = { path = "crates/lablink-discovery" }
 lablink-platform = { path = "crates/lablink-platform" }
 lablink-doctor = { path = "crates/lablink-doctor" }

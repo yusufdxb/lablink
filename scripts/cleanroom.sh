@@ -116,49 +116,6 @@ status_json() { out_of "lablink status $1 --json"; }
 x() { as_tester "export DISPLAY=:99; $1"; }
 click() { x "xdotool mousemove $1 $2 click 1"; sleep "${3:-1}"; }
 
-# The device detail pane is a resizable egui panel. Its width on first display
-# varies between runs (seen: divider at x=542 and, once on Ubuntu 20.04,
-# x=440), which moves every control in it. Find the divider from a screenshot
-# (not from sleeps or coordinates) and drag it to where the click coordinates
-# below expect it; fail if the layout cannot be established.
-panel_divider_x() {
-    x "xdotool mousemove 1100 650"; sleep 0.6   # the divider is drawn brighter under the pointer
-    as_tester "DISPLAY=:99 xwd -root -silent > $xfer/_row.xwd"
-    docker cp "$cur:$xfer/_row.xwd" "$out/_row.xwd" >/dev/null
-    ffmpeg -loglevel error -y -i "$out/_row.xwd" -vf crop=1280:1:0:300 -f rawvideo -pix_fmt rgb24 "$out/_row.raw"
-    python3 -I -c '
-import sys
-d = open(sys.argv[1], "rb").read()
-for x in range(300, 760):
-    if tuple(d[x * 3:x * 3 + 3]) == (60, 60, 60):
-        print(x); break
-' "$out/_row.raw"
-}
-# egui needs a frame with the pointer over the handle before the press, and
-# frames between the moves: one chained xdotool command is too fast.
-drag_divider() { # drag_divider FROM_X TO_X
-    local from=$1 to=$2 p
-    x "xdotool mousemove $from 300"; sleep 0.6
-    x "xdotool mousedown 1"; sleep 0.4
-    for p in $(seq "$from" $(( to > from ? 20 : -20 )) "$to") "$to"; do x "xdotool mousemove $p 300"; sleep 0.1; done
-    sleep 0.3; x "xdotool mouseup 1"; sleep 1
-}
-gui_pin_panel_layout() { # gui_pin_panel_layout WANT_X
-    local want=$1 got i first
-    first=$(panel_divider_x)
-    if [ -n "${CR_SKEW_PANEL:-}" ]; then   # test hook: start from the other layout
-        got=$(panel_divider_x); drag_divider "$got" 440
-    fi
-    for i in 1 2 3; do
-        got=$(panel_divider_x)
-        [ "$got" = "$want" ] && { echo "initial=$first (skew hook: ${CR_SKEW_PANEL:-off}) final=$got attempts=$i" > "$out/panel-divider-x.txt"; return 0; }
-        [ -n "$got" ] || break
-        drag_divider "$got" "$want"
-    done
-    shot gui-layout-fail
-    fail "GUI-only: layout" "detail pane divider at x=${got:-none}, wanted $want (gui-layout-fail.png)"
-}
-
 echo "== artifacts"
 (cd dist && sha256sum -c SHA256SUMS) > "$out/sha256-check.txt" 2>&1 || fail "artifacts" "SHA256SUMS mismatch"
 grep -q "^lablink " dist/BUILDINFO && [ -n "$sha" ] || fail "artifacts" "BUILDINFO incomplete"
@@ -179,6 +136,10 @@ docker exec "$robotB" bash -c 'rm -f /etc/ssh/ssh_host_* && ssh-keygen -A >/dev/
 start_desktop "$desk" lab-desktop "$netA" "$preA.10"
 pass "fresh machine" "$base, user tester, systemd user session up"
 # GUI_ONLY=1 skips straight to the GUI-only section (repeat runs of that test).
+# TERM_APP=konsole runs that section's SSH setup in Konsole instead of xterm.
+# PASSPHRASE=... gives the new key a passphrase there (default: empty).
+term_app=${TERM_APP:-xterm}
+passphrase=${PASSPHRASE:-}
 if [ -z "${GUI_ONLY:-}" ]; then
 as_tester 'for t in cargo rustc ssh lablink; do command -v $t && exit 1; done; exit 0' || fail "fresh machine" "unexpected tools present"
 pass "no Rust, no ssh, no LabLink" "cargo, rustc, ssh, lablink all absent"
@@ -190,7 +151,7 @@ docker exec "$desk" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/
 v=$(out_of 'lablink version'); echo "$v" > "$out/version.txt"
 [ "$(head -1 <<<"$v")" = "lablink $version (commit $sha)" ] || fail "install .deb" "version says '$(head -1 <<<"$v")'"
 grep -q 'lablinkd not running' <<<"$v" || fail "install .deb" "$v"
-as_tester 'test -x /usr/bin/lablinkd && test -x /usr/bin/lablink-gui && test -f /usr/lib/systemd/user/lablinkd.service && test -f /usr/share/applications/lablink-gui.desktop && test -f /usr/share/icons/hicolor/scalable/apps/lablink.svg && test -f /usr/share/bash-completion/completions/lablink && test -f /usr/share/doc/lablink/copyright' \
+as_tester 'test -x /usr/bin/lablinkd && test -x /usr/bin/lablink-gui && test -f /usr/lib/systemd/user/lablinkd.service && test -f /usr/share/applications/lablink-gui.desktop && test -f /usr/share/icons/hicolor/256x256/apps/lablink.png && test ! -e /usr/share/icons/hicolor/scalable/apps/lablink.svg && test -f /usr/share/bash-completion/completions/lablink && test -f /usr/share/doc/lablink/copyright' \
     || fail "install .deb" "a packaged file is missing"
 pass "install .deb" "$(basename "$deb") via apt; '$(head -1 <<<"$v")'; binaries, user unit, desktop entry, icon, completion, copyright in place"
 
@@ -330,9 +291,9 @@ wait_for 30 'lablink sites --json | grep -q "\"state\": \"away\""' || fail "AWAY
 # for 2 s), so an in-flight check is not mistaken for a probe of an AWAY site.
 logA0=-1
 for _ in $(seq 1 15); do
-    n=$(docker logs "$robotA" 2>&1 | grep -c "Connection from\|Accepted\|Connection closed" || true)
-    [ "$n" = "$logA0" ] && break
-    logA0=$n
+    lines=$(docker logs "$robotA" 2>&1 | grep -c "Connection from\|Accepted\|Connection closed" || true)
+    [ "$lines" = "$logA0" ] && break
+    logA0=$lines
     sleep 2
 done
 st=$(status_json site-alpha/robot); echo "$st" > "$out/status-away.json"
@@ -479,9 +440,9 @@ docker rm -f "$robotA" "$desk" >/dev/null
 docker run -d --name "$robotA" --hostname robot-bench --network "$netA" --ip "$preA.20" lablink-cr-robot >/dev/null
 start_desktop "$desk2" lab-desktop-2 "$netA" "$preA.11"
 docker cp "$deb" "$desk2:$xfer/lablink.deb"
-docker exec "$desk2" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/lablink.deb xterm" > "$out/apt-install-2.log" 2>&1 \
+docker exec "$desk2" bash -c "apt-get update -qq && apt-get install -y -qq $xfer/lablink.deb $term_app" > "$out/apt-install-2.log" 2>&1 \
     || fail "GUI-only: install" "apt failed"
-pass "GUI-only: fresh user" "second container, .deb + xterm installed, no config"
+pass "GUI-only: fresh user" "second container, .deb + $term_app installed, no config"
 typein() { x "xdotool type --delay 40 '$1'"; }
 as_tester 'Xvfb :99 -screen 0 1280x860x24 >/tmp/xvfb.log 2>&1 &'
 sleep 1
@@ -489,53 +450,107 @@ as_tester "ping -c 1 -W 1 $preA.1 >/dev/null 2>&1 || true"
 x 'LIBGL_ALWAYS_SOFTWARE=1 nohup lablink-gui >/tmp/gui.log 2>&1 &'
 sleep 5
 x 'xdotool windowfocus --sync $(xdotool search --name LabLink | head -1)'
-click 283 195                      # site name field
+click 311 246                      # site name field
 typein 'Site Gamma'
 shot gui-b0-welcome
-click 78 315                       # Start
-click 15 170; click 271 170        # use the network, allow active scan
+click 78 414                       # Start
+click 21 231; click 286 231        # use the network, allow active scan
 shot gui-b1-networks
-click 146 229                      # Continue
-click 121 246 10                   # Set up LabLink
+click 110 321                      # Continue
+click 145 339 10                   # Set up LabLink
 shot gui-b2-setup-done
 as_tester 'systemctl --user is-active lablinkd' >/dev/null || fail "GUI-only: wizard" "daemon not running after the wizard"
 grep -q "active_scan: true" <(out_of 'cat ~/.config/lablink/config.yaml') || fail "GUI-only: wizard" "network not allowed"
 grep -q "name: Site Gamma" <(out_of 'cat ~/.config/lablink/config.yaml') || fail "GUI-only: wizard" "site not named"
 pass "GUI-only: wizard" "site name typed, network ticked (nothing preselected) -> service started, config written"
-click 78 370 15                    # Discover now (result page)
-click 93 84 2                      # Show the new hosts
+click 77 527 15                    # Discover now (result page)
+click 122 136 2                    # Show the new hosts
 shot gui-b3-discovered
-click 615 108 2                    # Inspect / Adopt the robot (second row)
-click 484 439; typein robot        # Name (the Site row above defaults to Site Gamma)
-click 484 461; typein 'Bench robot'
-click 484 525; typein robot        # SSH username
-click 394 483; click 410 529       # Type: Generic Linux Host
-shot gui-b4-adopt
-click 276 580 4                    # Adopt
-grep -q '"profile": "generic_linux"' <<<"$(status_json robot)" || fail "GUI-only: adopt" "robot not adopted (gui-b4-adopt.png)"
-pass "GUI-only: adopt" "inspected fingerprints, chose the site, named robot, label, type, user"
-gui_pin_panel_layout 542
-click 607 392 4                    # Trust host key... (in the wrapped explanation)
-shot gui-b5-trust
-x "xdotool mousemove 720 600"; for _ in 1 2 3; do x "xdotool click 5"; done; sleep 1   # scroll to the pin button
-shot gui-b5a-scrolled
-click 586 538 8                    # Pin N key(s)
-grep -q '"identity": "verified"' <<<"$(status_json robot)" || fail "GUI-only: trust" "not pinned (gui-b5-trust.png)"
-x "xdotool mousemove 720 600"; for _ in $(seq 15); do x "xdotool click 4"; done; sleep 1   # back to the top
-shot gui-b6-auth-failed
-pass "GUI-only: trust" "fingerprints shown, pinned only after the explicit click"
-click 592 425 3                    # SSH Setup -> terminal running lablink copy-id
-term=$(x 'xdotool search --class xterm | head -1')
-[ -n "$term" ] || fail "GUI-only: SSH setup" "no terminal opened"
-x "xdotool windowfocus --sync $term; xdotool type --window $term y; xdotool key --window $term Return"; sleep 1
-for _ in 1 2 3; do x "xdotool key --window $term Return"; sleep 1; done   # key file, empty passphrase x2
+dev="device-${preA//./-}-20"         # name LabLink suggests for the robot's address
+hostfps=$(docker exec "$robotA" bash -c 'for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done' | awk '{print $2}' | sort)
+click 1000 319 2                   # Connect securely... (robot, second row)
+click 266 481; typein robot        # Username
+click 169 578 6                    # Continue -> identity page
+shot gui-b4-identity
+grep -q '"identity": "verified"' <<<"$(status_json "$dev")" && fail "GUI-only: identity" "verified before confirmation"
+click 133 628                      # I compared the fingerprints
+click 238 668 4                    # Confirm identity and continue
+grep -q '"identity": "verified"' <<<"$(status_json "$dev")" || fail "GUI-only: identity" "not verified after confirmation (gui-b4-identity.png)"
+pinned=$(out_of "lablink inspect $dev" | awk '/pinned key/{print $4}' | sort)
+[ -n "$pinned" ] && [ "$pinned" = "$hostfps" ] || fail "GUI-only: identity" "pinned keys differ from the robot's host keys"
+pass "GUI-only: identity" "fingerprints shown, unverified until the explicit confirmation, pins match the robot's host keys"
+shot gui-b5-key
+as_tester 'ls ~/.ssh/lablink-key-* 2>/dev/null' && fail "GUI-only: key" "key exists before consent"
+click 133 485                      # consent to create a new key
+click 238 552 1                    # Open authentication terminal
+wait_for 20 "DISPLAY=:99 xdotool search --onlyvisible --class $term_app" \
+    || { shot gui-b6-noterm; fail "GUI-only: SSH setup" "no terminal opened (gui-b6-noterm.png)"; }
+sleep 2                            # let ssh-keygen reach its passphrase prompt
+term=$(out_of "DISPLAY=:99 xdotool search --onlyvisible --class $term_app | tail -1")
+# Keys go through XTEST to the focused window. Focus is set explicitly
+# (XSetInputFocus): LabLink was focused earlier, so focus no longer follows the
+# pointer. `--window` would use XSendEvent, which xterm ignores (allowSendEvents
+# is off) and xdotool 3.20160805 on 20.04 always uses.
+eval "$(out_of "DISPLAY=:99 xdotool getwindowgeometry --shell $term" | grep -E '^(X|Y|WIDTH|HEIGHT)=[0-9]+$')"
+[ -n "${WIDTH:-}" ] || { shot gui-b6-noterm; fail "GUI-only: SSH setup" "terminal closed early (gui-b6-noterm.png)"; }
+x "xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT / 2)); xdotool windowfocus --sync $term"; sleep 1
+for _ in 1 2; do typein "$passphrase"; x "xdotool key Return"; sleep 1; done   # passphrase x2 (no filename prompt)
+# Every later prompt belongs to one OpenSSH process: the robot's password to
+# ssh-copy-id's install step (`exec sh -c`), the key passphrase to the fresh
+# key-only test (IdentityAgent=none) and to ssh-copy-id's already-installed
+# check (PreferredAuthentications=publickey). OpenSSH discards typeahead when
+# it shows a prompt, so wait for that ssh and retype while it is still waiting.
+# ([e] etc. keep pgrep from matching its own shell.)
+wait_for 30 'pgrep -u tester -f "[e]xec sh -c|[P]referredAuthentications=publickey" >/dev/null' \
+    || { shot gui-b6-nocopy; fail "GUI-only: SSH setup" "ssh-copy-id never reached an OpenSSH prompt (gui-b6-nocopy.png)"; }
+answered=""
+for _ in $(seq 1 12); do
+    sleep 2
+    if as_tester 'pgrep -u tester -f "[e]xec sh -c" >/dev/null'; then answer=robot-pass-1; stage=password
+    elif as_tester 'pgrep -u tester -f "[I]dentityAgent=none" >/dev/null'; then answer=$passphrase; stage=test-passphrase
+    elif as_tester 'pgrep -u tester -f "[P]referredAuthentications=publickey" >/dev/null'; then answer=$passphrase; stage=check-passphrase
+    else break
+    fi
+    answered="$answered $stage"
+    x "xdotool type --delay 40 '$answer'; xdotool key Return"
+    sleep 4
+done
+echo "prompts answered:$answered" > "$out/gui-ssh-prompts.txt"
+docker logs "$robotA" > "$out/robot-a-sshd-gui.log" 2>&1 || true
+if [ -z "$passphrase" ]; then
+    wait_for 30 "lablink status $dev --json | grep -q '\"color\": \"green\"'" || { shot gui-b6-fail; fail "GUI-only: SSH setup" "not GREEN"; }
+    as_tester 'ls ~/.ssh/lablink-key-*' >/dev/null || fail "GUI-only: key" "no LabLink key created"
+    pass "GUI-only: SSH setup" "key created after consent, password only in the OpenSSH prompt, real login test GREEN ($term_app)"
+else
+    # The setup itself must finish: the GUI saves the key (in the daemon's cache)
+    # only after the fresh test passed.
+    wait_for 30 'grep -aq lablink-key- ~/.local/state/lablink/cache.db*' || { shot gui-b6-fail; fail "GUI-only: SSH setup" "key not saved: the passphrase test did not pass (gui-b6-fail.png)"; }
+    key=$(out_of 'ls ~/.ssh/lablink-key-*/id_ed25519')
+    as_tester "ssh-keygen -y -P '' -f $key" >/dev/null 2>&1 && fail "GUI-only: key" "key is not encrypted"
+    shot gui-b6-passphrase
+    # The daemon's unattended check (BatchMode) cannot type a passphrase.
+    st=$(status_json "$dev"); printf '%s\n' "$st" > "$out/status-encrypted-no-agent.json"
+    color=$(grep -o '"color": "[a-z]*"' <<<"$st" | head -1)
+    pass "GUI-only: SSH setup" "encrypted key created after consent; passphrase and password typed only into OpenSSH prompts (${answered# }); key saved after the fresh test; daemon without an agent: $color"
+    # The user unlocks the key in their own agent; the user manager learns its socket.
+    as_tester "eval \$(ssh-agent -a /run/user/1000/lablink-test-agent.sock) >/dev/null; printf '#!/bin/sh\necho %s\n' '$passphrase' > /tmp/askpass; chmod 700 /tmp/askpass; SSH_ASKPASS=/tmp/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=:99 ssh-add $key </dev/null; rm -f /tmp/askpass; systemctl --user set-environment SSH_AUTH_SOCK=/run/user/1000/lablink-test-agent.sock" > "$out/ssh-add.txt" 2>&1 \
+        || fail "GUI-only: agent" "ssh-add failed (ssh-add.txt)"
+    as_tester "lablink set $dev --recheck" >/dev/null 2>&1 || true
+    sleep 5
+    before=$(grep -o '"color": "[a-z]*"' <<<"$(status_json "$dev")" | head -1)
+    as_tester 'systemctl --user restart lablinkd'
+    wait_for 30 "lablink status $dev --json | grep -q '\"color\": \"green\"'" || fail "GUI-only: agent" "not GREEN after unlocking the key and restarting lablinkd (was $before before the restart)"
+    pass "GUI-only: agent" "key unlocked with ssh-add, SSH_AUTH_SOCK set in the user manager: running daemon $before; after restarting lablinkd: GREEN"
+fi
 sleep 3
-x "xdotool type --window $term --delay 40 robot-pass-1; xdotool key --window $term Return"
-wait_for 30 'lablink status robot --json | grep -q "\"color\": \"green\""' || { shot gui-b7-fail; fail "GUI-only: SSH setup" "not GREEN"; }
 x 'xdotool windowfocus --sync $(xdotool search --name LabLink | head -1)'
-sleep 2
-shot gui-b7-managed
-pass "GUI-only: SSH setup" "SSH Setup opened a terminal, key created and installed; robot GREEN/Managed (gui-b7)"
+click 266 383; typein 'Bench robot'
+click 177 419 3                    # Save device
+shot gui-b7-done
+grep -q '"label": "Bench robot"' <<<"$(status_json "$dev")" || fail "GUI-only: name" "label not saved (gui-b7-done.png)"
+click 156 388 2                    # Done
+shot gui-b8-managed
+pass "GUI-only: name" "friendly name saved; device GREEN, ssh ok, identity verified"
 x 'pkill -x lablink-gui' || true
 
 # ---- tarball: a third fresh user, no root ----------------------------------------------
@@ -564,7 +579,7 @@ as_tester 'test ! -e ~/.config/lablink && test ! -e ~/.local/state/lablink' || f
 # Prefixes: "=" is refused, uninstalling one prefix keeps another prefix's menu
 # entry, and --purge never deletes a custom LABLINK_STATE_DIR wholesale.
 as_tester 'cd /var/tmp/lablink-*-x86_64-linux && mkdir -p "$HOME/a=b" && ! ./install.sh "$HOME/a=b"' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "a PREFIX containing = was accepted"
-as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./install.sh && ./install.sh "$HOME/opt-ll" && ./uninstall.sh && grep -q opt-ll ~/.local/share/applications/lablink-gui.desktop && test -f ~/.local/share/icons/hicolor/scalable/apps/lablink.svg && test -x ~/opt-ll/bin/lablink' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "uninstalling ~/.local removed another prefix's menu entry or files"
+as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./install.sh && ./install.sh "$HOME/opt-ll" && ./uninstall.sh && grep -q opt-ll ~/.local/share/applications/lablink-gui.desktop && test -f ~/.local/share/icons/hicolor/256x256/apps/lablink.png && test -x ~/opt-ll/bin/lablink' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "uninstalling ~/.local removed another prefix's menu entry or files"
 as_tester 'cd /var/tmp/lablink-*-x86_64-linux && ./uninstall.sh "$HOME/opt-ll" && mkdir -p ~/state && echo keep > ~/state/other.txt && LABLINK_STATE_DIR=$HOME/state ./uninstall.sh --purge && test -f ~/state/other.txt' >> "$out/tarball.txt" 2>&1 || fail "tarball prefixes" "--purge deleted a custom LABLINK_STATE_DIR"
 pass "tarball install / uninstall" "checksum, install.sh into ~/.local, '$tv', init + user unit, daemon, discover; uninstall kept config, --purge removed it; PREFIX with = refused; a second prefix's menu entry and a custom state dir survive"
 

@@ -5,10 +5,10 @@ use eframe::egui::Color32;
 use lablink_core::model::{AuthState, Color, DeviceStatus, IdentityState, NetworkState, PortState};
 use lablink_core::time::format_age;
 
-pub const GREEN: Color32 = Color32::from_rgb(46, 160, 67);
-pub const YELLOW: Color32 = Color32::from_rgb(214, 158, 22);
-pub const RED: Color32 = Color32::from_rgb(220, 53, 69);
-pub const GRAY: Color32 = Color32::from_rgb(128, 128, 128);
+pub const GREEN: Color32 = crate::theme::SUCCESS;
+pub const YELLOW: Color32 = crate::theme::WARNING;
+pub const RED: Color32 = crate::theme::ERROR;
+pub const GRAY: Color32 = crate::theme::MUTED;
 
 /// Traffic-light color for the big state dot.
 pub fn state_color(c: Color) -> Color32 {
@@ -120,7 +120,7 @@ pub fn last_seen_text(ms: Option<u64>) -> String {
 /// Title line: `name` or `name (label)`.
 pub fn title_text(d: &DeviceStatus) -> String {
     match d.label.as_deref().filter(|l| !l.is_empty()) {
-        Some(l) => format!("{} ({l})", d.name),
+        Some(l) => format!("{l} ({})", d.name),
         None => d.name.clone(),
     }
 }
@@ -191,10 +191,50 @@ pub mod tests_support {
     }
 }
 
+/// Marker that separates the plain-language part of a message from the raw
+/// error text behind it.
+pub const DETAILS: &str = "\n\nTechnical details: ";
+
+/// Split a message into what people read first and the technical details
+/// shown on request.
+pub fn split_details(msg: &str) -> (&str, Option<&str>) {
+    match msg.split_once(DETAILS) {
+        Some((head, tail)) if !tail.trim().is_empty() => (head, Some(tail)),
+        Some((head, _)) => (head, None),
+        None => (msg, None),
+    }
+}
+
+/// Show `msg` in `color`, with any technical details behind a collapsed
+/// "Technical details" section (nothing is hidden: it is one click away).
+pub fn message_with_details(ui: &mut eframe::egui::Ui, color: Color32, msg: &str) {
+    let (head, details) = split_details(msg);
+    ui.colored_label(color, head);
+    if let Some(d) = details {
+        eframe::egui::CollapsingHeader::new("Technical details")
+            .id_salt(("details", head))
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.add(eframe::egui::Label::new(eframe::egui::RichText::new(d).monospace()).wrap());
+            });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tests_support::dev;
+
+    #[test]
+    fn technical_details_are_split_off_not_dropped() {
+        assert_eq!(split_details("plain"), ("plain", None));
+        let m = format!("Couldn't find it.{DETAILS}failed to lookup address");
+        assert_eq!(
+            split_details(&m),
+            ("Couldn't find it.", Some("failed to lookup address"))
+        );
+        assert_eq!(split_details(&format!("x{DETAILS}  ")), ("x", None));
+    }
 
     #[test]
     fn state_colors_are_distinct_and_fixed() {
@@ -258,7 +298,7 @@ mod tests {
         let mut d = dev();
         assert_eq!(title_text(&d), "jetson-a");
         d.label = Some("bench".into());
-        assert_eq!(title_text(&d), "jetson-a (bench)");
+        assert_eq!(title_text(&d), "bench (jetson-a)");
         d.label = Some(String::new());
         assert_eq!(title_text(&d), "jetson-a");
     }
