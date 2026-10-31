@@ -1,10 +1,12 @@
 //! GUI SSH onboarding. No password widget, terminal capture or shell commands.
 use crate::{term, view};
 use eframe::egui::{self, RichText};
-use lablink_core::client::Client;
+use lablink_core::client::{Client, ClientError};
 use lablink_core::model::{DiscoveredHost, TrustReport};
+use lablink_core::protocol::ErrorCode;
 use lablink_core::protocol::{DeviceChanges, Request};
 use lablink_core::site::{SiteState, SiteStatus};
+use lablink_setup::manual;
 use lablink_setup::onboarding::{self as setup, Plan, Progress, Session};
 use std::path::PathBuf;
 use std::sync::{
@@ -95,8 +97,10 @@ impl Onboarding {
         w
     }
     fn details_error(&self, sites: &[SiteStatus]) -> Option<String> {
-        if self.ip.parse::<std::net::IpAddr>().is_err() {
-            return Some("Enter a valid IP address.".into());
+        if self.device.is_none() {
+            if let Err(e) = manual::Target::parse(&self.ip) {
+                return Some(e);
+            }
         }
         if !lablink_core::config::valid_username(self.username.trim()) {
             return Some("Enter the device's SSH login username.".into());
@@ -112,7 +116,7 @@ impl Onboarding {
         }
         None
     }
-    fn prepare(&mut self, socket: PathBuf, ctx: egui::Context) {
+    fn prepare(&mut self, socket: PathBuf, config: PathBuf, ctx: egui::Context) {
         self.error = None;
         self.page = Page::Finding;
         self.verified = false;
@@ -124,6 +128,7 @@ impl Onboarding {
             self.known_host,
         );
         let tx = self.tx.clone();
+        let cancel = self.cancel.clone();
         std::thread::spawn(move || {
             let c = Client::new(socket).with_timeout(Duration::from_secs(150));
             let r = (|| -> Result<TrustReport, String> {
@@ -145,20 +150,20 @@ impl Onboarding {
                         return Err("This device belongs to a different site. Its trust and credentials were kept.".into());
                     }
                     id
+                } else if let Some(t) = routed_target(&c, &ip, known)? {
+                    // Not on a directly attached network: LabLink cannot
+                    // discover it, so it becomes a configured device.
+                    add_configured(&c, &config, &site, &t, &username, &cancel, |id| {
+                        let _ = tx.send(Event::Adopted(id.to_string()));
+                        ctx.request_repaint();
+                    })?
                 } else {
-                    if !known {
-                        let addr: std::net::Ipv4Addr = ip.parse().map_err(|_| "Manual discovery currently supports private, directly attached IPv4 addresses. Select an already discovered host for IPv6.".to_string())?;
-                        c.call(&Request::Discover {
-                            scan_cidr: Some(format!("{addr}/32")),
-                        })
-                        .map_err(|e| e.to_string())?;
-                    }
                     let list = c.call(&Request::Discovered).map_err(|e| e.to_string())?;
                     let hosts: Vec<DiscoveredHost> =
                         serde_json::from_value(list["discovered"].clone())
                             .map_err(|_| "Could not read discovered devices.")?;
                     let h = hosts.iter().find(|h| h.ip == ip).ok_or(
-                        "Device unavailable. Check the IP address and network, then retry.",
+                        "No device answered at this address. Check that it is on and connected to this network, then retry.",
                     )?;
                     if h.site.as_ref().is_some_and(|s| s != &site) {
                         return Err(
@@ -373,6 +378,7 @@ impl Onboarding {
         &mut self,
         ctx: &egui::Context,
         socket: &std::path::Path,
+        config: &std::path::Path,
         sites: &[SiteStatus],
         terminal: Option<&str>,
     ) -> bool {
@@ -396,19 +402,19 @@ impl Onboarding {
                     }
                 }
                 ui.separator();
-                if let Some(e) = &self.error { ui.colored_label(view::RED, e); ui.add_space(8.0); }
+                if let Some(e) = &self.error { view::message_with_details(ui, view::RED, e); ui.add_space(8.0); }
                 match self.page {
                     Page::Details => {
                         ui.label("Choose the site and SSH username for this device.");
                         egui::ComboBox::from_id_salt("ssh_site").selected_text(sites.iter().find(|s| Some(&s.id) == self.site.as_ref()).map(|s| s.name.as_str()).unwrap_or("Select a site"))
                             .show_ui(ui, |ui| { for s in sites { ui.add_enabled_ui(s.state == SiteState::Active && self.device.is_none(), |ui| { ui.selectable_value(&mut self.site, Some(s.id.clone()), &s.name); }); } });
-                        ui.label("IP address");
-                        ui.add_enabled(self.device.is_none(), egui::TextEdit::singleline(&mut self.ip));
+                        ui.label("IP address or hostname");
+                        ui.add_enabled(self.device.is_none(), egui::TextEdit::singleline(&mut self.ip).hint_text("192.168.1.20, robot.local or robot.example.ts.net"));
                         ui.label("SSH username"); ui.text_edit_singleline(&mut self.username);
-                        ui.weak("Home and Lab are separate sites. Use the site active on this network.");
+                        ui.weak("A device on this network is found directly. A hostname, Tailscale name or other routed address is added to the configuration and checked from here; nothing is scanned.");
                         let err = self.details_error(sites);
                         if let Some(e) = &err { ui.weak(e); }
-                        if ui.add_enabled(err.is_none(), egui::Button::new("Continue")).clicked() { self.prepare(socket.to_path_buf(), ctx.clone()); }
+                        if ui.add_enabled(err.is_none(), egui::Button::new("Continue")).clicked() { self.prepare(socket.to_path_buf(), config.to_path_buf(), ctx.clone()); }
                     }
                     Page::Identity => {
                         if let Some(p) = &self.preview {
@@ -464,6 +470,92 @@ pub fn pins_conflict(p: &TrustReport) -> bool {
                 .any(|old| old.fingerprint == k.fingerprint)
         })
 }
+/// `Some(target)` when the typed address cannot be discovered from this
+/// computer (a hostname, IPv6, or an IPv4 address outside every directly
+/// attached network), `None` when discovery found or can look for it.
+fn routed_target(c: &Client, input: &str, known: bool) -> Result<Option<manual::Target>, String> {
+    if known {
+        return Ok(None);
+    }
+    let t = manual::Target::parse(input)?;
+    match &t {
+        manual::Target::Host(h) => {
+            manual::resolve(h).map_err(|e| format!(
+                "Couldn't find an address for {h}. Check the spelling and that the device is on; for a Tailscale name, check that Tailscale is running on this computer. You can also enter the device's IP address instead.\n\nTechnical details: {e}"
+            ))?;
+            Ok(Some(t))
+        }
+        manual::Target::Ip(std::net::IpAddr::V6(_)) => Ok(Some(t)),
+        manual::Target::Ip(std::net::IpAddr::V4(v4)) => {
+            match c.call(&Request::Discover {
+                scan_cidr: Some(format!("{v4}/32")),
+            }) {
+                Ok(_) => Ok(None),
+                // Refused = not inside an attached private network, so
+                // discovery cannot see it; it is reached by routing instead.
+                Err(ClientError::Api(e)) if e.code == ErrorCode::Refused => Ok(Some(t)),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+    }
+}
+
+/// Add `t` to the site's configuration, restart the daemon so it monitors
+/// it, and wait until LabLink has an address for it. `added` runs as soon as
+/// the entry is saved so a later failure keeps the progress.
+fn add_configured(
+    c: &Client,
+    config: &std::path::Path,
+    site: &str,
+    t: &manual::Target,
+    username: &str,
+    cancel: &AtomicBool,
+    added: impl Fn(&str),
+) -> Result<String, String> {
+    // Skip names the daemon already uses at this site (adopted devices are
+    // not in the file).
+    let base = manual::suggest_name(t);
+    let mut name = base.clone();
+    for i in 2..100 {
+        if c.call(&Request::Inspect {
+            device: format!("{site}/{name}"),
+        })
+        .is_err()
+        {
+            break;
+        }
+        name = format!("{base}-{i}");
+    }
+    let mut id = String::new();
+    lablink_setup::configfile::update(config, |cfg| {
+        let n = manual::free_name(cfg, site, &name);
+        id = manual::add_to_config(cfg, site, &n, t, username)?;
+        Ok(())
+    })?;
+    added(&id);
+    let restart = lablink_setup::service::restart_if_active();
+    if !restart.starts_with("restarted") {
+        return Err(format!(
+            "Added {id} to the configuration, but {restart}. It appears once LabLink restarts."
+        ));
+    }
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline && !cancel.load(Ordering::Acquire) {
+        if let Ok(d) = c.call_typed::<lablink_core::model::DeviceDetail>(&Request::Inspect {
+            device: id.clone(),
+        }) {
+            if d.status.ip.is_some() {
+                return Ok(id);
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    Err(format!(
+        "Added {id}, but LabLink can't reach {} from this computer yet. Check that the device is on and reachable (for a Tailscale name, that Tailscale is connected on both computers), then select Continue to retry.",
+        t.display()
+    ))
+}
+
 pub fn can_confirm(p: &TrustReport, independently_verified: bool) -> bool {
     independently_verified && !p.scanned.is_empty() && !pins_conflict(p)
 }

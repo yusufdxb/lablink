@@ -602,14 +602,12 @@ impl App {
         let mut dismiss = false;
         if let Some((ok, msg)) = &self.banner {
             ui.horizontal(|ui| {
-                ui.colored_label(
-                    if *ok {
-                        crate::theme::success(ui)
-                    } else {
-                        crate::theme::error(ui)
-                    },
-                    msg,
-                );
+                let color = if *ok {
+                    crate::theme::success(ui)
+                } else {
+                    crate::theme::error(ui)
+                };
+                ui.vertical(|ui| view::message_with_details(ui, color, msg));
                 dismiss = ui.small_button("dismiss").clicked();
             });
         }
@@ -1021,7 +1019,9 @@ impl App {
         ui.label(RichText::new("Discover  ->  Verify identity  ->  Connect").strong());
         ui.add_space(6.0);
         ui.label("1. Discover finds hosts on the networks you allowed in Settings.");
-        ui.label("2. Select Connect securely on the Discovered tab, or enter an IP address.");
+        ui.label(
+            "2. Select Connect securely on the Discovered tab, or enter an IP address or hostname.",
+        );
         ui.label(
             "3. Independently confirm the device fingerprint, then authenticate in the terminal.",
         );
@@ -1034,7 +1034,7 @@ impl App {
             {
                 self.start_discover();
             }
-            if ui.button("Connect by IP address…").clicked() {
+            if ui.button("Connect by address or hostname…").clicked() {
                 let site = self
                     .sites
                     .iter()
@@ -1215,14 +1215,12 @@ impl App {
             }
         });
         if let Some((ok, msg)) = &self.notice {
-            ui.colored_label(
-                if *ok {
-                    crate::theme::success(ui)
-                } else {
-                    crate::theme::error(ui)
-                },
-                msg,
-            );
+            let color = if *ok {
+                crate::theme::success(ui)
+            } else {
+                crate::theme::error(ui)
+            };
+            view::message_with_details(ui, color, msg);
         }
         if let Some(e) = &self.detail_error {
             ui.colored_label(crate::theme::error(ui), e);
@@ -1696,7 +1694,7 @@ impl App {
         if ui
             .add_enabled(
                 self.onboarding.is_none(),
-                egui::Button::new("Connect by IP address…"),
+                egui::Button::new("Connect by address or hostname…"),
             )
             .clicked()
         {
@@ -2226,7 +2224,13 @@ impl eframe::App for App {
         self.adopt_window(&ctx);
         self.remove_window(&ctx);
         if let Some(w) = self.onboarding.as_mut() {
-            if w.show(&ctx, &self.socket, &self.sites, self.terminal.as_deref()) {
+            if w.show(
+                &ctx,
+                &self.socket,
+                &self.config_path,
+                &self.sites,
+                self.terminal.as_deref(),
+            ) {
                 self.onboarding = None;
                 self.refresh();
             }

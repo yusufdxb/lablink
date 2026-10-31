@@ -191,10 +191,50 @@ pub mod tests_support {
     }
 }
 
+/// Marker that separates the plain-language part of a message from the raw
+/// error text behind it.
+pub const DETAILS: &str = "\n\nTechnical details: ";
+
+/// Split a message into what people read first and the technical details
+/// shown on request.
+pub fn split_details(msg: &str) -> (&str, Option<&str>) {
+    match msg.split_once(DETAILS) {
+        Some((head, tail)) if !tail.trim().is_empty() => (head, Some(tail)),
+        Some((head, _)) => (head, None),
+        None => (msg, None),
+    }
+}
+
+/// Show `msg` in `color`, with any technical details behind a collapsed
+/// "Technical details" section (nothing is hidden: it is one click away).
+pub fn message_with_details(ui: &mut eframe::egui::Ui, color: Color32, msg: &str) {
+    let (head, details) = split_details(msg);
+    ui.colored_label(color, head);
+    if let Some(d) = details {
+        eframe::egui::CollapsingHeader::new("Technical details")
+            .id_salt(("details", head))
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.add(eframe::egui::Label::new(eframe::egui::RichText::new(d).monospace()).wrap());
+            });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tests_support::dev;
+
+    #[test]
+    fn technical_details_are_split_off_not_dropped() {
+        assert_eq!(split_details("plain"), ("plain", None));
+        let m = format!("Couldn't find it.{DETAILS}failed to lookup address");
+        assert_eq!(
+            split_details(&m),
+            ("Couldn't find it.", Some("failed to lookup address"))
+        );
+        assert_eq!(split_details(&format!("x{DETAILS}  ")), ("x", None));
+    }
 
     #[test]
     fn state_colors_are_distinct_and_fixed() {
