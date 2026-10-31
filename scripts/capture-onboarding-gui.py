@@ -117,7 +117,11 @@ def click(x, y):
 
 def shot(name):
     time.sleep(0.8)
-    ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).save(OUT / name)
+    # Only the LabLink window, not the empty root window around it.
+    g = dict(kv.split("=", 1) for kv in subprocess.check_output(
+        ["xdotool", "getwindowgeometry", "--shell", window], text=True).split())
+    x, y, w, h = (int(g[k]) for k in ("X", "Y", "WIDTH", "HEIGHT"))
+    ImageGrab.grab(bbox=(x, y, x + w, y + h), xdisplay=os.environ["DISPLAY"]).save(OUT / name)
     print(OUT / name, flush=True)
 
 

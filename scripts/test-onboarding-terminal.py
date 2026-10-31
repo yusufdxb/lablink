@@ -19,6 +19,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "target/debug/lablink"
+# The fixture daemon reports this build's version: the CLI refuses an
+# unversioned or different daemon before resolving or trusting anything.
+VERSION = next(l.split('"')[1] for l in (ROOT / "Cargo.toml").read_text().splitlines() if l.startswith("version ="))
 
 
 def wait_for(predicate, seconds=45):
@@ -95,7 +98,9 @@ class Fixture:
                 f = conn.makefile("rwb")
                 req = json.loads(f.readline())
                 self.calls.append(req)
-                result = self.resolve if req["method"] == "resolve" else {}
+                result = (self.resolve if req["method"] == "resolve"
+                          else dict(protocol_version=1, version=VERSION, pid=os.getpid(), uptime_s=1)
+                          if req["method"] == "ping" else {})
                 f.write((json.dumps(dict(ok=True, result=result)) + "\n").encode())
                 f.flush()
 
