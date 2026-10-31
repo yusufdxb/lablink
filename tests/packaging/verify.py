@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='lablink-package-') as temp:
         desktop = Path('/usr/share/applications/lablink-gui.desktop')
         assert 'Exec=lablink-gui' in desktop.read_text()
 
-    assert run([str(cli), 'version']).stdout.splitlines()[0] == f'lablink 0.3.0 (commit {commit})'
+    assert run([str(cli), 'version']).stdout.splitlines()[0] == f'{Path("/artifacts/BUILDINFO").read_text().splitlines()[0]} (commit {commit})'
     for name in ['lablink', 'lablinkd', 'lablink-gui']:
         binary = cli.with_name(name)
         assert binary.is_file() and os.access(binary, os.X_OK)
