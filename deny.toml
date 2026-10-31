@@ -7,7 +7,11 @@ all-features = false
 [advisories]
 # Every RustSec advisory fails the check unless it is listed here with a
 # reason after investigation.
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "Unmaintained notice only (no vulnerability): zvariant/zbus_names were merged into zbus 6. Reached only through eframe -> accesskit (Linux screen-reader support); the newest accesskit_unix (0.24.1) still requires zbus 5, so no upgrade exists. Revisit when accesskit moves to zbus 6." },
+    { id = "RUSTSEC-2026-0371", reason = "Unmaintained notice only (no vulnerability): zvariant/zbus_names were merged into zbus 6. Reached only through eframe -> accesskit (Linux screen-reader support); the newest accesskit_unix (0.24.1) still requires zbus 5, so no upgrade exists. Revisit when accesskit moves to zbus 6." },
+    { id = "RUSTSEC-2026-0372", reason = "Unmaintained notice only (no vulnerability): zvariant/zbus_names were merged into zbus 6. Reached only through eframe -> accesskit (Linux screen-reader support); the newest accesskit_unix (0.24.1) still requires zbus 5, so no upgrade exists. Revisit when accesskit moves to zbus 6." },
+]
 
 [licenses]
 # Licenses compatible with distributing LabLink under Apache-2.0.
