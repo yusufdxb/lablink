@@ -131,6 +131,31 @@ fn private_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.write_all(bytes)?;
     f.sync_all()
 }
+/// Create `bin/ssh` running `ssh` with `-F /dev/null` and return a PATH with
+/// `bin` first. Both paths must be plain (no quoting or PATH separators).
+fn ssh_shim(bin: &Path, ssh: &Path) -> std::io::Result<std::ffi::OsString> {
+    let plain = |p: &Path| p.to_str().is_some_and(valid_ssh_identity_path);
+    if !plain(bin) || !plain(ssh) {
+        return Err(std::io::Error::other("unsafe path for the ssh shim"));
+    }
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(bin)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(bin.join("ssh"))?;
+    write!(
+        f,
+        "#!/bin/sh\nexec '{}' -F /dev/null \"$@\"\n",
+        ssh.display()
+    )?;
+    f.sync_all()?;
+    let mut dirs = vec![bin.to_path_buf()];
+    dirs.extend(std::env::split_paths(&lablink_core::program::search_path()));
+    std::env::join_paths(dirs).map_err(std::io::Error::other)
+}
 fn read_private(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     let f = std::fs::OpenOptions::new()
         .read(true)
@@ -404,10 +429,17 @@ pub fn run_helper(client: &Client, dir: &Path) -> Result<(), String> {
             }
         };
         validate_identity(&identity).map_err(|_| Progress::KeyFailed)?;
-        let mut args = vec!["-F".into(), "/dev/null".into()];
-        args.extend(copy_id_args(&t, &public_path(&identity)).map_err(|_| Progress::KeyFailed)?);
+        let args = copy_id_args(&t, &public_path(&identity)).map_err(|_| Progress::KeyFailed)?;
         let mut cmd =
             lablink_core::program::command("ssh-copy-id").map_err(|_| Progress::Unavailable)?;
+        // ssh-copy-id before OpenSSH 8.9 rejects `-F`, so it reaches ssh
+        // through a private shim instead: every ssh the script runs is the
+        // device's ssh binary reading no configuration file.
+        let ssh = lablink_core::program::command(&t.binary).map_err(|_| Progress::Unavailable)?;
+        let bin = dir.join("bin");
+        let path =
+            ssh_shim(&bin, Path::new(ssh.get_program())).map_err(|_| Progress::Unavailable)?;
+        cmd.env("PATH", path);
         // ssh-copy-id's own scratch directory must stay private and have a
         // safe path. TMPDIR alone does not control all versions of the script.
         let scratch_home = dir.join("home");
@@ -600,6 +632,29 @@ mod tests {
             assert!(copy.iter().any(|a| a == flag));
         }
         assert!(copy_id_args(&t, Path::new("/tmp/$(id).pub")).is_err());
+    }
+    #[test]
+    fn ssh_shim_adds_no_config_and_comes_first_in_path() {
+        let d = tempfile::tempdir().unwrap();
+        let fake = d.path().join("real-ssh");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s|' \"$@\"\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = d.path().join("bin");
+        let path = ssh_shim(&bin, &fake).unwrap();
+        assert_eq!(std::env::split_paths(&path).next().unwrap(), bin);
+        let out = Command::new("ssh")
+            .env("PATH", &path)
+            .args(["-o", "A=b c", "host"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "-F|/dev/null|-o|A=b c|host|"
+        );
+        let mode = std::fs::metadata(bin.join("ssh")).unwrap().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert!(ssh_shim(&d.path().join("b2"), Path::new("/x/it's")).is_err());
+        assert!(ssh_shim(&d.path().join("b:3"), &fake).is_err());
     }
     #[test]
     fn progress_only_succeeds_after_both_steps() {

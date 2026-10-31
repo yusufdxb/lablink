@@ -478,13 +478,31 @@ pass "GUI-only: identity" "fingerprints shown, unverified until the explicit con
 shot gui-b5-key
 as_tester 'ls ~/.ssh/lablink-key-* 2>/dev/null' && fail "GUI-only: key" "key exists before consent"
 click 133 485                      # consent to create a new key
-click 238 552 3                    # Open authentication terminal
-term=$(x 'xdotool search --class xterm | head -1')
-[ -n "$term" ] || fail "GUI-only: SSH setup" "no terminal opened"
-x "xdotool windowfocus --sync $term"
-for _ in 1 2; do x "xdotool key --window $term Return"; sleep 1; done   # empty passphrase x2 (no filename prompt)
-sleep 3
-x "xdotool type --window $term --delay 40 robot-pass-1; xdotool key --window $term Return"
+click 238 552 1                    # Open authentication terminal
+wait_for 20 'DISPLAY=:99 xdotool search --onlyvisible --class xterm' \
+    || { shot gui-b6-noterm; fail "GUI-only: SSH setup" "no terminal opened (gui-b6-noterm.png)"; }
+sleep 2                            # let ssh-keygen reach its passphrase prompt
+term=$(out_of 'DISPLAY=:99 xdotool search --onlyvisible --class xterm | tail -1')
+# Keys go through XTEST to the focused window. Focus is set explicitly
+# (XSetInputFocus): LabLink was focused earlier, so focus no longer follows the
+# pointer. `--window` would use XSendEvent, which xterm ignores (allowSendEvents
+# is off) and xdotool 3.20160805 on 20.04 always uses.
+eval "$(out_of "DISPLAY=:99 xdotool getwindowgeometry --shell $term" | grep -E '^(X|Y|WIDTH|HEIGHT)=[0-9]+$')"
+[ -n "${WIDTH:-}" ] || { shot gui-b6-noterm; fail "GUI-only: SSH setup" "terminal closed early (gui-b6-noterm.png)"; }
+x "xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT / 2)); xdotool windowfocus --sync $term"; sleep 1
+for _ in 1 2; do x "xdotool key Return"; sleep 1; done   # empty passphrase x2 (no filename prompt)
+# ssh-copy-id's install step runs `ssh ... "exec sh -c ..."`. OpenSSH discards
+# typeahead when it shows the password prompt, so wait for that ssh and retype
+# while it is still waiting. ([e] keeps pgrep from matching its own shell.)
+wait_for 30 'pgrep -u tester -f "[e]xec sh -c" >/dev/null' \
+    || { shot gui-b6-nocopy; fail "GUI-only: SSH setup" "ssh-copy-id never reached its password step (gui-b6-nocopy.png)"; }
+for _ in 1 2 3; do
+    sleep 2
+    x "xdotool type --delay 40 robot-pass-1; xdotool key Return"
+    sleep 4
+    as_tester 'pgrep -u tester -f "[e]xec sh -c" >/dev/null' || break
+done
+docker logs "$robotA" > "$out/robot-a-sshd-gui.log" 2>&1 || true
 wait_for 30 "lablink status $dev --json | grep -q '\"color\": \"green\"'" || { shot gui-b6-fail; fail "GUI-only: SSH setup" "not GREEN"; }
 as_tester 'ls ~/.ssh/lablink-key-*' >/dev/null || fail "GUI-only: key" "no LabLink key created"
 pass "GUI-only: SSH setup" "key created after consent, password only in the OpenSSH prompt, real login test GREEN"
