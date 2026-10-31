@@ -7,6 +7,7 @@ mod app;
 mod files;
 mod flow;
 mod health;
+mod onboarding;
 mod settings;
 mod term;
 mod theme;

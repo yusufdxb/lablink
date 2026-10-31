@@ -1956,6 +1956,7 @@ dependencies = [
  "lablink-core",
  "lablink-doctor",
  "lablink-platform",
+ "lablink-ssh",
  "libc",
  "serde",
  "serde_json",

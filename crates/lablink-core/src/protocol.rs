@@ -161,6 +161,9 @@ fn default_history_limit() -> u32 {
 /// `Some("")` clears a string override.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceChanges {
+    /// Absolute private-key path selected during interactive onboarding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]

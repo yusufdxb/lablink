@@ -120,7 +120,7 @@ pub fn last_seen_text(ms: Option<u64>) -> String {
 /// Title line: `name` or `name (label)`.
 pub fn title_text(d: &DeviceStatus) -> String {
     match d.label.as_deref().filter(|l| !l.is_empty()) {
-        Some(l) => format!("{} ({l})", d.name),
+        Some(l) => format!("{l} ({})", d.name),
         None => d.name.clone(),
     }
 }
@@ -258,7 +258,7 @@ mod tests {
         let mut d = dev();
         assert_eq!(title_text(&d), "jetson-a");
         d.label = Some("bench".into());
-        assert_eq!(title_text(&d), "jetson-a (bench)");
+        assert_eq!(title_text(&d), "bench (jetson-a)");
         d.label = Some(String::new());
         assert_eq!(title_text(&d), "jetson-a");
     }

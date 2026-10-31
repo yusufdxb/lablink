@@ -109,6 +109,86 @@ fn recorded_args(e: &Env) -> Vec<String> {
 }
 
 #[test]
+fn bare_command_launches_paired_gui_without_a_daemon_and_preserves_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let cli = dir.path().join("lablink");
+    let gui = dir.path().join("lablink-gui");
+    std::fs::copy(env!("CARGO_BIN_EXE_lablink"), &cli).unwrap();
+    std::fs::write(
+        &gui,
+        "#!/bin/sh\nprintf '%s\\n' \"$LABLINK_SOCKET\"\nexit 37\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&gui, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for args in [vec![], vec!["--socket", "/tmp/socket with spaces;$(false)"]] {
+        let output = Command::new(&cli)
+            .args(&args)
+            .env("LABLINK_SOCKET", "/nonexistent/lablink/test.sock")
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), 37);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim_end(),
+            args.get(1)
+                .copied()
+                .unwrap_or("/nonexistent/lablink/test.sock")
+        );
+    }
+    std::fs::remove_file(gui).unwrap();
+    let output = Command::new(cli).output().unwrap();
+    assert_eq!(code(&output), exit::REFUSED);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Install lablink-gui beside lablink"));
+}
+
+#[test]
+fn existing_subcommands_and_help_remain_available_without_a_gui() {
+    let help = lablink(None, &["--help"]);
+    assert_eq!(code(&help), 0);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("without a subcommand"));
+    for command in [
+        "status",
+        "devices",
+        "sites",
+        "site",
+        "inspect",
+        "discover",
+        "discovered",
+        "history",
+        "resolve",
+        "ssh",
+        "exec",
+        "trust",
+        "set",
+        "adopt",
+        "metrics",
+        "ping",
+        "doctor",
+        "check-config",
+        "init",
+        "version",
+        "copy-id",
+        "export",
+        "import",
+        "support-bundle",
+        "install-service",
+        "uninstall-service",
+        "completions",
+        "install-completions",
+        "onboard-ssh",
+    ] {
+        let output = lablink(None, &[command, "--help"]);
+        assert_eq!(
+            code(&output),
+            0,
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(code(&lablink(None, &["not-a-command"])), exit::USAGE);
+}
+
+#[test]
 fn daemon_unavailable_is_exit_3_with_json_error() {
     for args in [
         &["status"][..],

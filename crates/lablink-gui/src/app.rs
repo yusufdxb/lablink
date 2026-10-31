@@ -4,6 +4,7 @@
 use crate::files::Files;
 use crate::flow::{self, AdoptForm, StepState, TrustPlan};
 use crate::health::{self, DoctorPanel};
+use crate::onboarding::Onboarding;
 use crate::settings::{self, DeviceEdit, Settings};
 use crate::term;
 use crate::view::{self, Level};
@@ -130,6 +131,7 @@ pub struct App {
     settings: Option<Settings>,
     /// Preferred terminal from the config's `preferences`.
     terminal: Option<String>,
+    onboarding: Option<Onboarding>,
 }
 
 fn load_terminal(path: &std::path::Path) -> Option<String> {
@@ -189,6 +191,7 @@ impl App {
             doctor: DoctorPanel::default(),
             wizard,
             settings: None,
+            onboarding: None,
         }
     }
 
@@ -954,12 +957,14 @@ impl App {
     fn getting_started(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         ui.label(RichText::new("No devices yet").strong().size(18.0));
-        ui.label(RichText::new("Discover  ->  Adopt  ->  Trust  ->  Connect").strong());
+        ui.label(RichText::new("Discover  ->  Verify identity  ->  Connect").strong());
         ui.add_space(6.0);
         ui.label("1. Discover finds hosts on the networks you allowed in Settings.");
-        ui.label("2. On the Discovered tab, Adopt the hosts you want and give each a name.");
-        ui.label("3. Trust each one after comparing its host-key fingerprint with the device.");
-        ui.label("4. Connect by name: Open SSH terminal, or `lablink ssh <name>`.");
+        ui.label("2. Select Connect securely on the Discovered tab, or enter an IP address.");
+        ui.label(
+            "3. Independently confirm the device fingerprint, then authenticate in the terminal.",
+        );
+        ui.label("4. Choose a friendly name. Your verified device is ready to connect.");
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui
@@ -967,6 +972,14 @@ impl App {
                 .clicked()
             {
                 self.start_discover();
+            }
+            if ui.button("Connect by IP address…").clicked() {
+                let site = self
+                    .sites
+                    .iter()
+                    .find(|s| s.state == SiteState::Active)
+                    .map(|s| s.id.clone());
+                self.onboarding = Some(Onboarding::new(None, site));
             }
             if ui.button("Settings").clicked() {
                 self.tab = Tab::Settings;
@@ -1214,7 +1227,7 @@ impl App {
             });
         });
         match fix {
-            Some(Fix::SshSetup) => self.open_terminal(&["copy-id", &d.id]),
+            Some(Fix::SshSetup) => self.onboarding = Some(Onboarding::for_device(d)),
             Some(Fix::Trust) | Some(Fix::TrustReplace) => self.start_trust(&d.id),
             Some(Fix::Discover) => self.start_discover(),
             Some(Fix::SwitchSite) => {
@@ -1270,7 +1283,9 @@ impl App {
                     && ui.button("SSH Setup").clicked()
                 {
                     let n = name.to_string();
-                    self.open_terminal(&["copy-id", &n]);
+                    if let Some(d) = self.devices.iter().find(|d| d.id == n) {
+                        self.onboarding = Some(Onboarding::for_device(d));
+                    }
                 }
             }
             Some(Err(f)) => {
@@ -1336,6 +1351,11 @@ impl App {
                 ui.checkbox(
                     &mut plan.verified_oob,
                     "I verified this host out of band; replace pinned keys",
+                );
+            } else {
+                ui.checkbox(
+                    &mut plan.verified_oob,
+                    "I independently verified every fingerprint above",
                 );
             }
             ui.horizontal(|ui| {
@@ -1515,16 +1535,31 @@ impl App {
     // ---- discovered hosts + discovery report -----------------------------
 
     fn discovered_view(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(
+                self.onboarding.is_none(),
+                egui::Button::new("Connect by IP address…"),
+            )
+            .clicked()
+        {
+            let site = self
+                .sites
+                .iter()
+                .find(|s| s.state == SiteState::Active)
+                .map(|s| s.id.clone());
+            self.onboarding = Some(Onboarding::new(None, site));
+        }
         if let Some(e) = &self.discovered_error {
             ui.colored_label(crate::theme::error(ui), e);
         }
         let (unmatched, matched) = flow::split_discovered(&self.discovered);
         let mut adopt_req: Option<DiscoveredHost> = None;
+        let mut network_req: Option<DiscoveredHost> = None;
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.strong(format!(
-                    "Not tracked ({}): inspect a host, then adopt it to start monitoring",
+                    "Available devices ({}): select a device to connect securely",
                     unmatched.len()
                 ));
                 if unmatched.is_empty() {
@@ -1542,8 +1577,11 @@ impl App {
                         ui.end_row();
                         for h in &unmatched {
                             host_cells(ui, h);
-                            if ui.button("Inspect / Adopt...").clicked() {
+                            if ui.button("Connect securely…").clicked() {
                                 adopt_req = Some((*h).clone());
+                            }
+                            if ui.small_button("Track without SSH…").clicked() {
+                                network_req = Some((*h).clone());
                             }
                             ui.end_row();
                         }
@@ -1570,6 +1608,23 @@ impl App {
                         });
                 }
             });
+        if let Some(h) = network_req {
+            let site = h.site.clone().or_else(|| {
+                self.sites
+                    .iter()
+                    .find(|s| s.state == SiteState::Active)
+                    .map(|s| s.id.clone())
+            });
+            let mut form = AdoptForm::for_host(&h);
+            form.ssh = false;
+            self.adopt = Some(AdoptDialog {
+                host: h,
+                form,
+                site,
+                busy: false,
+                error: None,
+            });
+        }
         if let Some(h) = adopt_req {
             // Default site: the one whose network the host is on, else the
             // active site.
@@ -1581,16 +1636,10 @@ impl App {
                     .collect();
                 match active.as_slice() {
                     [one] => Some(one.id.clone()),
-                    _ => self.sites.first().map(|s| s.id.clone()),
+                    _ => None,
                 }
             });
-            self.adopt = Some(AdoptDialog {
-                form: AdoptForm::for_host(&h),
-                host: h,
-                site,
-                busy: false,
-                error: None,
-            });
+            self.onboarding = Some(Onboarding::new(Some(&h), site));
         }
     }
 
@@ -2017,6 +2066,12 @@ impl eframe::App for App {
         }
         self.discover_window(&ctx);
         self.adopt_window(&ctx);
+        if let Some(w) = self.onboarding.as_mut() {
+            if w.show(&ctx, &self.socket, &self.sites, self.terminal.as_deref()) {
+                self.onboarding = None;
+                self.refresh();
+            }
+        }
     }
 }
 

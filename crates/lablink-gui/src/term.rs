@@ -284,3 +284,122 @@ mod tests {
         assert_eq!(find_terminal(None, &|_| false), None);
     }
 }
+
+/// Onboarding needs a terminal whose lifetime follows the helper, including
+/// when GNOME Terminal uses its D-Bus server. Unknown emulator argument
+/// conventions are not guessed for security-sensitive setup.
+pub fn onboarding_command(
+    found: &str,
+    lablink: &Path,
+    socket: &Path,
+    session: &Path,
+) -> Result<std::process::Command, String> {
+    let base = Path::new(found)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let flags: &[&str] = match base {
+        "gnome-terminal" => &["--wait", "--"],
+        "xterm" => &["-e"],
+        "konsole" => &["--nofork", "-e"],
+        _ => return Err(
+            "SSH onboarding supports GNOME Terminal, Konsole, or xterm. Choose one in Settings."
+                .into(),
+        ),
+    };
+    if !lablink.is_absolute() || !lablink.is_file() {
+        return Err("The onboarding CLI must be installed beside this development GUI.".into());
+    }
+    let mut cmd = lablink_core::program::command(found)
+        .map_err(|_| "Terminal is unavailable.".to_string())?;
+    cmd.args(flags)
+        .arg(lablink)
+        .arg("--socket")
+        .arg(socket)
+        .arg("onboard-ssh")
+        .arg("--session")
+        .arg(session)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(cmd)
+}
+
+pub fn onboarding_terminal(preferred: Option<&str>) -> Result<String, String> {
+    if let Some(p) = preferred.filter(|p| !p.trim().is_empty()) {
+        let base = Path::new(p)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if !["gnome-terminal", "konsole", "xterm"].contains(&base) || !runnable(p) {
+            return Err(
+                "Choose GNOME Terminal, Konsole, or xterm in Settings for SSH onboarding.".into(),
+            );
+        }
+        return Ok(p.to_string());
+    }
+    ["gnome-terminal", "konsole", "xterm"]
+        .into_iter()
+        .find(|p| runnable(p))
+        .map(str::to_string)
+        .ok_or_else(|| "Install GNOME Terminal, Konsole, or xterm to configure SSH.".into())
+}
+
+/// Pair the helper with this GUI build; never accidentally run an older
+/// installed CLI while testing a development GUI.
+pub fn onboarding_binary() -> Result<PathBuf, String> {
+    let gui = std::env::current_exe().map_err(|_| "Cannot locate this GUI build.".to_string())?;
+    onboarding_binary_next_to(&gui)
+}
+
+fn onboarding_binary_next_to(gui: &Path) -> Result<PathBuf, String> {
+    gui.parent()
+        .map(|dir| dir.join("lablink"))
+        .filter(|cli| cli.is_absolute() && cli.is_file())
+        .ok_or_else(|| {
+            "Build the development lablink CLI beside lablink-gui before configuring SSH.".into()
+        })
+}
+
+#[cfg(test)]
+mod onboarding_tests {
+    use super::*;
+    #[test]
+    fn onboarding_only_runs_the_cli_paired_with_its_gui() {
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir.path().join("lablink-gui");
+        assert!(onboarding_binary_next_to(&gui).is_err());
+        let cli = dir.path().join("lablink");
+        std::fs::write(&cli, "").unwrap();
+        assert_eq!(onboarding_binary_next_to(&gui).unwrap(), cli);
+        assert!(onboarding_binary_next_to(Path::new("relative/lablink-gui")).is_err());
+    }
+    #[test]
+    fn supported_terminals_use_a_waiting_argument_vector_without_a_shell() {
+        let d = tempfile::tempdir().unwrap();
+        let cli = d.path().join("lablink");
+        std::fs::write(&cli, "").unwrap();
+        let socket = d.path().join("socket;$(id)");
+        let session = d.path().join("session with spaces");
+        for (terminal, flags) in [
+            ("gnome-terminal", vec!["--wait", "--"]),
+            ("konsole", vec!["--nofork", "-e"]),
+            ("xterm", vec!["-e"]),
+        ] {
+            // Stand-in executables, so argument construction does not depend
+            // on which emulators happen to be installed in a test environment.
+            let fake = d.path().join(terminal);
+            std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            let cmd = onboarding_command(fake.to_str().unwrap(), &cli, &socket, &session).unwrap();
+            let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+            assert_eq!(&args[..flags.len()], flags.as_slice());
+            assert!(args.contains(&socket.to_str().unwrap()));
+            assert!(args.contains(&session.to_str().unwrap()));
+            assert!(!args.contains(&"-c"));
+            assert!(args.contains(&"onboard-ssh"));
+        }
+        assert!(onboarding_command("/usr/bin/unknown", &cli, &socket, &session).is_err());
+    }
+}
