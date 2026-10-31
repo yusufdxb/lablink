@@ -50,7 +50,9 @@ if [ "$(printf '%s\n%s\n' "$glibc" "$max_glibc" | sort -V | tail -1)" != "$max_g
     echo "package: binaries need glibc $glibc, newer than the supported baseline $max_glibc" >&2
     exit 1
 fi
-reported=$("$rel/lablink" version | head -1)
+# sed reads every line; `head -1` can exit first and SIGPIPE kills lablink,
+# which pipefail turns into a random exit 141.
+reported=$("$rel/lablink" version | sed -n 1p)
 [ "$reported" = "lablink $version (commit $sha)" ] || {
     echo "package: 'lablink version' says '$reported', expected 'lablink $version (commit $sha)'" >&2
     exit 1
