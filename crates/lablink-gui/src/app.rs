@@ -55,6 +55,43 @@ struct AdoptDialog {
     error: Option<String>,
 }
 
+/// Confirmation for removing one device from LabLink.
+struct RemoveDialog {
+    /// Canonical `site/name`.
+    device: String,
+    /// What people call it (label or name) plus its site, for the heading.
+    title: String,
+    /// From the loaded detail; `None` while unknown.
+    configured: Option<bool>,
+    monitoring: bool,
+    busy: bool,
+    error: Option<String>,
+}
+
+/// What the Remove dialog asked for.
+enum RemoveChoice {
+    Cancel,
+    Remove,
+    DisableMonitoring,
+}
+
+/// The consequences of removing a device, as the dialog lists them.
+fn removal_consequences(configured: Option<bool>) -> Vec<&'static str> {
+    let mut v = vec![
+        "LabLink stops monitoring it and deletes what this computer stored about it: pinned host keys, addresses and settings.",
+    ];
+    match configured {
+        Some(true) => v.push(
+            "It is defined in config.yaml: its entry and its doctor checks are deleted (the previous file is kept as a backup) and the LabLink service restarts.",
+        ),
+        Some(false) => v.push("It was added from discovery, so only LabLink's own records change."),
+        None => {}
+    }
+    v.push("Nothing on the device itself changes: its accounts, authorized SSH keys and files stay as they are.");
+    v.push("To use it again, add it from Discover and verify its host key again.");
+    v
+}
+
 /// State of the two-step trust flow for one device.
 struct TrustPanel {
     device: String,
@@ -132,6 +169,7 @@ pub struct App {
     /// Preferred terminal from the config's `preferences`.
     terminal: Option<String>,
     onboarding: Option<Onboarding>,
+    remove: Option<RemoveDialog>,
 }
 
 fn load_terminal(path: &std::path::Path) -> Option<String> {
@@ -192,6 +230,7 @@ impl App {
             wizard,
             settings: None,
             onboarding: None,
+            remove: None,
         }
     }
 
@@ -479,6 +518,28 @@ impl App {
                 self.worker.send(Cmd::Service);
                 self.worker.refresh();
             }
+            Event::Removed(device, r) => match r {
+                Ok(summary) => {
+                    self.remove = None;
+                    self.banner = Some((true, summary));
+                    // Stop showing it now; the next poll confirms.
+                    self.devices.retain(|d| d.id != device);
+                    if self.selected.as_deref() == Some(device.as_str()) {
+                        self.selected = None;
+                        self.detail = None;
+                    }
+                    self.worker.refresh();
+                    self.worker.send(Cmd::Discovered);
+                }
+                Err(e) => {
+                    if let Some(d) = self.remove.as_mut().filter(|d| d.device == device) {
+                        d.busy = false;
+                        d.error = Some(e);
+                    } else {
+                        self.banner = Some((false, format!("Could not remove {device}: {e}")));
+                    }
+                }
+            },
             Event::ConfigSaved(r) => {
                 if let Some(s) = self.settings.as_mut() {
                     s.saved(r);
@@ -1130,6 +1191,28 @@ impl App {
                     },
                 );
             }
+            if ui
+                .button(RichText::new("Remove device...").color(crate::theme::error(ui)))
+                .on_hover_text(
+                    "Stop tracking this device in LabLink. Nothing on the device changes.",
+                )
+                .clicked()
+            {
+                let configured = self
+                    .detail
+                    .as_ref()
+                    .filter(|det| det.status.id == name)
+                    .map(|det| det.configured);
+                let shown = d.label.clone().unwrap_or_else(|| d.name.clone());
+                self.remove = Some(RemoveDialog {
+                    device: name.clone(),
+                    title: format!("{shown} ({})", d.site_name),
+                    configured,
+                    monitoring: d.monitoring,
+                    busy: false,
+                    error: None,
+                });
+            }
         });
         if let Some((ok, msg)) = &self.notice {
             ui.colored_label(
@@ -1300,6 +1383,81 @@ impl App {
 
     /// Two explicit steps: the scan result is shown first; pinning is a
     /// separate click that confirms exactly the scanned fingerprints.
+    fn remove_window(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = self.remove.as_mut() else {
+            return;
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::new("remove-device")).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            ui.heading(format!("Remove {}?", dlg.title));
+            ui.weak(&dlg.device);
+            ui.add_space(6.0);
+            for line in removal_consequences(dlg.configured) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("•");
+                    ui.label(line);
+                });
+            }
+            if dlg.monitoring {
+                ui.add_space(6.0);
+                ui.weak("Only want it to stop being checked? Disable monitoring keeps it listed with its trust.");
+            }
+            if let Some(e) = &dlg.error {
+                ui.add_space(6.0);
+                ui.colored_label(crate::theme::error(ui), format!("Not removed. {e}"));
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if dlg.busy {
+                    ui.spinner();
+                    ui.label("Removing...");
+                    return;
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(RemoveChoice::Cancel);
+                }
+                if dlg.monitoring && ui.button("Disable monitoring instead").clicked() {
+                    choice = Some(RemoveChoice::DisableMonitoring);
+                }
+                let remove = egui::Button::new(
+                    RichText::new("Remove device").color(crate::theme::danger_text(ui)),
+                )
+                .fill(crate::theme::danger_fill(ui));
+                if ui.add(remove).clicked() {
+                    choice = Some(RemoveChoice::Remove);
+                }
+            });
+        });
+        if modal.should_close() && !dlg.busy && choice.is_none() {
+            choice = Some(RemoveChoice::Cancel);
+        }
+        match choice {
+            Some(RemoveChoice::Cancel) => self.remove = None,
+            Some(RemoveChoice::DisableMonitoring) => {
+                let device = dlg.device.clone();
+                self.remove = None;
+                self.apply_changes(
+                    &device,
+                    DeviceChanges {
+                        monitoring: Some(false),
+                        ..Default::default()
+                    },
+                );
+            }
+            Some(RemoveChoice::Remove) => {
+                dlg.busy = true;
+                dlg.error = None;
+                self.worker.send(Cmd::Remove {
+                    device: dlg.device.clone(),
+                    config: self.config_path.clone(),
+                });
+            }
+            None => {}
+        }
+    }
+
     fn trust_section(&mut self, ui: &mut egui::Ui, name: &str) {
         let Some(panel) = self.trust.as_mut().filter(|p| p.device == name) else {
             return;
@@ -2066,6 +2224,7 @@ impl eframe::App for App {
         }
         self.discover_window(&ctx);
         self.adopt_window(&ctx);
+        self.remove_window(&ctx);
         if let Some(w) = self.onboarding.as_mut() {
             if w.show(&ctx, &self.socket, &self.sites, self.terminal.as_deref()) {
                 self.onboarding = None;
@@ -2477,6 +2636,22 @@ fn info_grid(ui: &mut egui::Ui, d: &DeviceDetail) {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+
+    #[test]
+    fn removal_dialog_says_the_device_is_not_touched() {
+        for configured in [None, Some(false), Some(true)] {
+            let lines = removal_consequences(configured);
+            assert!(lines
+                .iter()
+                .any(|l| l.starts_with("Nothing on the device itself changes")));
+        }
+        assert!(removal_consequences(Some(true))
+            .iter()
+            .any(|l| l.contains("backup")));
+        assert!(!removal_consequences(Some(false))
+            .iter()
+            .any(|l| l.contains("config.yaml")));
+    }
 
     #[test]
     fn files_selector_keeps_duplicate_names_qualified_by_site() {

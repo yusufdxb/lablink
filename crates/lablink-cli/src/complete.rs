@@ -14,7 +14,9 @@ pub const CURATED: &[&str] = &["status", "doctor", "devices", "discover", "ssh"]
 pub const FILES: &str = "__lablink_files__";
 const GLOBAL_FLAGS: &[&str] = &["--socket", "--help", "--version"];
 const SSH_ONLY: &[&str] = &["ssh", "exec", "copy-id"];
-const ALL_DEVICES: &[&str] = &["status", "inspect", "resolve", "trust", "set", "history"];
+const ALL_DEVICES: &[&str] = &[
+    "status", "inspect", "resolve", "trust", "forget", "remove", "set", "history",
+];
 
 /// A device the daemon has located.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -432,7 +434,7 @@ mod tests {
     #[test]
     fn all_device_commands_include_ssh_disabled() {
         for c in [
-            "status", "doctor", "inspect", "resolve", "trust", "set", "history",
+            "status", "doctor", "inspect", "resolve", "trust", "forget", "remove", "set", "history",
         ] {
             assert_eq!(
                 run(&format!("lablink {c} ")),
@@ -452,7 +454,8 @@ mod tests {
     #[test]
     fn single_device_commands_stop_after_first_positional() {
         for c in [
-            "status", "ssh", "exec", "inspect", "resolve", "trust", "set", "history",
+            "status", "ssh", "exec", "inspect", "resolve", "trust", "forget", "remove", "set",
+            "history",
         ] {
             assert!(run(&format!("lablink {c} jetson-a ")).is_empty(), "{c}");
         }

@@ -11,4 +11,5 @@ pub mod export;
 pub mod ifaces;
 pub mod init;
 pub mod onboarding;
+pub mod remove;
 pub mod service;

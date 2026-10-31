@@ -108,6 +108,12 @@ pub enum Cmd {
         confirm: Vec<String>,
         replace: bool,
     },
+    /// Remove a device from LabLink (adopted: daemon cache; configured:
+    /// config.yaml plus a daemon restart). Never touches the device.
+    Remove {
+        device: String,
+        config: std::path::PathBuf,
+    },
     /// Read-only doctor run. `scope` labels the result ("all" or a device).
     Doctor {
         scope: String,
@@ -140,6 +146,8 @@ pub enum Event {
     ServiceDone(&'static str, Result<(), String>),
     ConfigSaved(Result<String, String>),
     TestSsh(String, Result<RunResult, Fail>),
+    /// `(device, summary or error)`.
+    Removed(String, Result<String, String>),
 }
 
 /// Handle held by the UI.
@@ -244,6 +252,7 @@ fn needs_current_daemon(cmd: &Cmd) -> bool {
             | Cmd::TrustPreview(_)
             | Cmd::TrustPin { .. }
             | Cmd::Doctor { .. }
+            | Cmd::Remove { .. }
     )
 }
 
@@ -258,6 +267,7 @@ fn refused_event(cmd: Cmd, why: String) -> Event {
         Cmd::TrustPreview(device) => Event::TrustPreview(device, Err(f)),
         Cmd::TrustPin { device, .. } => Event::TrustPinned(device, Err(f)),
         Cmd::Doctor { scope, .. } => Event::Doctor(scope, Err(f)),
+        Cmd::Remove { device, .. } => Event::Removed(device, Err(f.message)),
         _ => unreachable!("only commands in needs_current_daemon are refused"),
     }
 }
@@ -384,6 +394,11 @@ fn execute_inner(socket: &PathBuf, cmd: Cmd) -> Event {
                 format!("{m}; {}", lablink_setup::service::restart_if_active())
             });
             Event::ConfigSaved(r)
+        }
+        Cmd::Remove { device, config } => {
+            let r = lablink_setup::remove::remove_device(&client, &config, &device)
+                .map(|r| r.summary());
+            Event::Removed(device, r)
         }
         Cmd::TestSsh(device) => {
             let r = run_remote(&client, &device, "true");

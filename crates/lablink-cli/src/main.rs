@@ -185,6 +185,17 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Stop tracking a device: an adopted device is deleted, a configured one
+    /// is deleted from config.yaml (with a backup) and the daemon restarted.
+    /// Nothing on the device itself is changed. Use `forget` to only reset trust.
+    Remove {
+        device: String,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Change runtime settings for a device (stored in the cache, not the config file).
     Set {
         device: String,
@@ -569,6 +580,7 @@ fn main() {
             | Cmd::Exec { json: true, .. }
             | Cmd::Trust { json: true, .. }
             | Cmd::Forget { json: true, .. }
+            | Cmd::Remove { json: true, .. }
             | Cmd::Set { json: true, .. }
             | Cmd::Adopt { json: true, .. }
             | Cmd::Metrics { json: true }
@@ -642,6 +654,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::Exec { .. } => "exec",
         Cmd::Trust { .. } => "trust",
         Cmd::Forget { .. } => "forget",
+        Cmd::Remove { .. } => "remove",
         Cmd::Set { .. } => "set",
         Cmd::Adopt { .. } => "adopt",
         Cmd::Metrics { .. } => "metrics",
@@ -675,6 +688,7 @@ fn run(cmd: Cmd, client: &Client) -> R {
             | Cmd::Exec { .. }
             | Cmd::Trust { .. }
             | Cmd::Forget { .. }
+            | Cmd::Remove { .. }
             | Cmd::Set { .. }
             | Cmd::Adopt { .. }
             | Cmd::Doctor { .. }
@@ -922,6 +936,7 @@ fn run(cmd: Cmd, client: &Client) -> R {
             json,
         } => cmd_trust(client, &device, yes, &fingerprints, replace, json),
         Cmd::Forget { device, yes, json } => cmd_forget(client, &device, yes, json),
+        Cmd::Remove { device, yes, json } => cmd_remove(client, &device, yes, json),
         Cmd::Set {
             device,
             label,
@@ -1612,6 +1627,50 @@ fn cmd_forget(client: &Client, device: &str, yes: bool, json: bool) -> Result<i3
         } else {
             println!("forgot {id}: pins and addresses cleared; run `lablink trust {id} --fingerprint SHA256:...` before using it");
         }
+    }
+    Ok(exit::OK)
+}
+
+fn cmd_remove(client: &Client, device: &str, yes: bool, json: bool) -> Result<i32, Fail> {
+    if !yes {
+        if json || !std::io::stdin().is_terminal() {
+            eprintln!("lablink: nothing removed; pass --yes to remove '{device}'");
+            return Ok(exit::REFUSED);
+        }
+        print!(
+            "Remove '{device}' from LabLink? Its pinned keys, addresses and settings on this computer are deleted; nothing on the device is changed. [y/N] "
+        );
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            eprintln!("lablink: nothing removed");
+            return Ok(exit::REFUSED);
+        }
+    }
+    let path = lablink_core::paths::default_config_path();
+    let r = lablink_setup::remove::remove_device(client, &path, device)
+        .map_err(|e| Fail::new(exit::FAILURE, "remove", e))?;
+    if json {
+        let (kind, backup, restart) = match &r {
+            lablink_setup::remove::Removed::Adopted { .. } => ("adopted", None, None),
+            lablink_setup::remove::Removed::Configured {
+                backup, restart, ..
+            } => (
+                "configured",
+                backup.as_ref().map(|b| b.display().to_string()),
+                Some(restart.clone()),
+            ),
+        };
+        print_json(&serde_json::json!({
+            "device": r.id(),
+            "removed": true,
+            "kind": kind,
+            "backup": backup,
+            "restart": restart,
+        }));
+    } else {
+        println!("{}", r.summary());
     }
     Ok(exit::OK)
 }
