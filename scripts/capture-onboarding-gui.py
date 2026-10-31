@@ -22,6 +22,9 @@ spec.loader.exec_module(fixtures)
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs/onboarding/screenshots"
 OUT.mkdir(parents=True, exist_ok=True)
+# The fixture daemon reports this build's version, so the GUI does not refuse
+# commands as it would for an outdated daemon.
+VERSION = next(l.split('"')[1] for l in (ROOT / "Cargo.toml").read_text().splitlines() if l.startswith("version ="))
 
 
 class GuiFixture(fixtures.Fixture):
@@ -68,9 +71,9 @@ class GuiFixture(fixtures.Fixture):
     def response(self, req):
         method, p = req["method"], req.get("params", {})
         if method == "ping":
-            return dict(protocol_version=1, version="0.3.0 · local test fixture", pid=os.getpid(), uptime_s=1)
+            return dict(protocol_version=1, version=VERSION, pid=os.getpid(), uptime_s=1)
         if method == "status":
-            return dict(schema_version=1, daemon=dict(version="0.3.0", pid=os.getpid(), uptime_s=1),
+            return dict(schema_version=1, daemon=dict(version=VERSION, pid=os.getpid(), uptime_s=1),
                         devices=[self.device] if self.device else [], sites=self.sites(), site_mode=dict(mode="auto"))
         if method == "sites":
             return dict(schema_version=1, mode=dict(mode="auto"), sites=self.sites(), signals=dict(attached=[], gateways=[], ssids=[]))
@@ -124,41 +127,42 @@ try:
     gui = subprocess.Popen([str(ROOT / "target/debug/lablink")], env=f.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     fixtures.wait_for(lambda: subprocess.run(["xdotool", "search", "--name", "^LabLink$"], stdout=subprocess.DEVNULL).returncode == 0)
     window = subprocess.check_output(["xdotool", "search", "--name", "^LabLink$"], text=True).splitlines()[0]
-    action("windowmove", window, 40, 40)
+    # The window sits at the origin so these coordinates are screen
+    # coordinates of the merged sidebar GUI (about 1120x850).
+    action("windowmove", window, 0, 0)
     action("windowfocus", window)
     time.sleep(2)
-    click(459, 55)  # Discovered tab
+    click(60, 150)  # Discovered
     shot("01-discovered.png")
-    # Coordinates below are maintained against the actual 900x700 GUI.
-    click(670, 148)  # Select the discovered localhost fixture
+    click(1016, 266)  # Connect securely... on the localhost fixture row
     shot("02-details.png")
-    click(260, 377)
+    click(266, 481)  # SSH username
     action("type", "--clearmodifiers", f.plan["username"])
-    click(189, 416)
+    click(169, 578)  # Continue
     fixtures.wait_for(lambda: any(r["method"] == "trust" for r in f.calls))
     shot("03-identity.png")
     # The fingerprint comes independently from the fixture's local
     # ssh-keygen result, rather than the daemon's displayed claim.
-    click(165, 405)
-    click(250, 426)
+    click(134, 524)  # I independently verified every fingerprint above.
+    click(238, 564)  # Confirm identity and continue
     fixtures.wait_for(lambda: f.confirmed)
     shot("04-authentication.png")
-    click(165, 330)  # Existing key
-    click(300, 351)  # Advanced key chooser
-    click(260, 390)
+    click(134, 405)  # Use an existing SSH key
+    click(230, 445)  # Choose a different SSH key
+    click(285, 507)  # Private-key path
     action("type", "--clearmodifiers", str(f.key))
-    click(240, 433)
+    click(238, 583)  # Open authentication terminal
     fixtures.wait_for(lambda: f.device and f.device["identity"] == "verified", seconds=60)
     time.sleep(1)
     action("windowfocus", window)
     shot("05-name.png")
-    click(260, 315)
+    click(266, 383)  # Friendly name
     action("type", "--clearmodifiers", "Home test workstation")
-    click(193, 337)
+    click(177, 419)  # Save device
     fixtures.wait_for(lambda: f.device.get("label") == "Home test workstation")
     shot("06-connected.png")
-    click(184, 317)  # Done
-    click(380, 54)   # Devices tab
+    click(156, 388)  # Done
+    click(60, 104)  # Devices
     shot("07-device.png")
     assert f.device["site"] == "home"
     assert f.device["identity"] == "verified"

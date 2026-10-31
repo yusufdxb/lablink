@@ -44,7 +44,9 @@ pub struct Onboarding {
     pub username: String,
     pub site: Option<String>,
     device: Option<String>,
-    known_host: bool,
+    /// The address discovery reported, while the wizard was opened from a
+    /// discovered host.
+    discovered_ip: Option<String>,
     preview: Option<TrustReport>,
     pub verified: bool,
     pub identity: String,
@@ -72,7 +74,7 @@ impl Onboarding {
             username: String::new(),
             site,
             device: host.and_then(|h| h.matched_device.clone()),
-            known_host: host.is_some(),
+            discovered_ip: host.map(|h| h.ip.clone()),
             preview: None,
             verified: false,
             create_key: identity.is_none(),
@@ -93,11 +95,17 @@ impl Onboarding {
         w.ip = device.ip.clone().unwrap_or_default();
         w.device = Some(device.id.clone());
         w.username = device.username.clone().unwrap_or_default();
-        w.known_host = true;
         w
     }
+    /// True while the address is still the one discovery reported. Such an
+    /// address is adopted through discovery, so the checks for typed
+    /// addresses (which refuse loopback, for example) do not apply; once the
+    /// person retypes it, it is validated like any typed address.
+    fn address_from_discovery(&self) -> bool {
+        self.discovered_ip.as_deref() == Some(self.ip.trim())
+    }
     fn details_error(&self, sites: &[SiteStatus]) -> Option<String> {
-        if self.device.is_none() {
+        if self.device.is_none() && !self.address_from_discovery() {
             if let Err(e) = manual::Target::parse(&self.ip) {
                 return Some(e);
             }
@@ -125,7 +133,7 @@ impl Onboarding {
             self.username.trim().to_string(),
             self.site.clone().unwrap(),
             self.device.clone(),
-            self.known_host,
+            self.device.is_some() || self.address_from_discovery(),
         );
         let tx = self.tx.clone();
         let cancel = self.cancel.clone();
@@ -323,7 +331,6 @@ impl Onboarding {
             match e {
                 Event::Adopted(id) => {
                     self.device = Some(id);
-                    self.known_host = true;
                 }
                 Event::Preview(r) => match r {
                     Ok(p) => {
@@ -660,5 +667,33 @@ mod tests {
         let cancel = w.cancel.clone();
         drop(w);
         assert!(cancel.load(Ordering::Acquire));
+    }
+    #[test]
+    fn a_discovered_address_is_not_held_to_typed_address_rules() {
+        let host: DiscoveredHost = serde_json::from_str(
+            r#"{"ip":"127.0.0.1","mac":null,"hostname":null,"network_name":null,"interface":null,"sources":["neigh"],"ssh_port":"open","fingerprints":[],"matched_device":null,"note":null,"first_seen_ms_ago":0,"last_seen_ms_ago":0}"#,
+        )
+        .unwrap();
+        let sites: Vec<SiteStatus> = serde_json::from_str(
+            r#"[{"id":"lab","name":"Lab","state":"active","confidence":"high","selected_by":"auto","auto_detect":true,"scan":null,"evidence":[],"networks":[],"devices":{"total":0,"green":0,"yellow":0,"red":0,"gray":0}}]"#,
+        )
+        .unwrap();
+        let mut w = Onboarding::new(Some(&host), Some("lab".into()));
+        w.username = "nvidia".into();
+        assert!(w.address_from_discovery());
+        assert_eq!(w.details_error(&sites), None);
+        // Retyped, the same address is checked like any typed address.
+        w.ip = " 127.0.0.2 ".into();
+        assert!(!w.address_from_discovery());
+        assert_eq!(
+            w.details_error(&sites).as_deref(),
+            Some("127.0.0.2 is not a device address.")
+        );
+        // A typed wizard never counts as discovered.
+        let mut t = Onboarding::new(None, Some("lab".into()));
+        t.ip = "127.0.0.1".into();
+        t.username = "nvidia".into();
+        assert!(!t.address_from_discovery());
+        assert!(t.details_error(&sites).is_some());
     }
 }
