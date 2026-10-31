@@ -63,7 +63,9 @@ pub enum Cmd {
     Inspect(String),
     History(String),
     Discovered,
-    Discover,
+    /// Passive discovery, plus a one-time scan of the given approved,
+    /// attached network when the person asked for one.
+    Discover(Option<String>),
     Apply {
         device: String,
         changes: DeviceChanges,
@@ -244,7 +246,7 @@ fn poll_once(client: &Client) -> Event {
 fn needs_current_daemon(cmd: &Cmd) -> bool {
     matches!(
         cmd,
-        Cmd::Discover
+        Cmd::Discover(_)
             | Cmd::Apply { .. }
             | Cmd::Run { .. }
             | Cmd::Adopt { .. }
@@ -259,7 +261,7 @@ fn needs_current_daemon(cmd: &Cmd) -> bool {
 fn refused_event(cmd: Cmd, why: String) -> Event {
     let f = Fail::msg(why);
     match cmd {
-        Cmd::Discover => Event::DiscoverDone(Err(f)),
+        Cmd::Discover(_) => Event::DiscoverDone(Err(f)),
         Cmd::Apply { device, .. } => Event::Applied(device, Err(f)),
         Cmd::Run { device, .. } => Event::Ran(device, Err(f)),
         Cmd::Adopt { ip, name, .. } => Event::Adopted(ip, name, Err(f)),
@@ -315,10 +317,10 @@ fn execute_inner(socket: &PathBuf, cmd: Cmd) -> Event {
                 .and_then(|v| parse_discovered(&v));
             Event::Discovered(r)
         }
-        Cmd::Discover => {
+        Cmd::Discover(scan_cidr) => {
             let r = client
                 .with_timeout(DISCOVER_TIMEOUT)
-                .call_typed::<DiscoverReport>(&Request::Discover { scan_cidr: None })
+                .call_typed::<DiscoverReport>(&Request::Discover { scan_cidr })
                 .map_err(Fail::from);
             Event::DiscoverDone(r)
         }

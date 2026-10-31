@@ -5,6 +5,7 @@ use crate::files::Files;
 use crate::flow::{self, AdoptForm, StepState, TrustPlan};
 use crate::health::{self, DoctorPanel};
 use crate::onboarding::Onboarding;
+use crate::scan;
 use crate::settings::{self, DeviceEdit, Settings};
 use crate::term;
 use crate::view::{self, Level};
@@ -23,6 +24,7 @@ use lablink_core::time::{format_age, now_ms};
 use lablink_setup::service::ServiceStatus;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -156,6 +158,12 @@ pub struct App {
     discovered: Vec<DiscoveredHost>,
     discovered_error: Option<String>,
     discover_busy: bool,
+    /// A one-time scan waiting for confirmation.
+    scan_confirm: Option<scan::Offer>,
+    /// The one-time scan running now, and when it started.
+    scanning: Option<(scan::Offer, Instant)>,
+    /// What the latest discovery actively scanned.
+    last_scans: Vec<String>,
     discover_report: Option<Result<DiscoverReport, Fail>>,
     show_discover: bool,
 
@@ -221,6 +229,9 @@ impl App {
             discovered: Vec::new(),
             discovered_error: None,
             discover_busy: false,
+            scan_confirm: None,
+            scanning: None,
+            last_scans: Vec::new(),
             discover_report: None,
             show_discover: false,
             banner: None,
@@ -265,7 +276,16 @@ impl App {
 
     fn start_discover(&mut self) {
         self.discover_busy = true;
-        self.worker.send(Cmd::Discover);
+        self.worker.send(Cmd::Discover(None));
+    }
+
+    /// Passive discovery plus one scan of an approved, attached network the
+    /// person confirmed. The daemon re-checks the range before sending
+    /// anything.
+    fn start_scan(&mut self, offer: scan::Offer) {
+        self.discover_busy = true;
+        self.worker.send(Cmd::Discover(Some(offer.cidr.clone())));
+        self.scanning = Some((offer, Instant::now()));
     }
 
     fn start_doctor(&mut self, scope: String, devices: Vec<String>) {
@@ -386,8 +406,10 @@ impl App {
             },
             Event::DiscoverDone(result) => {
                 self.discover_busy = false;
+                self.scanning = None;
                 if let Ok(r) = &result {
                     self.discovered = r.discovered.clone();
+                    self.last_scans = scan::scanned(r);
                 }
                 self.discover_report = Some(result);
                 self.show_discover = true;
@@ -569,7 +591,17 @@ impl App {
             }
             if self.discover_busy {
                 ui.spinner();
-                ui.label("discovering (up to about 60 s)...");
+                match &self.scanning {
+                    Some((o, t)) => ui.label(format!(
+                        "scanning {} ({} addresses), {} s...",
+                        o.cidr,
+                        o.hosts,
+                        t.elapsed().as_secs()
+                    )),
+                    None => ui.label("discovering (up to about 60 s)..."),
+                };
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(500));
             }
             if ui.button("Refresh").clicked() {
                 self.refresh();
@@ -1381,6 +1413,55 @@ impl App {
 
     /// Two explicit steps: the scan result is shown first; pinning is a
     /// separate click that confirms exactly the scanned fingerprints.
+    /// Confirm a one-time scan: what is sent, to which addresses, and that
+    /// nothing on the devices changes.
+    fn scan_window(&mut self, ctx: &egui::Context) {
+        let Some(o) = self.scan_confirm.clone() else {
+            return;
+        };
+        let mut go = None;
+        let modal = egui::Modal::new(egui::Id::new("scan-once")).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            ui.heading(format!("Scan {} once?", o.cidr));
+            ui.add_space(6.0);
+            for line in [
+                format!(
+                    "LabLink sends a ping and an SSH port check to each of the {} addresses on {}, part of {}.",
+                    o.hosts, o.network, o.site_name
+                ),
+                "This happens once. Background scanning stays as it is.".to_string(),
+                "Nothing is installed or changed on any device, and nothing is trusted. You still verify each device before connecting.".to_string(),
+                "Devices that do not answer will not appear, so the result may not be complete.".to_string(),
+            ] {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("•");
+                    ui.label(line);
+                });
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    go = Some(false);
+                }
+                if ui.button(format!("Scan {}", o.cidr)).clicked() {
+                    go = Some(true);
+                }
+            });
+        });
+        if modal.should_close() && go.is_none() {
+            go = Some(false);
+        }
+        match go {
+            Some(true) => {
+                self.scan_confirm = None;
+                self.start_scan(o);
+            }
+            Some(false) => self.scan_confirm = None,
+            None => {}
+        }
+    }
+
     fn remove_window(&mut self, ctx: &egui::Context) {
         let Some(dlg) = self.remove.as_mut() else {
             return;
@@ -1709,6 +1790,35 @@ impl App {
             ui.colored_label(crate::theme::error(ui), e);
         }
         let (unmatched, matched) = flow::split_discovered(&self.discovered);
+        ui.add_space(4.0);
+        ui.strong(scan::headline(
+            unmatched.len(),
+            matched.len(),
+            &self.last_scans,
+        ));
+        ui.weak(scan::scanning_line(&self.sites));
+        let offers = scan::offers(&self.sites);
+        if offers.is_empty() {
+            ui.weak("No approved network is connected to this computer, so there is nothing LabLink may scan. Use Connect by address or hostname instead.");
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                for o in offers {
+                    let b = ui
+                        .add_enabled(
+                            !self.discover_busy && self.scan_confirm.is_none(),
+                            egui::Button::new(format!("Scan {} once…", o.cidr)),
+                        )
+                        .on_hover_text(format!(
+                            "Look for more devices on {}. Asks first.",
+                            o.label()
+                        ));
+                    if b.clicked() {
+                        self.scan_confirm = Some(o);
+                    }
+                }
+            });
+        }
+        ui.add_space(4.0);
         let mut adopt_req: Option<DiscoveredHost> = None;
         let mut network_req: Option<DiscoveredHost> = None;
         egui::ScrollArea::both()
@@ -1723,15 +1833,18 @@ impl App {
                 }
                 egui::Grid::new("discovered")
                     .striped(true)
-                    .num_columns(8)
+                    .num_columns(9)
                     .show(ui, |ui| {
                         for h in [
-                            "IP", "MAC", "Hostname", "SSH", "Network", "Sources", "Note", "",
+                            "Status", "IP", "MAC", "Hostname", "SSH", "Network", "Sources",
+                            "Note", "",
                         ] {
                             ui.strong(h);
                         }
                         ui.end_row();
                         for h in &unmatched {
+                            let (word, level) = scan::host_state(h);
+                            ui.colored_label(view::level_color(level), word);
                             host_cells(ui, h);
                             if ui.button("Connect securely…").clicked() {
                                 adopt_req = Some((*h).clone());
@@ -1966,15 +2079,12 @@ impl App {
             .default_size([560.0, 320.0])
             .show(ctx, |ui| match &self.discover_report {
                 Some(Ok(r)) => {
-                    let new = r
-                        .discovered
-                        .iter()
-                        .filter(|h| h.matched_device.is_none())
-                        .count();
-                    ui.label(format!(
-                        "probed {} host(s), {} responsive, {} not tracked yet",
-                        r.probed_hosts, r.responsive_hosts, new
-                    ));
+                    let (unmatched, matched) = flow::split_discovered(&r.discovered);
+                    let new = unmatched.len();
+                    ui.strong(scan::headline(new, matched.len(), &scan::scanned(r)));
+                    if scan::scanned(r).is_empty() {
+                        ui.weak("No network was actively scanned this time.");
+                    }
                     if new > 0 && ui.button(format!("Show the {new} new host(s)")).clicked() {
                         go_discovered = true;
                     }
@@ -2221,6 +2331,7 @@ impl eframe::App for App {
             self.select(device);
         }
         self.discover_window(&ctx);
+        self.scan_window(&ctx);
         self.adopt_window(&ctx);
         self.remove_window(&ctx);
         if let Some(w) = self.onboarding.as_mut() {

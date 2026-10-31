@@ -8,6 +8,7 @@ mod files;
 mod flow;
 mod health;
 mod onboarding;
+mod scan;
 mod settings;
 mod term;
 mod theme;
