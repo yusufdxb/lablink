@@ -116,49 +116,6 @@ status_json() { out_of "lablink status $1 --json"; }
 x() { as_tester "export DISPLAY=:99; $1"; }
 click() { x "xdotool mousemove $1 $2 click 1"; sleep "${3:-1}"; }
 
-# The device detail pane is a resizable egui panel. Its width on first display
-# varies between runs (seen: divider at x=542 and, once on Ubuntu 20.04,
-# x=440), which moves every control in it. Find the divider from a screenshot
-# (not from sleeps or coordinates) and drag it to where the click coordinates
-# below expect it; fail if the layout cannot be established.
-panel_divider_x() {
-    x "xdotool mousemove 1100 650"; sleep 0.6   # the divider is drawn brighter under the pointer
-    as_tester "DISPLAY=:99 xwd -root -silent > $xfer/_row.xwd"
-    docker cp "$cur:$xfer/_row.xwd" "$out/_row.xwd" >/dev/null
-    ffmpeg -loglevel error -y -i "$out/_row.xwd" -vf crop=1280:1:0:300 -f rawvideo -pix_fmt rgb24 "$out/_row.raw"
-    python3 -I -c '
-import sys
-d = open(sys.argv[1], "rb").read()
-for x in range(300, 760):
-    if tuple(d[x * 3:x * 3 + 3]) == (60, 60, 60):
-        print(x); break
-' "$out/_row.raw"
-}
-# egui needs a frame with the pointer over the handle before the press, and
-# frames between the moves: one chained xdotool command is too fast.
-drag_divider() { # drag_divider FROM_X TO_X
-    local from=$1 to=$2 p
-    x "xdotool mousemove $from 300"; sleep 0.6
-    x "xdotool mousedown 1"; sleep 0.4
-    for p in $(seq "$from" $(( to > from ? 20 : -20 )) "$to") "$to"; do x "xdotool mousemove $p 300"; sleep 0.1; done
-    sleep 0.3; x "xdotool mouseup 1"; sleep 1
-}
-gui_pin_panel_layout() { # gui_pin_panel_layout WANT_X
-    local want=$1 got i first
-    first=$(panel_divider_x)
-    if [ -n "${CR_SKEW_PANEL:-}" ]; then   # test hook: start from the other layout
-        got=$(panel_divider_x); drag_divider "$got" 440
-    fi
-    for i in 1 2 3; do
-        got=$(panel_divider_x)
-        [ "$got" = "$want" ] && { echo "initial=$first (skew hook: ${CR_SKEW_PANEL:-off}) final=$got attempts=$i" > "$out/panel-divider-x.txt"; return 0; }
-        [ -n "$got" ] || break
-        drag_divider "$got" "$want"
-    done
-    shot gui-layout-fail
-    fail "GUI-only: layout" "detail pane divider at x=${got:-none}, wanted $want (gui-layout-fail.png)"
-}
-
 echo "== artifacts"
 (cd dist && sha256sum -c SHA256SUMS) > "$out/sha256-check.txt" 2>&1 || fail "artifacts" "SHA256SUMS mismatch"
 grep -q "^lablink " dist/BUILDINFO && [ -n "$sha" ] || fail "artifacts" "BUILDINFO incomplete"
@@ -489,53 +446,57 @@ as_tester "ping -c 1 -W 1 $preA.1 >/dev/null 2>&1 || true"
 x 'LIBGL_ALWAYS_SOFTWARE=1 nohup lablink-gui >/tmp/gui.log 2>&1 &'
 sleep 5
 x 'xdotool windowfocus --sync $(xdotool search --name LabLink | head -1)'
-click 283 195                      # site name field
+click 311 246                      # site name field
 typein 'Site Gamma'
 shot gui-b0-welcome
-click 78 315                       # Start
-click 15 170; click 271 170        # use the network, allow active scan
+click 78 414                       # Start
+click 21 231; click 286 231        # use the network, allow active scan
 shot gui-b1-networks
-click 146 229                      # Continue
-click 121 246 10                   # Set up LabLink
+click 110 321                      # Continue
+click 145 339 10                   # Set up LabLink
 shot gui-b2-setup-done
 as_tester 'systemctl --user is-active lablinkd' >/dev/null || fail "GUI-only: wizard" "daemon not running after the wizard"
 grep -q "active_scan: true" <(out_of 'cat ~/.config/lablink/config.yaml') || fail "GUI-only: wizard" "network not allowed"
 grep -q "name: Site Gamma" <(out_of 'cat ~/.config/lablink/config.yaml') || fail "GUI-only: wizard" "site not named"
 pass "GUI-only: wizard" "site name typed, network ticked (nothing preselected) -> service started, config written"
-click 78 370 15                    # Discover now (result page)
-click 93 84 2                      # Show the new hosts
+click 77 527 15                    # Discover now (result page)
+click 122 136 2                    # Show the new hosts
 shot gui-b3-discovered
-click 615 108 2                    # Inspect / Adopt the robot (second row)
-click 484 439; typein robot        # Name (the Site row above defaults to Site Gamma)
-click 484 461; typein 'Bench robot'
-click 484 525; typein robot        # SSH username
-click 394 483; click 410 529       # Type: Generic Linux Host
-shot gui-b4-adopt
-click 276 580 4                    # Adopt
-grep -q '"profile": "generic_linux"' <<<"$(status_json robot)" || fail "GUI-only: adopt" "robot not adopted (gui-b4-adopt.png)"
-pass "GUI-only: adopt" "inspected fingerprints, chose the site, named robot, label, type, user"
-gui_pin_panel_layout 542
-click 607 392 4                    # Trust host key... (in the wrapped explanation)
-shot gui-b5-trust
-x "xdotool mousemove 720 600"; for _ in 1 2 3; do x "xdotool click 5"; done; sleep 1   # scroll to the pin button
-shot gui-b5a-scrolled
-click 586 538 8                    # Pin N key(s)
-grep -q '"identity": "verified"' <<<"$(status_json robot)" || fail "GUI-only: trust" "not pinned (gui-b5-trust.png)"
-x "xdotool mousemove 720 600"; for _ in $(seq 15); do x "xdotool click 4"; done; sleep 1   # back to the top
-shot gui-b6-auth-failed
-pass "GUI-only: trust" "fingerprints shown, pinned only after the explicit click"
-click 592 425 3                    # SSH Setup -> terminal running lablink copy-id
+dev="device-${preA//./-}-20"         # name LabLink suggests for the robot's address
+hostfps=$(docker exec "$robotA" bash -c 'for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done' | awk '{print $2}' | sort)
+click 1000 319 2                   # Connect securely... (robot, second row)
+click 266 481; typein robot        # Username
+click 169 578 6                    # Continue -> identity page
+shot gui-b4-identity
+grep -q '"identity": "verified"' <<<"$(status_json "$dev")" && fail "GUI-only: identity" "verified before confirmation"
+click 133 628                      # I compared the fingerprints
+click 238 668 4                    # Confirm identity and continue
+grep -q '"identity": "verified"' <<<"$(status_json "$dev")" || fail "GUI-only: identity" "not verified after confirmation (gui-b4-identity.png)"
+pinned=$(out_of "lablink inspect $dev" | awk '/pinned key/{print $4}' | sort)
+[ -n "$pinned" ] && [ "$pinned" = "$hostfps" ] || fail "GUI-only: identity" "pinned keys differ from the robot's host keys"
+pass "GUI-only: identity" "fingerprints shown, unverified until the explicit confirmation, pins match the robot's host keys"
+shot gui-b5-key
+as_tester 'ls ~/.ssh/lablink-key-* 2>/dev/null' && fail "GUI-only: key" "key exists before consent"
+click 133 485                      # consent to create a new key
+click 238 552 3                    # Open authentication terminal
 term=$(x 'xdotool search --class xterm | head -1')
 [ -n "$term" ] || fail "GUI-only: SSH setup" "no terminal opened"
-x "xdotool windowfocus --sync $term; xdotool type --window $term y; xdotool key --window $term Return"; sleep 1
-for _ in 1 2 3; do x "xdotool key --window $term Return"; sleep 1; done   # key file, empty passphrase x2
+x "xdotool windowfocus --sync $term"
+for _ in 1 2; do x "xdotool key --window $term Return"; sleep 1; done   # empty passphrase x2 (no filename prompt)
 sleep 3
 x "xdotool type --window $term --delay 40 robot-pass-1; xdotool key --window $term Return"
-wait_for 30 'lablink status robot --json | grep -q "\"color\": \"green\""' || { shot gui-b7-fail; fail "GUI-only: SSH setup" "not GREEN"; }
+wait_for 30 "lablink status $dev --json | grep -q '\"color\": \"green\"'" || { shot gui-b6-fail; fail "GUI-only: SSH setup" "not GREEN"; }
+as_tester 'ls ~/.ssh/lablink-key-*' >/dev/null || fail "GUI-only: key" "no LabLink key created"
+pass "GUI-only: SSH setup" "key created after consent, password only in the OpenSSH prompt, real login test GREEN"
+sleep 3
 x 'xdotool windowfocus --sync $(xdotool search --name LabLink | head -1)'
-sleep 2
-shot gui-b7-managed
-pass "GUI-only: SSH setup" "SSH Setup opened a terminal, key created and installed; robot GREEN/Managed (gui-b7)"
+click 266 383; typein 'Bench robot'
+click 177 419 3                    # Save device
+shot gui-b7-done
+grep -q '"label": "Bench robot"' <<<"$(status_json "$dev")" || fail "GUI-only: name" "label not saved (gui-b7-done.png)"
+click 156 388 2                    # Done
+shot gui-b8-managed
+pass "GUI-only: name" "friendly name saved; device GREEN, ssh ok, identity verified"
 x 'pkill -x lablink-gui' || true
 
 # ---- tarball: a third fresh user, no root ----------------------------------------------
