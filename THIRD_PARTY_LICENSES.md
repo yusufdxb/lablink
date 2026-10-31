@@ -7173,16 +7173,16 @@ limitations under the License.
 ## Apache License 2.0
 
 Used by:
-- lablink-cli 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-core 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-daemon 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-discovery 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-doctor 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-files 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-gui 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-platform 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-setup 0.3.1 (https://github.com/yusufdxb/lablink)
-- lablink-ssh 0.3.1 (https://github.com/yusufdxb/lablink)
+- lablink-cli 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-core 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-daemon 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-discovery 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-doctor 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-files 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-gui 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-platform 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-setup 0.4.0 (https://github.com/yusufdxb/lablink)
+- lablink-ssh 0.4.0 (https://github.com/yusufdxb/lablink)
 - accesskit 0.24.1 (https://github.com/AccessKit/accesskit)
 - accesskit_atspi_common 0.18.1 (https://github.com/AccessKit/accesskit)
 - accesskit_consumer 0.36.0 (https://github.com/AccessKit/accesskit)
@@ -9367,4 +9367,4 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-<!-- Cargo.lock sha256: e7a240c87f89877d3e86606f3b6ef16bcbac14c9cd4bc80492efc518d5122b15 -->
+<!-- Cargo.lock sha256: 152da80887c2fe98be85047a69f6b9d9ec91f18d9e4ce9144abb4d40d76f9b4e -->
