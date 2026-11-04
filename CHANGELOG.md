@@ -4,6 +4,16 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `lablink scp [-r] [-p] [-C] [--limit KBIT] [--legacy] SOURCE... DEST`:
+  copy files to or from one device with the system scp through the same
+  address and pinned host key as `lablink ssh` (`device:path` names the
+  device side). Unpinned devices, device-to-device and local-only copies are
+  refused. See `docs/SSH_IDENTITY.md`.
+
 ## [0.4.2] - 2026-11-04
 
 Makes upgrading one command. Configuration and state are unchanged; the

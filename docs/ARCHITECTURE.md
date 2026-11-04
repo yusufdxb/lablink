@@ -31,7 +31,7 @@ open items are listed at the end.
 | `lablink-daemon` | lib + `lablinkd` | Registry, per-device monitors, discovery coordinator, persistence, IPC server, metrics, service-check extension point, test harness (`testing`). | rusqlite (bundled SQLite), tokio, tracing |
 | `lablink-doctor` | lib | Read-only health checks: plans checks per device (config `checks:`, else the device profile), runs one batch SSH session per device through the same resolve and pinned-identity path as `exec`, renders human and JSON reports. | lablink-ssh |
 | `lablink-setup` | lib | Actions shared by the CLI and GUI that are not daemon requests: first-run `init`, site creation, systemd user-service control, completion install, local network detection (`getifaddrs`, read-only), validated atomic config writes with backups, export/import, redacted support bundles. No probing. | libc, tempfile |
-| `lablink-cli` | `lablink` | Client commands, prompts, human and JSON output, `ssh`/`exec`/`copy-id` via OpenSSH. No async runtime. | clap |
+| `lablink-cli` | `lablink` | Client commands, prompts, human and JSON output, `ssh`/`exec`/`scp`/`copy-id` via OpenSSH. No async runtime. | clap |
 | `lablink-gui` | `lablink-gui` | Native egui client of the daemon API and `lablink-setup`: setup wizard, site selector and views, device lifecycle, Health, Sites and Settings tabs. No networking logic of its own. | eframe |
 
 Dependency rule: clients depend on `lablink-core` (and `lablink-ssh` to launch

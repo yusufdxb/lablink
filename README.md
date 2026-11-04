@@ -95,6 +95,7 @@ lablink devices                      # full identity and health detail
 lablink discover                     # run discovery now
 lablink ssh <device>                 # interactive SSH with the pinned identity
 lablink exec <device> '<command>'    # one remote command; the remote exit code is preserved
+lablink scp [-r] <src>... <device>:<path>   # copy files with the pinned identity (or <device>:<path>... <dest>)
 lablink sites                        # every site: ACTIVE / AWAY / UNKNOWN
 lablink site                         # the current site and the evidence for it
 lablink site use <site|auto>         # choose a site by hand, or back to automatic detection
@@ -127,10 +128,11 @@ package and by `lablink init`.
   **Pin** button) after you saw the fingerprint, by a fingerprint you wrote
   in the config, or by a matching entry already in your own
   `~/.ssh/known_hosts` for that device's name. `lablink ssh`/`exec` refuse a
-  device without a pin unless you pass `--unpinned`, and `lablink resolve`
+  device without a pin unless you pass `--unpinned` (`lablink scp` never
+  copies to or from an unpinned device), and `lablink resolve`
   prints only verified addresses.
 - **A changed host key stops access.** A mismatch is a RED security stop:
-  `ssh`, `exec`, `copy-id` and checks refuse (exit 6) until you verify the
+  `ssh`, `exec`, `scp`, `copy-id` and checks refuse (exit 6) until you verify the
   new key on the device and replace the pin yourself
   (`lablink trust <device> --replace`). There is no bypass.
 - **Scans need explicit permission.** LabLink actively scans only networks

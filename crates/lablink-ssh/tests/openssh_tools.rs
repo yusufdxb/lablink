@@ -857,3 +857,144 @@ fn config_text_cannot_turn_a_failed_proof_into_a_security_stop() {
         "{proof:?}"
     );
 }
+
+/// OpenSSH 9.8+ blocks a source address for a while after connections that
+/// never log in; switched off where the option exists.
+fn penalties_off() -> &'static str {
+    let ok = Command::new(SSHD)
+        .args(["-G", "-f", "/dev/null", "-o", "PerSourcePenalties=no"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if ok {
+        "PerSourcePenalties no\n"
+    } else {
+        ""
+    }
+}
+
+/// `lablink scp`'s arguments with the real scp, ssh and sshd: files go up
+/// and down (folders, awkward names, the original protocol) through the
+/// pinned key, and a server with another key gets no authentication and no
+/// file, in either direction.
+#[test]
+fn scp_copies_through_the_pin_and_never_to_an_impostor() {
+    use lablink_ssh::ScpPath::{Local, Remote};
+    let _config = shared_ssh_config();
+    if !have_openssh_server() || !have("scp") {
+        eprintln!("SKIP: scp and OpenSSH server required");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for name in ["hk", "impostor", "client"] {
+        keygen(d, name);
+    }
+    std::fs::copy(d.join("client.pub"), d.join("authorized_keys")).unwrap();
+    let extra = format!(
+        "AuthorizedKeysFile {}\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nSubsystem sftp internal-sftp\n{}",
+        d.join("authorized_keys").display(),
+        penalties_off()
+    );
+    let (server, port) = sshd(d, "dev", "hk", &extra);
+    let mut t = pinned(d, port, &pubkey(d, "hk"));
+    t.username = Some(
+        String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_string(),
+    );
+    for (k, v) in [
+        ("IdentityFile", d.join("client").display().to_string()),
+        ("IdentitiesOnly", "yes".into()),
+        ("BatchMode", "yes".into()),
+    ] {
+        t.options.insert(k.into(), v);
+    }
+    let s = |p: std::path::PathBuf| p.display().to_string();
+    let (local, remote) = (d.join("local"), d.join("remote"));
+    std::fs::create_dir_all(local.join("tree/inner")).unwrap();
+    std::fs::create_dir(&remote).unwrap();
+    std::fs::write(local.join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(local.join("b c:d.txt"), "beta\n").unwrap();
+    std::fs::write(local.join("tree/inner/deep.bin"), [0u8, 1, 255]).unwrap();
+    let scp = |flags: &[&str], src: Vec<lablink_ssh::ScpPath>, dst: lablink_ssh::ScpPath| {
+        let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+        let args = lablink_ssh::scp_args(&t, &flags, &src, &dst).unwrap();
+        Command::new("scp").args(&args).output().unwrap()
+    };
+    let ok = |o: std::process::Output| {
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    };
+
+    ok(scp(
+        &[],
+        vec![
+            Local(s(local.join("a.txt"))),
+            Local(s(local.join("b c:d.txt"))),
+        ],
+        Remote(format!("{}/", s(remote.clone()))),
+    ));
+    assert_eq!(
+        std::fs::read_to_string(remote.join("a.txt")).unwrap(),
+        "alpha\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(remote.join("b c:d.txt")).unwrap(),
+        "beta\n"
+    );
+    ok(scp(
+        &["-r"],
+        vec![Local(s(local.join("tree")))],
+        Remote(s(remote.clone())),
+    ));
+    assert_eq!(
+        std::fs::read(remote.join("tree/inner/deep.bin")).unwrap(),
+        [0u8, 1, 255]
+    );
+    ok(scp(
+        &[],
+        vec![Remote(s(remote.join("b c:d.txt")))],
+        Local(s(local.join("back.txt"))),
+    ));
+    assert_eq!(
+        std::fs::read_to_string(local.join("back.txt")).unwrap(),
+        "beta\n"
+    );
+    ok(scp(
+        &["-O"],
+        vec![Remote(s(remote.join("a.txt")))],
+        Local(s(local.join("legacy.txt"))),
+    ));
+    assert_eq!(
+        std::fs::read_to_string(local.join("legacy.txt")).unwrap(),
+        "alpha\n"
+    );
+    drop(server);
+
+    // Another key at the device's address: refused before authentication.
+    let (_impostor, port) = sshd(d, "impostor", "impostor", &extra);
+    t.port = port;
+    for (src, dst) in [
+        (
+            Local(s(local.join("a.txt"))),
+            Remote(s(remote.join("pwned.txt"))),
+        ),
+        (
+            Remote(s(remote.join("a.txt"))),
+            Local(s(local.join("pwned.txt"))),
+        ),
+    ] {
+        let o = scp(&[], vec![src], dst);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success(), "{err}");
+        assert!(
+            err.contains("Host key verification failed")
+                || err.contains("REMOTE HOST IDENTIFICATION HAS CHANGED"),
+            "{err}"
+        );
+    }
+    assert!(!remote.join("pwned.txt").exists() && !local.join("pwned.txt").exists());
+    assert_no_auth(d, "impostor");
+}
