@@ -4,10 +4,22 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.1] - 2026-11-03
+
+Fixes found by auditing 0.4.0 as a new user, on a clean Ubuntu container and
+on a real device over Wi-Fi. No configuration or state changes; upgrade and
+restart the daemon (`systemctl --user restart lablinkd`).
 
 ### Fixed
 
+- While a device is not answering, its explanation no longer lists "SSH
+  server: accepting connections", "SSH login: works" or "answers
+  intermittently" as working now; those are shown as results of the last
+  successful check (seen on hardware: every check failing, YELLOW, with
+  those lines next to "TCP/22 timed out").
+- `lablink adopt` given a hostname (`radar.local`) says what it resolves to
+  and the exact `lablink adopt <ip> <name>` command, instead of only
+  "'radar.local' is not an IP address".
 - A device whose old address was taken by another SSH host (DHCP reuse, a
   different machine, or the device reinstalled on new hardware) no longer
   loops: the daemon re-located it at that address and released it again on
@@ -278,6 +290,7 @@ Earlier in the 0.3.0 cycle:
 - LabLink no longer starts, restarts or stops a systemd user service whose
   manager runs with a different home or config directory.
 
+[0.4.1]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.1
 [0.4.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.0
 [0.3.1]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.1
 [0.3.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.0
