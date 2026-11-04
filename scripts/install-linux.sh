@@ -294,6 +294,31 @@ main() (
         if systemctl --user restart lablinkd; then restarted=1; fi
     fi
 
+    # A restarted daemon must also stay up: one that refuses its state exits
+    # at once and systemd restarts it every few seconds, so ask it twice.
+    local daemon_down=0
+    if [[ $restarted == 1 || ( -n $backup && $was_active == 1 ) ]]; then
+        phase='checking that lablinkd is running'
+        daemon_down=1
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if /usr/bin/lablink ping >/dev/null 2>&1; then
+                sleep 1
+                if /usr/bin/lablink ping >/dev/null 2>&1; then daemon_down=0; fi
+                break
+            fi
+            sleep 0.5
+        done
+    fi
+    if [[ $daemon_down == 1 ]]; then
+        printf '\nLabLink %s is installed, but lablinkd is not running.\n' "$expected" >&2
+        if command -v journalctl >/dev/null 2>&1; then
+            printf 'Its last message:\n  %s\n' "$(journalctl --user -u lablinkd -n 1 -o cat --no-pager 2>/dev/null)" >&2
+        fi
+        printf 'Fix what it reports, then run:  systemctl --user restart lablinkd && lablink version\n' >&2
+        if [[ -n $backup ]]; then printf 'To go back to your older installation:  %s/restore.sh\n' "$backup" >&2; fi
+        exit 1
+    fi
+
     printf '\nLabLink installed successfully!\n%s\n%s\n%s\n' "$reported" "$daemon_version" "$gui_version"
     if [[ -n $backup ]]; then
         printf '\nYour older installation was moved to %s.\nTo go back to it:  %s/restore.sh\n' "$backup" "$backup"

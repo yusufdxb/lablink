@@ -49,13 +49,28 @@ struct LockFile {
 }
 
 fn lock_state_dir(dir: &std::path::Path) -> Result<LockFile, String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let p = dir.join("lablinkd.lock");
     let f = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
+        .mode(0o600)
         .open(&p)
         .map_err(|e| format!("cannot open {}: {e}", p.display()))?;
+    // Older releases created the lock with the umask's mode (0664 under a
+    // umask of 002). It is empty and only ever flock()ed, so its contents
+    // vouch for nothing; tighten it through the open descriptor so the next
+    // start does not refuse it.
+    let mode = f
+        .metadata()
+        .map_err(|e| format!("cannot check {}: {e}", p.display()))?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("cannot chmod 600 {}: {e}", p.display()))?;
+    }
     // SAFETY: flock on a valid fd owned by `f`.
     let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc != 0 {
@@ -117,6 +132,8 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
                         path.display()
                     ));
                 }
+                // The lock holds no data; lock_state_dir makes it 0600.
+                Ok(_) if name == "lablinkd.lock" => {}
                 Ok(_) => {
                     if let Some(why) = lablink_core::paths::writable_by_others(&path) {
                         return Err(format!("refusing state file {}: {why}", path.display()));

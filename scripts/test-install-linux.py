@@ -99,6 +99,7 @@ elif name == 'apt':
         path.chmod(0o755)
 elif name == 'lablink':
     if cfg.get('cli_failure'): sys.exit(1)
+    if args == ['ping']: sys.exit(1 if cfg.get('daemon_down') else 0)
     print('lablink ' + cfg.get('cli_version', (root / 'installed').read_text()) + ' (commit fixture)')
 elif name == 'lablinkd':
     if cfg.get('daemon_failure'): sys.exit(1)
@@ -133,7 +134,7 @@ class InstallerTests(unittest.TestCase):
         (self.root / "dispatcher").write_text(self.dispatcher)
         for utility in ("uname", "curl", "dpkg", "dpkg-query", "dpkg-deb", "sudo", "apt"):
             self.stub(self.root / "tools" / utility)
-        for utility in ("bash", "sha256sum", "mktemp", "rm", "mv", "cp", "mkdir", "cat", "date", "dirname", "basename", "chmod", "awk", "grep", "timeout", "readlink"):
+        for utility in ("bash", "sha256sum", "mktemp", "rm", "mv", "cp", "mkdir", "cat", "date", "dirname", "basename", "chmod", "awk", "grep", "timeout", "readlink", "sleep"):
             (self.root / "tools" / utility).symlink_to(shutil.which(utility))
         (self.root / "ca-certificates.crt").write_text("fixture CA presence check\n")
         source = SOURCE.replace("/etc/os-release", str(self.os_release))
@@ -268,6 +269,22 @@ class InstallerTests(unittest.TestCase):
         self.cfg.update(daemon_active=True, restart_failure=True)
         self.run_installer(success=True)
         self.assertIn("systemctl --user restart lablinkd", self.output)
+
+    def test_daemon_that_does_not_stay_up_is_reported(self):
+        self.stub(self.root / "tools" / "systemctl")
+        self.existing("0.1.0")
+        self.cfg.update(daemon_active=True, daemon_down=True)
+        self.run_installer(success=False)
+        self.assertIn("is installed, but lablinkd is not running", self.output)
+        self.assertIn("systemctl --user restart lablinkd", self.output)
+        self.assertNotIn("restarted with the new version", self.output)
+
+    def test_running_daemon_is_checked_after_restart(self):
+        self.stub(self.root / "tools" / "systemctl")
+        self.existing("0.1.0")
+        self.cfg["daemon_active"] = True
+        self.run_installer(success=True)
+        self.assertGreaterEqual(sum(e[:2] == ["lablink", "ping"] for e in self.events), 2)
 
     def test_reinstall_of_same_version_does_not_restart(self):
         self.stub(self.root / "tools" / "systemctl")

@@ -133,7 +133,7 @@ All `--json` outputs carry `"schema_version": 1`. Fields are only ever added.
 ```json
 {
   "schema_version": 1,
-  "daemon": {"version": "0.3.1", "pid": 4242, "uptime_s": 24},
+  "daemon": {"version": "0.4.2", "pid": 4242, "uptime_s": 24},
   "devices": [
     {
       "name": "jetson-a", "id": "site-alpha/jetson-a", "site": "site-alpha",

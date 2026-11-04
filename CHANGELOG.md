@@ -4,7 +4,10 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.2] - 2026-11-04
+
+Makes upgrading one command. Configuration and state are unchanged; the
+installer now restarts the daemon for you.
 
 ### Added
 
@@ -22,6 +25,24 @@ All notable changes are listed here. The format follows
 - After an upgrade, the installer says the configuration, devices and pins
   were kept and suggests `lablink status` / `lablink doctor`, instead of
   `lablink init` (which would only offer to replace the configuration).
+- Dependencies: tokio 1.54.1, tokio-util 0.7.20, serde_json 1.0.154.
+
+### Fixed
+
+- **lablinkd no longer refuses to start after an upgrade on hosts whose
+  accounts can come from a directory service** (`sss` in
+  `/etc/nsswitch.conf`, common on Ubuntu 24.04 desktops). Earlier releases
+  created `lablinkd.lock` with the umask's mode (0664 under umask 002); since
+  the user's group cannot be proven private there, every later start was
+  refused ("writable by group ... (chmod g-w)") and systemd restarted it in
+  a loop. The lock is now created 0600, and an existing lock is tightened
+  instead of refused (it holds no data). Every other state file is checked
+  as before. Found upgrading a real 0.3.0 tarball installation.
+- The installer no longer reports "lablinkd was restarted" when the daemon
+  did not stay up: it checks that the daemon answers, and otherwise prints
+  its last log message and the fix, and exits non-zero.
+- Completion and init tests no longer fail on a machine that has the
+  package installed (they assumed no system-wide completion script).
 
 ## [0.4.1] - 2026-11-03
 
@@ -309,6 +330,7 @@ Earlier in the 0.3.0 cycle:
 - LabLink no longer starts, restarts or stops a systemd user service whose
   manager runs with a different home or config directory.
 
+[0.4.2]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.2
 [0.4.1]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.1
 [0.4.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.0
 [0.3.1]: https://github.com/yusufdxb/lablink/releases/tag/v0.3.1

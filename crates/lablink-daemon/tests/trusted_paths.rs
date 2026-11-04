@@ -221,3 +221,107 @@ fn a_configuration_on_a_pipe_is_refused() {
         "{err}"
     );
 }
+
+fn private_state(t: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let cfg = t.join("config.yaml");
+    std::fs::write(&cfg, "").unwrap();
+    chmod(&cfg, 0o600);
+    let state = t.join("state");
+    std::fs::create_dir(&state).unwrap();
+    chmod(&state, 0o700);
+    (cfg, state)
+}
+
+/// 0.3.x created the lock with the umask's mode (0664 under umask 002); on a
+/// host whose group cannot be proven private (nsswitch lists `sss`) every
+/// later release refused to start. The lock holds no data: it is tightened.
+#[test]
+fn a_lock_file_others_could_write_is_tightened_not_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let (cfg, state) = private_state(t.path());
+    let lock = state.join("lablinkd.lock");
+    std::fs::write(&lock, "").unwrap();
+    chmod(&lock, 0o666);
+    let out = daemon(
+        t.path(),
+        &[
+            "--config",
+            cfg.to_str().unwrap(),
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+        3,
+    );
+    assert!(out.is_none(), "daemon must start: {out:?}");
+    let mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn a_new_lock_file_is_private_whatever_the_umask() {
+    use std::os::unix::process::CommandExt;
+    let t = tempfile::tempdir().unwrap();
+    let (cfg, state) = private_state(t.path());
+    let mut c = Command::new(env!("CARGO_BIN_EXE_lablinkd"));
+    c.args([
+        "--no-netlink",
+        "--no-mdns",
+        "--no-startup-discovery",
+        "--socket",
+    ])
+    .arg(t.path().join("run/lablinkd.sock"))
+    .args([
+        "--config",
+        cfg.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+    ])
+    .env("LABLINK_LOG", "warn")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    // SAFETY: umask is async-signal-safe and has no preconditions.
+    unsafe {
+        c.pre_exec(|| {
+            libc::umask(0o002);
+            Ok(())
+        });
+    }
+    let mut child = c.spawn().unwrap();
+    let lock = state.join("lablinkd.lock");
+    let end = Instant::now() + Duration::from_secs(5);
+    while !lock.exists() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn a_linked_lock_file_is_still_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let (cfg, state) = private_state(t.path());
+    let victim = t.path().join("victim");
+    std::fs::write(&victim, "keep").unwrap();
+    chmod(&victim, 0o644);
+    std::os::unix::fs::symlink(&victim, state.join("lablinkd.lock")).unwrap();
+    let out = daemon(
+        t.path(),
+        &[
+            "--config",
+            cfg.to_str().unwrap(),
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+        5,
+    )
+    .expect("linked lock must be refused");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("regular file owned by you"));
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}

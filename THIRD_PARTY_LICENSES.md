@@ -7173,16 +7173,16 @@ limitations under the License.
 ## Apache License 2.0
 
 Used by:
-- lablink-cli 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-core 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-daemon 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-discovery 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-doctor 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-files 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-gui 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-platform 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-setup 0.4.1 (https://github.com/yusufdxb/lablink)
-- lablink-ssh 0.4.1 (https://github.com/yusufdxb/lablink)
+- lablink-cli 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-core 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-daemon 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-discovery 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-doctor 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-files 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-gui 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-platform 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-setup 0.4.2 (https://github.com/yusufdxb/lablink)
+- lablink-ssh 0.4.2 (https://github.com/yusufdxb/lablink)
 - accesskit 0.24.1 (https://github.com/AccessKit/accesskit)
 - accesskit_atspi_common 0.18.1 (https://github.com/AccessKit/accesskit)
 - accesskit_consumer 0.36.0 (https://github.com/AccessKit/accesskit)
@@ -7220,7 +7220,7 @@ Used by:
 - serde_bytes 0.11.19 (https://github.com/serde-rs/bytes)
 - serde_core 1.0.229 (https://github.com/serde-rs/serde)
 - serde_derive 1.0.229 (https://github.com/serde-rs/serde)
-- serde_json 1.0.151 (https://github.com/serde-rs/json)
+- serde_json 1.0.154 (https://github.com/serde-rs/json)
 - serde_repr 0.1.21 (https://github.com/dtolnay/serde-repr)
 - syn 2.0.119 (https://github.com/dtolnay/syn)
 - syn 3.0.6 (https://github.com/dtolnay/syn)
@@ -8375,8 +8375,8 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- tokio-util 0.7.19 (https://github.com/tokio-rs/tokio)
-- tokio 1.53.3 (https://github.com/tokio-rs/tokio)
+- tokio-util 0.7.20 (https://github.com/tokio-rs/tokio)
+- tokio 1.54.1 (https://github.com/tokio-rs/tokio)
 
 ```text
 MIT License
@@ -9367,4 +9367,4 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-<!-- Cargo.lock sha256: a6a420010da810b9fb601ddfd6118e5aab1e25f2b06569788db7c62672e84fdf -->
+<!-- Cargo.lock sha256: af66f86032169602abe836db0052cb049a223aa883ac531df7635563893e3566 -->
