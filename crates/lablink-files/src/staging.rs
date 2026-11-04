@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 type CleanupReporter = Arc<dyn Fn(String, String) + Send + Sync>;
 
+/// Lock attempts before a destination is reported busy (10 ms apart).
+const LEASE_ATTEMPTS: u32 = 50;
+
 pub struct LocalLease {
     _directory: Dir,
 }
@@ -30,13 +33,24 @@ impl LocalLease {
         }
         // SAFETY: openat returned a new descriptor; transfer ownership once.
         let directory = Dir::from_std_file(unsafe { std::fs::File::from_raw_fd(fd) });
-        // SAFETY: live private descriptor; no blocking lock request.
-        if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Error::Refused("Destination directory is busy or does not support safe locking; retry after the other writer finishes".into()));
+        // A lease released a moment ago can still look held: a process forked
+        // by another thread (ssh, a helper) keeps a copy of the descriptor
+        // until its exec closes it (O_CLOEXEC). Retry briefly before
+        // reporting a real concurrent writer.
+        for attempt in 0..LEASE_ATTEMPTS {
+            // SAFETY: live private descriptor; no blocking lock request.
+            if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Self {
+                    _directory: directory,
+                });
+            }
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EWOULDBLOCK) || attempt + 1 == LEASE_ATTEMPTS {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        Ok(Self {
-            _directory: directory,
-        })
+        Err(Error::Refused("Destination directory is busy or does not support safe locking; retry after the other writer finishes".into()))
     }
 }
 

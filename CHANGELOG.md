@@ -27,6 +27,11 @@ All notable changes are listed here. The format follows
 - An offline device no longer shows `SSH OPEN` and "SSH server: accepting
   connections" from before it went down; its port is checked again when it
   returns.
+- Files workspace: copying a folder could fail at random with "Destination
+  directory is busy" while other SSH work ran, because a process forked at
+  that moment briefly kept the just-released lock of the previous item. The
+  lock is now retried for up to half a second; a real concurrent writer is
+  still refused.
 - `lablink` without a subcommand, or `lablink-gui`, in a session without a
   display (for example over SSH) prints a short message pointing to the CLI
   and exits 2, instead of the windowing library's raw error.
