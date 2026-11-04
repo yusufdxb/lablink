@@ -273,7 +273,9 @@ main() (
         [[ -n "$resolved" && "$resolved" -ef /usr/bin/$binary ]] || fail "Your PATH does not resolve $binary to /usr/bin/$binary (found ${resolved:-nothing}). Add /usr/bin to PATH before using LabLink."
     done
     local reported daemon_version gui_version
-    reported=$(/usr/bin/lablink version) || fail 'Installed CLI could not run.'
+    # Before the restart below the old daemon still answers, so the CLI would
+    # warn that the builds differ; the closing summary asks again afterwards.
+    reported=$(/usr/bin/lablink version 2>/dev/null) || fail 'Installed CLI could not run.'
     [[ $reported == "lablink $expected (commit "* ]] || fail "Unexpected CLI version: $reported"
     daemon_version=$(/usr/bin/lablinkd --version) || fail 'Installed daemon could not run.'
     [[ $daemon_version == "lablinkd $expected" ]] || fail "Unexpected daemon version: $daemon_version"
@@ -319,6 +321,9 @@ main() (
         exit 1
     fi
 
+    if [[ $restarted == 1 || ( -n $backup && $was_active == 1 ) ]]; then
+        reported=$(/usr/bin/lablink version 2>/dev/null) || true
+    fi
     printf '\nLabLink installed successfully!\n%s\n%s\n%s\n' "$reported" "$daemon_version" "$gui_version"
     if [[ -n $backup ]]; then
         printf '\nYour older installation was moved to %s.\nTo go back to it:  %s/restore.sh\n' "$backup" "$backup"

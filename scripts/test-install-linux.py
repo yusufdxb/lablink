@@ -100,6 +100,8 @@ elif name == 'apt':
 elif name == 'lablink':
     if cfg.get('cli_failure'): sys.exit(1)
     if args == ['ping']: sys.exit(1 if cfg.get('daemon_down') else 0)
+    if args == ['version'] and cfg.get('version_warning'):
+        print('lablink: WARNING: client and daemon builds differ.', file=sys.stderr)
     print('lablink ' + cfg.get('cli_version', (root / 'installed').read_text()) + ' (commit fixture)')
 elif name == 'lablinkd':
     if cfg.get('daemon_failure'): sys.exit(1)
@@ -285,6 +287,13 @@ class InstallerTests(unittest.TestCase):
         self.cfg["daemon_active"] = True
         self.run_installer(success=True)
         self.assertGreaterEqual(sum(e[:2] == ["lablink", "ping"] for e in self.events), 2)
+
+    def test_upgrade_summary_has_no_build_mismatch_warning(self):
+        self.stub(self.root / "tools" / "systemctl")
+        self.existing("0.1.0")
+        self.cfg.update(daemon_active=True, version_warning=True)
+        self.run_installer(success=True)
+        self.assertNotIn("builds differ", self.output)
 
     def test_reinstall_of_same_version_does_not_restart(self):
         self.stub(self.root / "tools" / "systemctl")
