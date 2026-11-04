@@ -221,7 +221,19 @@ pub struct Device {
     /// under the same name.
     pub epoch: u64,
     persisted_last_seen_ms: u64,
+    /// Addresses this device lost to another host (an unknown key or another
+    /// device answered there), with the time. The check plan does not try
+    /// them again from the device's own address history until
+    /// `RELEASED_RECHECK_MS` has passed: otherwise every check re-located the
+    /// device at the old address and released it again, a loop that flooded
+    /// the history. Discovery still attributes the device there at once if it
+    /// comes back and presents its pinned key.
+    pub released: BTreeMap<IpAddr, u64>,
 }
+
+/// How long an address a device lost to another host is left out of its
+/// check plan (see `Device::released`).
+const RELEASED_RECHECK_MS: u64 = 10 * 60 * 1000;
 
 static NEXT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -274,6 +286,7 @@ impl Device {
             proven_ms: 0,
             epoch: NEXT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             persisted_last_seen_ms: 0,
+            released: BTreeMap::new(),
         }
     }
 
@@ -1106,13 +1119,22 @@ impl Registry {
         if let Some(ip) = d.rec.current_ip {
             push(ip);
         }
+        let lost_recently = |ip: &IpAddr| {
+            d.released
+                .get(ip)
+                .is_some_and(|&t| now.saturating_sub(t) < RELEASED_RECHECK_MS)
+        };
         for ip in d.cfg.expected_ip_addrs() {
-            push(ip);
+            if !lost_recently(&ip) {
+                push(ip);
+            }
         }
         let mut recent: Vec<&AddressRecord> = d.rec.addresses.iter().collect();
         recent.sort_by_key(|a| std::cmp::Reverse(a.last_seen_ms));
         for a in recent.into_iter().take(4) {
-            push(a.ip);
+            if !lost_recently(&a.ip) {
+                push(a.ip);
+            }
         }
         let resolve_due =
             now.saturating_sub(d.last_resolve_ms) >= self.cfg.daemon.resolve_interval_s * 1000;
@@ -1292,6 +1314,10 @@ impl Registry {
         }
         if d.net.state == NetworkState::Offline && prev_net != NetworkState::Offline {
             d.auth = AuthState::Unknown;
+            // An offline host is not "accepting SSH connections": forget the
+            // last port result (an offline host is often not port-probed at
+            // all), so it is checked again when the host comes back.
+            d.port.reset();
         }
         let changed = !events.is_empty();
         for (k, m) in events {
@@ -1455,9 +1481,10 @@ impl Registry {
         let Some(d) = self.devices.get_mut(name) else {
             return false;
         };
-        if d.rec.current_ip.is_none() {
+        let Some(ip) = d.rec.current_ip else {
             return false;
-        }
+        };
+        d.released.insert(ip, lablink_core::time::now_ms());
         d.rec.current_ip = None;
         d.net.reset();
         // A MISMATCH stays visible until a pinned key is verified again or the
@@ -2009,6 +2036,12 @@ impl Registry {
                     .find(|a| a.ip == ip)
                     .and_then(|a| a.mac.clone());
                 let mac_changed = matches!((&recorded_mac, &obs.mac), (Some(a), Some(b)) if a != b);
+                // Released because another host key answered there: that host
+                // stays a discovery result until the device proves otherwise.
+                let lost = d
+                    .released
+                    .get(&ip)
+                    .is_some_and(|&t| now.saturating_sub(t) < RELEASED_RECHECK_MS);
                 if is_current || allow_switch == Some(device.as_str()) {
                     self.attach(
                         &device,
@@ -2021,7 +2054,7 @@ impl Registry {
                         now,
                         &mut wake,
                     );
-                } else if !mac_changed {
+                } else if !mac_changed && !lost {
                     let site = self.devices[&device].site.clone();
                     let network_name = self.network_name_for(Some(&site), ip);
                     let iface = self.ifname(ip);
@@ -2042,9 +2075,11 @@ impl Registry {
                     self.upsert_discovered(
                         obs,
                         source,
-                        Some(format!(
-                            "previously used by {device} (link-layer address changed)"
-                        )),
+                        Some(if mac_changed {
+                            format!("previously used by {device} (link-layer address changed)")
+                        } else {
+                            format!("previously used by {device} (different host key)")
+                        }),
                         now,
                     );
                 }
@@ -2267,6 +2302,13 @@ impl Registry {
         r.last_seen_ms = now;
         r.sources.insert(source.to_string());
         if obs.mac.is_some() {
+            // Another machine may answer here now (as for tracked devices,
+            // see `mac_changed`): scan it again instead of trusting the
+            // previous host's keys until the recheck interval runs out.
+            if before.mac.is_some() && before.mac != obs.mac {
+                r.last_tcp_ms = 0;
+                r.last_keyscan_ms = 0;
+            }
             r.mac = obs.mac.clone();
         }
         if let Some(n) = obs.names.first() {
@@ -2404,6 +2446,19 @@ impl Registry {
         if self.route_via(d).is_some() && d.net.state == NetworkState::Unknown {
             if let Some(e) = &d.last_error {
                 reasons.push(e.clone());
+            }
+        }
+        // Lost its address to another host: say so, not "not checked yet".
+        if d.rec.current_ip.is_none()
+            && matches!(d.net.state, NetworkState::Unknown | NetworkState::Offline)
+            && d.discovery() == DiscoveryState::Searching
+            && site_state != SiteState::Away
+            && d.identity != IdentityState::Mismatch
+        {
+            if let Some((lost, _)) = d.released.iter().max_by_key(|(_, &t)| t) {
+                reasons = vec![format!(
+                    "searching: its last address {lost} now answers as a different host"
+                )];
             }
         }
         let latency_ms = if d.healthy() { d.latency_ms } else { None };
@@ -4584,6 +4639,48 @@ mod security_tests {
             r.device("default/dev").unwrap().identity,
             IdentityState::Verified
         );
+    }
+
+    #[test]
+    fn an_unmatched_host_whose_mac_changes_is_scanned_again() {
+        let mut r = reg("devices:\n  - name: dev\n");
+        let ip: IpAddr = "10.9.0.5".parse().unwrap();
+        let obs = |mac: &str| Observation {
+            ip: Some(ip),
+            mac: Some(mac.into()),
+            names: vec![],
+            host_keys: vec![],
+        };
+        r.upsert_discovered(&obs("aa:00:00:00:00:01"), "scan", None, 1);
+        r.record_scan(ip, PortState::Open, 2);
+        r.record_keyscan_attempt(ip, 3);
+        let hour = 3_600_000;
+        assert!(!r.scan_keys_due(ip, 4, hour));
+        assert!(!r.scan_tcp_due(ip, 4, hour));
+        // Same MAC again: nothing new to learn.
+        r.upsert_discovered(&obs("aa:00:00:00:00:01"), "neighbor", None, 5);
+        assert!(!r.scan_keys_due(ip, 6, hour));
+        // A different machine answers at the address now.
+        r.upsert_discovered(&obs("bb:00:00:00:00:02"), "neighbor", None, 7);
+        assert!(r.scan_tcp_due(ip, 8, hour));
+        assert!(r.scan_keys_due(ip, 8, hour));
+    }
+
+    #[test]
+    fn a_released_address_leaves_the_check_plan_for_a_while() {
+        let mut r = reg("devices:\n  - name: dev\n");
+        let ip: IpAddr = "10.9.0.5".parse().unwrap();
+        let d = r.device_mut("default/dev").unwrap();
+        d.rec.current_ip = Some(ip);
+        touch_address(&mut d.rec, ip, "probe", None, None, None, 1);
+        assert!(r.release_ip("default/dev", "test".into()));
+        let now = lablink_core::time::now_ms();
+        let plan = r.plan("default/dev", now).unwrap();
+        assert!(!plan.candidates.contains(&ip), "{:?}", plan.candidates);
+        let later = r
+            .plan("default/dev", now + RELEASED_RECHECK_MS + 1)
+            .unwrap();
+        assert!(later.candidates.contains(&ip), "{:?}", later.candidates);
     }
 
     #[test]

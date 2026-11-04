@@ -225,6 +225,31 @@ pub fn explain(d: &DeviceStatus) -> Option<Explanation> {
             vec![Action::Discover],
         ));
     }
+    let lost = d
+        .reasons
+        .iter()
+        .find(|r| r.starts_with("searching: "))
+        .map(|r| r.trim_start_matches("searching: ").to_string());
+    if d.discovery == DiscoveryState::Searching
+        && d.ip.is_none()
+        && d.via.is_none()
+        && (d.network == NetworkState::Unknown
+            || (d.network == NetworkState::Offline && lost.is_some()))
+    {
+        return Some(ex(
+            d,
+            d.color,
+            "Searching for it",
+            match &lost {
+                Some(r) => format!("{n} is not at its last address: {r}. LabLink is looking for {n} on the allowed networks."),
+                None => format!("LabLink has no current address for {n} and is looking for it on the allowed networks."),
+            },
+            vec!["network: no current address".into()],
+            "DHCP gave its old address to another machine while it was off or moved; or the device was reinstalled and now has new SSH host keys",
+            format!("Make sure {n} is powered and connected, then run Discover. `lablink discovered` lists the host now at its old address. If that host is {n} reinstalled, check its new fingerprint on its console, then `lablink forget {n}` and set it up again (adopt, trust)."),
+            vec![Action::Discover],
+        ));
+    }
     match d.network {
         NetworkState::Unknown => {
             return Some(ex(
