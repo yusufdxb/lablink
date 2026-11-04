@@ -29,7 +29,7 @@ The installer downloads the selected official release's `.deb` and
 `SHA256SUMS` directly from GitHub Releases over HTTPS. It requires exactly
 one valid checksum entry for the selected package and verifies it before
 installation. A missing or mismatched checksum stops installation. The
-selected release is **v0.4.0**; the installer selects that tag explicitly
+selected release is **v0.4.1**; the installer selects that tag explicitly
 rather than using GitHub's latest-release endpoint.
 Maintainers can select future releases without changing the command above.
 
@@ -173,7 +173,7 @@ OpenSSH configuration.
   to finish, then retry. Do not delete package-manager lock files.
 - **Missing packaged executable:** follow the manual Debian package download
   and verification steps below, using `sudo apt install --reinstall
-  ./lablink_0.4.0_amd64.deb` for the final command. There is no LabLink APT
+  ./lablink_0.4.1_amd64.deb` for the final command. There is no LabLink APT
   repository from which APT can download a replacement by package name.
 - **Interrupted installation:** downloads are cleaned up on ordinary
   interruption. If APT reports an interrupted dpkg transaction, follow its
@@ -191,10 +191,10 @@ OpenSSH configuration.
 
 ## Manual installation alternatives
 
-The [v0.4.0 release](https://github.com/yusufdxb/lablink/releases/tag/v0.4.0)
-contains `lablink_0.4.0_amd64.deb`,
-`lablink-0.4.0-x86_64-linux.tar.gz`, `SHA256SUMS`, `BUILDINFO` and
-`lablink-0.4.0.cdx.json` (the software bill of materials).
+The [v0.4.1 release](https://github.com/yusufdxb/lablink/releases/tag/v0.4.1)
+contains `lablink_0.4.1_amd64.deb`,
+`lablink-0.4.1-x86_64-linux.tar.gz`, `SHA256SUMS`, `BUILDINFO` and
+`lablink-0.4.1.cdx.json` (the software bill of materials).
 These alternatives require downloading and verifying files yourself.
 
 ### Manual Debian package
@@ -209,13 +209,13 @@ APT. Run the block as Bash:
     download_dir=$(mktemp -d)
     trap 'rm -rf "$download_dir"' EXIT
     cd "$download_dir"
-    release=https://github.com/yusufdxb/lablink/releases/download/v0.4.0
-    curl -fSL --proto '=https' --proto-redir '=https' -O "$release/lablink_0.4.0_amd64.deb"
+    release=https://github.com/yusufdxb/lablink/releases/download/v0.4.1
+    curl -fSL --proto '=https' --proto-redir '=https' -O "$release/lablink_0.4.1_amd64.deb"
     curl -fSL --proto '=https' --proto-redir '=https' -O "$release/SHA256SUMS"
-    awk '$2 == "lablink_0.4.0_amd64.deb" || $2 == "./lablink_0.4.0_amd64.deb"' SHA256SUMS > package.sha256
+    awk '$2 == "lablink_0.4.1_amd64.deb" || $2 == "./lablink_0.4.1_amd64.deb"' SHA256SUMS > package.sha256
     test "$(wc -l < package.sha256)" -eq 1
     sha256sum --check --strict package.sha256
-    sudo apt install ./lablink_0.4.0_amd64.deb
+    sudo apt install ./lablink_0.4.1_amd64.deb
 )
 ```
 
@@ -233,14 +233,14 @@ install them. Run the block as Bash:
     set -eu
     download_dir=$(mktemp -d)
     cd "$download_dir"
-    release=https://github.com/yusufdxb/lablink/releases/download/v0.4.0
-    curl -fSL --proto '=https' --proto-redir '=https' -O "$release/lablink-0.4.0-x86_64-linux.tar.gz"
+    release=https://github.com/yusufdxb/lablink/releases/download/v0.4.1
+    curl -fSL --proto '=https' --proto-redir '=https' -O "$release/lablink-0.4.1-x86_64-linux.tar.gz"
     curl -fSL --proto '=https' --proto-redir '=https' -O "$release/SHA256SUMS"
-    awk '$2 == "lablink-0.4.0-x86_64-linux.tar.gz" || $2 == "./lablink-0.4.0-x86_64-linux.tar.gz"' SHA256SUMS > package.sha256
+    awk '$2 == "lablink-0.4.1-x86_64-linux.tar.gz" || $2 == "./lablink-0.4.1-x86_64-linux.tar.gz"' SHA256SUMS > package.sha256
     test "$(wc -l < package.sha256)" -eq 1
     sha256sum --check --strict package.sha256
-    tar xzf lablink-0.4.0-x86_64-linux.tar.gz
-    cd lablink-0.4.0-x86_64-linux
+    tar xzf lablink-0.4.1-x86_64-linux.tar.gz
+    cd lablink-0.4.1-x86_64-linux
     ./install.sh
     printf 'Keep this directory for uninstalling: %s\n' "$PWD"
 )
@@ -263,9 +263,9 @@ For advanced verification with the GitHub CLI, before installation run this
 in the directory containing the downloaded `.deb`:
 
 ```bash
-gh attestation verify lablink_0.4.0_amd64.deb --repo yusufdxb/lablink \
+gh attestation verify lablink_0.4.1_amd64.deb --repo yusufdxb/lablink \
     --signer-workflow yusufdxb/lablink/.github/workflows/ci.yml \
-    --source-ref refs/tags/v0.4.0 --deny-self-hosted-runners
+    --source-ref refs/tags/v0.4.1 --deny-self-hosted-runners
 ```
 
 This checks that the package was built by the project's CI from the tagged
