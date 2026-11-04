@@ -155,6 +155,16 @@ fn bare_command_launches_paired_gui_without_a_daemon_and_preserves_status() {
 }
 
 #[test]
+fn adopt_given_a_hostname_names_its_address_and_the_command_to_run() {
+    let o = lablink(None, &["adopt", "localhost", "bench"]);
+    assert_eq!(code(&o), exit::USAGE);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("localhost resolves to"), "{err}");
+    assert!(err.contains("lablink adopt "), "{err}");
+    assert!(err.contains(" bench`"), "{err}");
+}
+
+#[test]
 fn existing_subcommands_and_help_remain_available_without_a_gui() {
     let help = lablink(None, &["--help"]);
     assert_eq!(code(&help), 0);

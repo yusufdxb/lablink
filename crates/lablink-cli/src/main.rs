@@ -647,6 +647,27 @@ fn launch_gui(socket: Option<&std::path::Path>) -> ! {
     std::process::exit(exit::REFUSED);
 }
 
+/// `lablink adopt` takes an address. Given a hostname, say what it resolves
+/// to and the exact command to run, instead of only refusing it.
+fn adopt_hostname_hint(input: &str, name: &str) -> Fail {
+    use lablink_setup::manual::{resolve, Target};
+    let msg = match Target::parse(input) {
+        Ok(Target::Host(h)) => match resolve(&h) {
+            Ok(ips) => format!(
+                "adopt takes an IP address; {h} resolves to {}. Run `lablink adopt {} {name}`, or add it by name in the app (Add device) so LabLink follows the name if the address changes.",
+                ips.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "),
+                ips[0]
+            ),
+            Err(e) => format!(
+                "adopt takes an IP address, and {h} does not resolve on this computer ({e}). Use the device's IP address, or add it by name in the app (Add device)."
+            ),
+        },
+        Ok(Target::Ip(_)) => format!("'{input}' is not a device address"),
+        Err(e) => e,
+    };
+    Fail::new(exit::USAGE, "bad_request", msg)
+}
+
 /// The subcommand's name, for messages that suggest a command line.
 fn command_name(c: &Cmd) -> &'static str {
     match c {
@@ -1041,6 +1062,9 @@ fn run(cmd: Cmd, client: &Client) -> R {
             site,
             json,
         } => {
+            if ip.trim().parse::<std::net::IpAddr>().is_err() {
+                return Err(adopt_hostname_hint(&ip, &name));
+            }
             let s: DeviceStatus = client.call_typed(&Request::Adopt {
                 ip,
                 name,

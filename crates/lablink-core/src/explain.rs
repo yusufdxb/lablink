@@ -89,17 +89,30 @@ fn working(d: &DeviceStatus) -> Vec<String> {
             (Some(ip), None) => format!("network: {ip} answers"),
             _ => "network: answers".into(),
         }),
-        NetworkState::Degraded => v.push("network: answers intermittently".into()),
+        NetworkState::Degraded => {
+            v.push("network: answered before the recent failed checks".into())
+        }
         _ => {}
     }
+    // Port and login results are from the last successful check: while the
+    // device is not answering, do not present them as working right now.
+    let live = d.network == NetworkState::Online;
     if d.ssh_port == PortState::Open {
-        v.push("SSH server: accepting connections".into());
+        v.push(if live {
+            "SSH server: accepting connections".into()
+        } else {
+            "SSH server: accepted connections at the last successful check".into()
+        });
     }
     if d.identity == IdentityState::Verified {
         v.push("identity: verified against the pinned host key".into());
     }
     if d.ssh_auth == AuthState::Ok {
-        v.push("SSH login: works".into());
+        v.push(if live {
+            "SSH login: works".into()
+        } else {
+            "SSH login: worked at the last successful check".into()
+        });
     }
     v
 }
@@ -450,6 +463,27 @@ pub fn render_text(e: &Explanation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_degraded_device_does_not_claim_ssh_works_now() {
+        // Seen on hardware: every check was failing, yet the explanation
+        // said "answers intermittently" and "SSH server: accepting connections".
+        let mut d = dev();
+        d.color = Color::Yellow;
+        d.network = NetworkState::Degraded;
+        d.reasons = vec![
+            "recent reachability checks failed".into(),
+            "TCP/22 timed out".into(),
+        ];
+        let e = explain(&d).unwrap();
+        assert_eq!(e.headline, "Connection is unstable");
+        let works = e.still_works.join("\n");
+        assert!(!works.contains("intermittently"), "{works}");
+        assert!(!works.contains("accepting connections"), "{works}");
+        assert!(!works.contains("SSH login: works"), "{works}");
+        assert!(works.contains("at the last successful check"), "{works}");
+        assert!(works.contains("identity: verified"), "{works}");
+    }
 
     fn dev() -> DeviceStatus {
         DeviceStatus {
