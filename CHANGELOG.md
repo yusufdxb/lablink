@@ -4,6 +4,33 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- A device whose old address was taken by another SSH host (DHCP reuse, a
+  different machine, or the device reinstalled on new hardware) no longer
+  loops: the daemon re-located it at that address and released it again on
+  every check, about every 5 seconds, adding four history events each time.
+  The address is now left out of the device's checks for 10 minutes;
+  discovery still finds the device there at once if it comes back with its
+  pinned key. The host now at that address stays listed in
+  `lablink discovered` ("previously used by ... (different host key)")
+  instead of being hidden as the device's old address.
+- An unmatched host whose link-layer address changes is port- and key-scanned
+  again on the next discovery, instead of keeping the previous machine's keys
+  for up to the recheck interval. A device that returns to an address it had
+  lost is therefore recognized by its pinned key right away.
+- Such a device is reported as "Searching for it" with the address it lost
+  (also once it turns RED), instead of "Not checked yet: the daemon just
+  started" or "stopped answering at its last address".
+- An offline device no longer shows `SSH OPEN` and "SSH server: accepting
+  connections" from before it went down; its port is checked again when it
+  returns.
+- `lablink` without a subcommand, or `lablink-gui`, in a session without a
+  display (for example over SSH) prints a short message pointing to the CLI
+  and exits 2, instead of the windowing library's raw error.
+
 ## [0.4.0] - 2026-10-31
 
 The desktop app can now take a new Ubuntu user from install to a verified

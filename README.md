@@ -16,6 +16,8 @@ a terminal as your normal user:
 bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh) && bash <<< "$installer"'
 ```
 
+It needs `curl`, which a fresh Ubuntu may not have: `sudo apt install curl`.
+
 Then set up your first site:
 
 ```bash
