@@ -219,6 +219,9 @@ pub fn complete(
             _ => vec![],
         };
     }
+    if sub == "scp" {
+        return vec![FILES.into()];
+    }
     if sub == "check-config" || sub == "import" {
         return if positionals.is_empty() {
             vec![FILES.into()]
@@ -468,6 +471,8 @@ mod tests {
         assert_eq!(run("lablink --socket /tm"), [FILES]);
         assert_eq!(run("lablink status --socket "), [FILES]);
         assert_eq!(run("lablink check-config "), [FILES]);
+        assert_eq!(run("lablink scp "), [FILES]);
+        assert_eq!(run("lablink scp a.txt "), [FILES]);
         assert!(run("lablink check-config a.yaml ").is_empty());
         for c in [
             "ssh", "exec", "status", "adopt", "discover", "metrics", "trust",

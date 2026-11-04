@@ -422,9 +422,185 @@ pub fn copy_id_args(t: &Target, pubkey: &std::path::Path) -> Result<Vec<String>,
     Ok(a)
 }
 
+/// One side of a `lablink scp` copy: a local path, or a path on the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScpPath {
+    Local(String),
+    Remote(String),
+}
+
+/// Arguments for `scp` (excluding the binary) that copy to or from the
+/// device through exactly the same addressing and pinned host-key options
+/// as `lablink ssh`, with `t.binary` as scp's ssh. `flags` are scp's own
+/// flags, chosen by the caller (never user text). Refuses unverified
+/// targets, a host word scp would read as more than a host, and copies
+/// that are not between this machine and the device.
+pub fn scp_args(
+    t: &Target,
+    flags: &[String],
+    sources: &[ScpPath],
+    target: &ScpPath,
+) -> Result<Vec<String>, String> {
+    if t.host_key_alias.is_none() || t.known_hosts_file.is_none() {
+        return Err("the device's host key is not pinned yet".into());
+    }
+    let host_ok = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with('-')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+    };
+    if !host_ok(&t.ssh_host) {
+        return Err(format!(
+            "the device's SSH host name '{}' cannot be given to scp",
+            t.ssh_host
+        ));
+    }
+    if let Some(u) = &t.username {
+        if !host_ok(u) {
+            return Err(format!("the login name '{u}' cannot be given to scp"));
+        }
+    }
+    let remote = |p: &ScpPath| matches!(p, ScpPath::Remote(_));
+    let upload = remote(target);
+    if sources.is_empty() || sources.iter().any(|s| remote(s) == upload) {
+        return Err("copy between this machine and one device: the sources must all be local and the destination remote, or the reverse".into());
+    }
+    let mut a = flags.to_vec();
+    a.push("-S".into());
+    a.push(t.binary.clone());
+    // LabLink's -o options, without ssh's own flags (scp's -l is a bandwidth
+    // limit, not the login name, which goes into each remote operand).
+    let ssh = build_args(t, &Mode::Interactive, &automated_session_args());
+    let mut i = 0;
+    while i + 1 < ssh.len() && ssh[i] != "--" {
+        if ssh[i] == "-o" {
+            a.push("-o".into());
+            a.push(ssh[i + 1].clone());
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    a.push("-o".into());
+    a.push(format!("ConnectTimeout={}", t.connect_timeout_s));
+    let host = match &t.username {
+        Some(u) => format!("{u}@{}", t.ssh_host),
+        None => t.ssh_host.clone(),
+    };
+    let word = |p: &ScpPath| match p {
+        ScpPath::Remote(path) => format!("{host}:{path}"),
+        // scp reads `a:b` as a host before the first `/`; `./a:b` is a file.
+        ScpPath::Local(path) if !path.starts_with('/') && path.contains(':') => {
+            format!("./{path}")
+        }
+        ScpPath::Local(path) => path.clone(),
+    };
+    a.push("--".into());
+    a.extend(sources.iter().map(word));
+    a.push(word(target));
+    Ok(a)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scp_target() -> Target {
+        Target {
+            binary: "/usr/bin/ssh".into(),
+            ip: "10.0.0.5".into(),
+            port: 2222,
+            ssh_host: "jetson".into(),
+            username: Some("nvidia".into()),
+            host_key_alias: Some("lablink.lab.jetson".into()),
+            known_hosts_file: Some("/s/remote/lab.jetson.known_hosts".into()),
+            connect_timeout_s: 7,
+            options: BTreeMap::new(),
+            proxy_command: None,
+        }
+    }
+
+    /// scp gets the pinned options in front of everything, the device's ssh
+    /// via -S, the login name in the operand (never -l, scp's bandwidth
+    /// limit), and operands only after `--`.
+    #[test]
+    fn scp_uses_the_pinned_options_and_operands_after_the_options() {
+        let t = scp_target();
+        let a = scp_args(
+            &t,
+            &["-r".into()],
+            &[
+                ScpPath::Local("-weird".into()),
+                ScpPath::Local("a:b".into()),
+            ],
+            &ScpPath::Remote("dst dir/".into()),
+        )
+        .unwrap();
+        assert_eq!(a[0], "-r");
+        assert_eq!(&a[1..3], ["-S", "/usr/bin/ssh"]);
+        let dd = a.iter().position(|x| x == "--").unwrap();
+        assert_eq!(&a[dd + 1..], ["-weird", "./a:b", "nvidia@jetson:dst dir/"]);
+        let opts = &a[..dd];
+        for o in [
+            "HostName=10.0.0.5",
+            "Port=2222",
+            "HostKeyAlias=lablink.lab.jetson",
+            "UserKnownHostsFile=\"/s/remote/lab.jetson.known_hosts\"",
+            "StrictHostKeyChecking=yes",
+            "GlobalKnownHostsFile=/dev/null",
+            "ControlPath=none",
+            "ForwardAgent=no",
+            "ConnectTimeout=7",
+        ] {
+            assert!(opts.contains(&o.to_string()), "{o}: {opts:?}");
+        }
+        // The pinned host-key options come before anything scp adds after
+        // them, so (first value wins) nothing later can replace them.
+        let pos = |o: &str| opts.iter().position(|x| x == o).unwrap();
+        assert!(pos("StrictHostKeyChecking=yes") < pos("ConnectTimeout=7"));
+        assert!(!opts.contains(&"-l".to_string()));
+        assert!(!opts.contains(&"nvidia".to_string()));
+        // Download: remote sources, local destination.
+        let a = scp_args(
+            &t,
+            &[],
+            &[ScpPath::Remote("/var/log/x".into())],
+            &ScpPath::Local("/tmp/x".into()),
+        )
+        .unwrap();
+        assert_eq!(&a[a.len() - 2..], ["nvidia@jetson:/var/log/x", "/tmp/x"]);
+    }
+
+    #[test]
+    fn scp_refuses_unpinned_odd_hosts_and_wrong_directions() {
+        let up = (
+            vec![ScpPath::Local("f".into())],
+            ScpPath::Remote("f".into()),
+        );
+        let mut t = scp_target();
+        t.known_hosts_file = None;
+        assert!(scp_args(&t, &[], &up.0, &up.1).is_err());
+        let mut t = scp_target();
+        t.host_key_alias = None;
+        assert!(scp_args(&t, &[], &up.0, &up.1).is_err());
+        for bad in ["", "-oProxyCommand=x", "a:b", "a@b", "a b", "a/b", "[::1]"] {
+            let mut t = scp_target();
+            t.ssh_host = bad.into();
+            assert!(scp_args(&t, &[], &up.0, &up.1).is_err(), "{bad}");
+        }
+        let mut t = scp_target();
+        t.username = Some("a@b".into());
+        assert!(scp_args(&t, &[], &up.0, &up.1).is_err());
+        let t = scp_target();
+        let l = || ScpPath::Local("f".into());
+        let r = || ScpPath::Remote("f".into());
+        assert!(scp_args(&t, &[], &[l()], &l()).is_err());
+        assert!(scp_args(&t, &[], &[r()], &r()).is_err());
+        assert!(scp_args(&t, &[], &[l(), r()], &r()).is_err());
+        assert!(scp_args(&t, &[], &[r(), l()], &l()).is_err());
+        assert!(scp_args(&t, &[], &[], &r()).is_err());
+    }
 
     #[test]
     fn copy_id_uses_the_pinned_options_and_refuses_unpinned() {

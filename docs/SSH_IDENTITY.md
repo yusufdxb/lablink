@@ -165,11 +165,35 @@ refused by `ssh`/`exec`/`resolve` unless `--force`.
 `lablink resolve <device>` prints the device's address only when its identity
 is verified at that address (exit 7 otherwise, `--force` to print it anyway).
 Tools you give the address to (`scp`, `rsync`, plain `ssh`) do not use
-LabLink's pin; prefer `lablink ssh`/`lablink exec`, or pass the same options:
+LabLink's pin; prefer `lablink ssh`/`lablink exec`/`lablink scp`, or pass the
+same options:
 
 ```bash
 lablink resolve <device> --json   # host_key_alias and known_hosts_file
 ```
+
+## Copying files: `lablink scp`
+
+`lablink scp` runs the system `scp` with the same address and pinned
+host-key options as `lablink ssh`, and the device's `ssh` as scp's transport.
+With OpenSSH 9.0 and later scp uses SFTP and remote paths are taken
+literally; `--legacy` (and older OpenSSH, by default) uses the original
+protocol, where the remote shell expands remote paths, so quote names with
+spaces or shell characters (`'jetson:"my file"'`):
+
+```bash
+lablink scp -r ./bags jetson:~/data/            # upload (several sources allowed)
+lablink scp nvidia@site-a/jetson:/var/log/syslog .
+```
+
+The device side is `[user@]device:path` (`device` may be `site/name`); a
+local file with a colon is written `./a:b`. Exactly one side is a device:
+device-to-device and local-only copies are refused (exit 2). An unpinned
+device is refused (exit 7, there is no `--unpinned`), a host-key mismatch
+stops before scp starts (exit 6), and a key that changes after that check is
+refused by ssh itself from the pinned file. `-l` is the login name, as in
+`lablink ssh` (the bandwidth limit is `--limit`). `-q` hides only LabLink's
+line, never ssh's host-key errors. Otherwise the exit code is scp's.
 
 ## What OpenSSH and the OS do, not LabLink
 

@@ -7,6 +7,7 @@
 
 mod complete;
 mod output;
+mod scp_cmds;
 mod setup_cmds;
 mod update;
 
@@ -158,6 +159,41 @@ enum Cmd {
         /// OpenSSH's own known_hosts policy decides.
         #[arg(long)]
         unpinned: bool,
+    },
+    /// Copy files to or from a device with the system scp, through the same
+    /// address and pinned host key as `lablink ssh` (e.g. `lablink scp -r
+    /// ./bags jetson:~/data/`, `lablink scp jetson:~/log.txt .`)
+    Scp {
+        /// Sources, then the destination. The device side is `device:path`
+        /// (`user@device:path`, `site/name:path`); a local file with a colon is `./a:b`.
+        #[arg(required = true, num_args = 2.., value_name = "PATH")]
+        paths: Vec<String>,
+        /// Login name, as in `lablink ssh` (default: the one that last
+        /// authenticated, else the first configured). The bandwidth limit is --limit.
+        #[arg(long, short = 'l')]
+        user: Option<String>,
+        /// Copy folders and their contents.
+        #[arg(long, short)]
+        recursive: bool,
+        /// Keep modification times and modes.
+        #[arg(long, short)]
+        preserve: bool,
+        /// Compress in transit.
+        #[arg(long, short = 'C')]
+        compress: bool,
+        /// Bandwidth limit in Kbit/s.
+        #[arg(long, value_name = "KBIT")]
+        limit: Option<std::num::NonZeroU32>,
+        /// Use the original scp protocol instead of SFTP, for devices without an
+        /// SFTP server (remote paths are then expanded by the remote shell).
+        #[arg(long)]
+        legacy: bool,
+        /// Do not print the connection line.
+        #[arg(long, short)]
+        quiet: bool,
+        /// Try even if the device is currently offline or its site is AWAY.
+        #[arg(long)]
+        force: bool,
     },
     /// Pin a device's current SSH host key after you have verified it.
     Trust {
@@ -695,6 +731,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::Resolve { .. } => "resolve",
         Cmd::Ssh { .. } => "ssh",
         Cmd::Exec { .. } => "exec",
+        Cmd::Scp { .. } => "scp",
         Cmd::Trust { .. } => "trust",
         Cmd::Forget { .. } => "forget",
         Cmd::Remove { .. } => "remove",
@@ -730,6 +767,7 @@ fn run(cmd: Cmd, client: &Client) -> R {
             | Cmd::Resolve { .. }
             | Cmd::Ssh { .. }
             | Cmd::Exec { .. }
+            | Cmd::Scp { .. }
             | Cmd::Trust { .. }
             | Cmd::Forget { .. }
             | Cmd::Remove { .. }
@@ -953,6 +991,30 @@ fn run(cmd: Cmd, client: &Client) -> R {
             quiet,
             ssh_args,
         } => cmd_ssh(client, &device, user, (force, unpinned), quiet, &ssh_args),
+        Cmd::Scp {
+            paths,
+            user,
+            recursive,
+            preserve,
+            compress,
+            limit,
+            legacy,
+            quiet,
+            force,
+        } => scp_cmds::cmd_scp(
+            client,
+            &paths,
+            user,
+            &scp_cmds::Flags {
+                recursive,
+                preserve,
+                compress,
+                legacy,
+                quiet,
+                limit: limit.map(|l| l.get()),
+            },
+            force,
+        ),
         Cmd::Exec {
             device,
             command,
