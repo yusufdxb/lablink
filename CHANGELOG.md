@@ -29,6 +29,18 @@ installer now restarts the daemon for you.
 
 ### Fixed
 
+- **lablinkd no longer refuses to start after an upgrade on hosts whose
+  accounts can come from a directory service** (`sss` in
+  `/etc/nsswitch.conf`, common on Ubuntu 24.04 desktops). Earlier releases
+  created `lablinkd.lock` with the umask's mode (0664 under umask 002); since
+  the user's group cannot be proven private there, every later start was
+  refused ("writable by group ... (chmod g-w)") and systemd restarted it in
+  a loop. The lock is now created 0600, and an existing lock is tightened
+  instead of refused (it holds no data). Every other state file is checked
+  as before. Found upgrading a real 0.3.0 tarball installation.
+- The installer no longer reports "lablinkd was restarted" when the daemon
+  did not stay up: it checks that the daemon answers, and otherwise prints
+  its last log message and the fix, and exits non-zero.
 - Completion and init tests no longer fail on a machine that has the
   package installed (they assumed no system-wide completion script).
 
