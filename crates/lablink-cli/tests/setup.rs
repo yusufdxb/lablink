@@ -99,7 +99,7 @@ fn init_from_empty_directories() {
     assert_eq!(code(&o), exit::OK, "{t}");
     assert!(t.contains("config      done"), "{t}");
     assert!(t.contains("service     skipped"), "{t}");
-    assert!(t.contains("completion  done"), "{t}");
+    assert!(completion_step_ok(&t), "{t}");
     assert!(
         t.contains("Site -> Discover -> Adopt -> Trust -> Connect"),
         "{t}"
@@ -114,10 +114,13 @@ fn init_from_empty_directories() {
     assert_eq!(nets.len(), 2);
     assert!(nets[0].active_scan && nets[0].cidr == "10.9.0.0/24");
     assert!(!nets[1].active_scan && nets[1].name == "campus");
-    assert!(h
-        .path()
-        .join(".local/share/bash-completion/completions/lablink")
-        .is_file());
+    // Written per user unless the package's system-wide script serves everyone.
+    assert_eq!(
+        h.path()
+            .join(".local/share/bash-completion/completions/lablink")
+            .is_file(),
+        !std::path::Path::new("/usr/share/bash-completion/completions/lablink").exists()
+    );
     // The written file passes the same validation the daemon uses.
     let o = h.run(sock, &["check-config"]);
     assert_eq!(code(&o), exit::OK, "{}", text(&o));
@@ -171,7 +174,7 @@ fn init_interactive_answers_from_stdin() {
         "{t}"
     );
     assert!(t.contains("service     skipped"), "{t}");
-    assert!(t.contains("completion  done"), "{t}");
+    assert!(completion_step_ok(&t), "{t}");
     let cfg = lablink_core::Config::load(&h.config()).unwrap();
     assert_eq!(
         (cfg.sites[0].id.as_str(), cfg.sites[0].name.as_str()),
@@ -575,4 +578,14 @@ fn copy_id_goes_through_the_pinned_identity_only() {
         "ssh-copy-id must not run for an unpinned device"
     );
     d.stop().unwrap();
+}
+
+/// init's completion step: written per user, or skipped when the Debian
+/// package's system-wide script already serves every user on this host.
+fn completion_step_ok(t: &str) -> bool {
+    if std::path::Path::new("/usr/share/bash-completion/completions/lablink").exists() {
+        t.contains("completion  skipped  already installed for all users")
+    } else {
+        t.contains("completion  done")
+    }
 }
