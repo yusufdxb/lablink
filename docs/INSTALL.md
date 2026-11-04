@@ -76,21 +76,37 @@ The package also installs:
 
 ## Upgrading an existing installation
 
-Run the same one-command installer again. An older package is upgraded to
-the selected release. A matching version is verified without reinstalling;
-a newer installed package is retained rather than downgraded. Configuration
-and state remain in your home directory.
+From LabLink 0.4.2 on, upgrade with:
 
-If your daemon was already running, explicitly restart it after an upgrade:
+```bash
+lablink update --check   # report only; exit 10 when a newer release exists
+lablink update           # upgrade to the latest release
+```
+
+`lablink update` downloads the same official installer the one-command
+installation uses (HTTPS only, completely before it runs) and runs it: it
+verifies the release's SHA-256 checksum, installs the package with
+`sudo apt install`, and restarts your running `lablinkd` so the CLI and
+daemon match. It does nothing when you are already up to date.
+
+On older versions, run the same one-command installer again. An older
+package is upgraded to the selected release. A matching version is verified
+without reinstalling; a newer installed package is retained rather than
+downgraded. Configuration, devices and pinned host keys remain in your home
+directory, so you do not need `lablink init` again.
+
+Since the 0.4.2 installer, a `lablinkd` user service that was running is
+restarted after a package upgrade (your SSH sessions are not interrupted:
+they belong to the `lablink ssh` process, not the daemon). If it could not be
+restarted, or you upgraded with an older installer, restart it yourself:
 
 ```bash
 systemctl --user restart lablinkd
 lablink version
 ```
 
-The installer does not restart it for you. An old daemon can remain running
-after a package upgrade; security-sensitive commands may refuse to use it
-until you restart it.
+An old daemon can otherwise remain running after a package upgrade;
+security-sensitive commands refuse to use it until you restart it.
 
 ### Moving from a tarball or source installation
 
@@ -106,7 +122,8 @@ Preview what would change, without changing anything:
 bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh) && bash -s -- --dry-run <<< "$installer"'
 ```
 
-Then move the older installation aside and install the package:
+Then move the older installation aside and install the package (or, from
+0.4.2 on, `lablink update --migrate`):
 
 ```bash
 bash -c 'installer=$(curl -fsSL https://raw.githubusercontent.com/yusufdxb/lablink/main/scripts/install-linux.sh) && bash -s -- --migrate <<< "$installer"'

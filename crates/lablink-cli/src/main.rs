@@ -8,6 +8,7 @@
 mod complete;
 mod output;
 mod setup_cmds;
+mod update;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lablink_core::client::{Client, ClientError};
@@ -313,6 +314,18 @@ enum Cmd {
     Version {
         #[arg(long)]
         json: bool,
+    },
+    /// Upgrade to the latest release with the official installer (verifies the checksum, then installs the package with apt). `--check` only reports; exit 10 when a newer release is available
+    Update {
+        /// Only report whether a newer release exists; change nothing.
+        #[arg(long)]
+        check: bool,
+        /// Move an older per-user installation (tarball, source build) aside into a restorable backup.
+        #[arg(long, conflicts_with = "check")]
+        migrate: bool,
+        /// Run this local installer script instead of downloading it (testing).
+        #[arg(long, hide = true)]
+        installer: Option<PathBuf>,
     },
     /// Install your SSH public key on a device whose host key is pinned (runs ssh-copy-id).
     CopyId {
@@ -693,6 +706,7 @@ fn command_name(c: &Cmd) -> &'static str {
         Cmd::CheckConfig { .. } => "check-config",
         Cmd::Init { .. } => "init",
         Cmd::Version { .. } => "version",
+        Cmd::Update { .. } => "update",
         Cmd::CopyId { .. } => "copy-id",
         Cmd::OnboardSsh { .. } => "onboard-ssh",
         Cmd::Export { .. } => "export",
@@ -1298,6 +1312,11 @@ fn run(cmd: Cmd, client: &Client) -> R {
             config,
         ),
         Cmd::Version { json } => setup_cmds::cmd_version(client, json),
+        Cmd::Update {
+            check,
+            migrate,
+            installer,
+        } => update::cmd_update(check, migrate, installer),
         Cmd::OnboardSsh { session } => {
             lablink_setup::onboarding::run_helper(client, &session)
                 .map_err(|e| Fail::new(exit::FAILURE, "onboarding", e))?;

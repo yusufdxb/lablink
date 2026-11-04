@@ -848,3 +848,63 @@ fn forget_needs_confirmation_and_clears_the_pin() {
     let o = lablink(Some(&e), &["forget", "nosuch", "--yes"]);
     assert_ne!(code(&o), 0);
 }
+
+fn update_with(script: &str, args: &[&str]) -> (Output, std::path::PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let installer = dir.path().join("install-linux.sh");
+    std::fs::write(&installer, script).unwrap();
+    let out = dir.path().join("ran");
+    let mut all = vec!["update", "--installer", installer.to_str().unwrap()];
+    all.extend_from_slice(args);
+    let o = Command::new(env!("CARGO_BIN_EXE_lablink"))
+        .args(&all)
+        .env("NO_COLOR", "1")
+        .env("LABLINK_CONFIG", "/nonexistent/lablink/config.yaml")
+        .env("LABLINK_SOCKET", "/nonexistent/lablink/test.sock")
+        .env("UPDATE_FIXTURE_OUT", &out)
+        .output()
+        .unwrap();
+    (o, out, dir)
+}
+
+const FIXTURE_INSTALLER: &str = "main() {\n    readonly RELEASE_VERSION='99.0.0'\n    printf '%s\\n' ran \"$@\" > \"$UPDATE_FIXTURE_OUT\"\n    exit 7\n}\nmain \"$@\"\n";
+
+#[test]
+fn update_check_reports_a_newer_release_without_running_it() {
+    let (o, ran, _d) = update_with(FIXTURE_INSTALLER, &["--check"]);
+    assert_eq!(code(&o), 10, "{o:?}");
+    assert!(String::from_utf8_lossy(&o.stdout).contains("LabLink 99.0.0 is available"));
+    assert!(!ran.exists(), "--check must never run the installer");
+}
+
+#[test]
+fn update_check_when_up_to_date() {
+    let (o, ran, _d) = update_with(&FIXTURE_INSTALLER.replace("99.0.0", "0.0.1"), &["--check"]);
+    assert_eq!(code(&o), 0, "{o:?}");
+    assert!(String::from_utf8_lossy(&o.stdout).contains("is up to date"));
+    assert!(!ran.exists());
+}
+
+#[test]
+fn update_runs_the_installer_with_bash_and_returns_its_exit_code() {
+    let (o, ran, _d) = update_with(FIXTURE_INSTALLER, &[]);
+    assert_eq!(code(&o), 7, "{o:?}");
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "ran\n");
+    let (o, ran, _d) = update_with(FIXTURE_INSTALLER, &["--migrate"]);
+    assert_eq!(code(&o), 7, "{o:?}");
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "ran\n--migrate\n");
+}
+
+#[test]
+fn update_refuses_an_installer_without_a_release() {
+    let (o, ran, _d) = update_with("echo nothing\n", &[]);
+    assert_eq!(code(&o), 1, "{o:?}");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("names no release"));
+    assert!(!ran.exists());
+}
+
+#[test]
+fn update_check_and_migrate_conflict() {
+    let (o, _ran, _d) = update_with(FIXTURE_INSTALLER, &["--check", "--migrate"]);
+    assert_eq!(code(&o), 2, "{o:?}");
+}

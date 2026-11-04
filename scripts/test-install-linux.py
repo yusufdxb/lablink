@@ -107,6 +107,12 @@ elif name == 'lablink-gui':
     assert args == ['--version'], args
     if cfg.get('gui_failure'): sys.exit(127)
     print('lablink-gui ' + cfg.get('gui_version', (root / 'installed').read_text()))
+elif name == 'systemctl':
+    assert args[0] == '--user', args
+    if args[1] == 'is-active': sys.exit(0 if cfg.get('daemon_active') else 3)
+    if args[1] == 'is-enabled': sys.exit(0 if cfg.get('daemon_active') else 1)
+    if args[1] == 'restart' and cfg.get('restart_failure'): sys.exit(1)
+    assert args[1] in ('show-environment', 'daemon-reload', 'restart', 'stop', 'start', 'enable'), args
 else:
     raise AssertionError('unexpected fixture command: ' + name)
 '''
@@ -185,6 +191,9 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(any(event[0] in ("sudo", "apt") for event in self.events), self.events)
 
     def test_clean_install_checks_executables_and_preserves_config(self):
+        config = self.root / "home/.config/lablink/config.yaml"
+        del self.sentinels[config]
+        config.unlink()
         self.run_installer(success=True)
         self.assertEqual(sum(e[0] == "apt" for e in self.events), 1)
         self.assertIn(("lablink-gui", "--version"), [tuple(e[:2]) for e in self.events])
@@ -227,6 +236,45 @@ class InstallerTests(unittest.TestCase):
         self.existing("0.1.0")
         self.run_installer(success=True)
         self.assertIn("systemctl --user restart lablinkd", self.output)
+
+    def test_upgrade_with_config_does_not_suggest_init(self):
+        self.existing("0.1.0")
+        self.run_installer(success=True)
+        self.assertNotIn("lablink init", self.output)
+        self.assertIn("were kept", self.output)
+        self.assertIn("lablink status", self.output)
+        self.assertIn("lablink update", self.output)
+
+    def test_upgrade_restarts_a_running_user_daemon(self):
+        self.stub(self.root / "tools" / "systemctl")
+        self.existing("0.1.0")
+        self.cfg["daemon_active"] = True
+        self.run_installer(success=True)
+        calls = [e[1:] for e in self.events if e[0] == "systemctl"]
+        self.assertIn(["--user", "restart", "lablinkd"], calls)
+        self.assertIn("lablinkd was restarted with the new version", self.output)
+        self.assertNotIn("restart it when ready", self.output)
+
+    def test_upgrade_leaves_a_stopped_daemon_stopped(self):
+        self.stub(self.root / "tools" / "systemctl")
+        self.existing("0.1.0")
+        self.run_installer(success=True)
+        calls = [e[1:] for e in self.events if e[0] == "systemctl"]
+        self.assertNotIn(["--user", "restart", "lablinkd"], calls)
+
+    def test_failed_restart_keeps_the_manual_hint(self):
+        self.stub(self.root / "tools" / "systemctl")
+        self.existing("0.1.0")
+        self.cfg.update(daemon_active=True, restart_failure=True)
+        self.run_installer(success=True)
+        self.assertIn("systemctl --user restart lablinkd", self.output)
+
+    def test_reinstall_of_same_version_does_not_restart(self):
+        self.stub(self.root / "tools" / "systemctl")
+        self.existing()
+        self.cfg["daemon_active"] = True
+        self.run_installer(success=True)
+        self.assertFalse(any(e[0] == "systemctl" and "restart" in e for e in self.events))
 
     def test_arm64_is_rejected(self):
         self.cfg["arch"] = "aarch64"
