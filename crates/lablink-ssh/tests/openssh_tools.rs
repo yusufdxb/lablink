@@ -961,12 +961,14 @@ fn scp_copies_through_the_pin_and_never_to_an_impostor() {
     ok(scp(
         &t,
         &[],
-        vec![Remote(s(remote.join("b c:d.txt")))],
-        Local(s(local.join("back.txt"))),
+        // Before OpenSSH 9.0 scp's default protocol lets the remote shell
+        // split remote paths, so the download's remote path has no space.
+        vec![Remote(s(remote.join("tree/inner/deep.bin")))],
+        Local(s(local.join("back.bin"))),
     ));
     assert_eq!(
-        std::fs::read_to_string(local.join("back.txt")).unwrap(),
-        "beta\n"
+        std::fs::read(local.join("back.bin")).unwrap(),
+        [0u8, 1, 255]
     );
     ok(scp(
         &t,

@@ -174,9 +174,12 @@ lablink resolve <device> --json   # host_key_alias and known_hosts_file
 
 ## Copying files: `lablink scp`
 
-`lablink scp` runs the system `scp` (SFTP; `--legacy` for the original
-protocol) with the same address and pinned host-key options as `lablink ssh`,
-and the device's `ssh` as scp's transport:
+`lablink scp` runs the system `scp` with the same address and pinned
+host-key options as `lablink ssh`, and the device's `ssh` as scp's transport.
+With OpenSSH 9.0 and later scp uses SFTP and remote paths are taken
+literally; `--legacy` (and older OpenSSH, by default) uses the original
+protocol, where the remote shell expands remote paths, so quote names with
+spaces or shell characters (`'jetson:"my file"'`):
 
 ```bash
 lablink scp -r ./bags jetson:~/data/            # upload (several sources allowed)
