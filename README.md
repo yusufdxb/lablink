@@ -30,7 +30,8 @@ No Rust, Cargo, Git or GitHub CLI is required. ARM64 and other distributions
 are not supported by this installer. Desktop users can also open **LabLink**
 from their applications menu.
 
-See [installation, upgrades and troubleshooting](docs/INSTALL.md).
+To upgrade later, run `lablink update` (0.4.2 and newer); `lablink update --check`
+only reports. See [installation, upgrades and troubleshooting](docs/INSTALL.md).
 
 It is a small per-user daemon (`lablinkd`), a CLI (`lablink`) and a desktop
 app (`lablink-gui`), written in Rust for Linux. The daemon runs as you (a

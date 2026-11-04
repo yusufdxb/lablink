@@ -4,6 +4,25 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `lablink update` upgrades to the latest release with the official
+  installer (checksum verified, package installed with apt, daemon
+  restarted); `lablink update --check` only reports and exits 10 when a
+  newer release exists; `--migrate` moves an older per-user installation
+  aside, as the installer's `--migrate` does.
+
+### Changed
+
+- The installer restarts a running `lablinkd` user service after a package
+  upgrade, so the CLI and daemon builds match without a manual restart. A
+  stopped service stays stopped; a failed restart prints the manual command.
+- After an upgrade, the installer says the configuration, devices and pins
+  were kept and suggests `lablink status` / `lablink doctor`, instead of
+  `lablink init` (which would only offer to replace the configuration).
+
 ## [0.4.1] - 2026-11-03
 
 Fixes found by auditing 0.4.0 as a new user, on a clean Ubuntu container and

@@ -282,6 +282,18 @@ main() (
         fail 'The desktop app could not start (missing runtime libraries?). Review apt errors and repair the package dependencies.'
     [[ $gui_version == "lablink-gui $expected"* ]] || fail "Unexpected desktop app version: $gui_version"
 
+    # A package upgrade replaced /usr/bin under a running daemon: restart the
+    # user's own service so the CLI and daemon builds match. SSH sessions are
+    # children of the CLI, not the daemon, so they are not interrupted.
+    local restarted=0
+    if [[ -z $backup && $install_needed == 1 && -n "$installed" ]] && \
+       command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1 && \
+       systemctl --user is-active --quiet lablinkd 2>/dev/null; then
+        phase='restarting lablinkd'
+        systemctl --user daemon-reload || true
+        if systemctl --user restart lablinkd; then restarted=1; fi
+    fi
+
     printf '\nLabLink installed successfully!\n%s\n%s\n%s\n' "$reported" "$daemon_version" "$gui_version"
     if [[ -n $backup ]]; then
         printf '\nYour older installation was moved to %s.\nTo go back to it:  %s/restore.sh\n' "$backup" "$backup"
@@ -289,14 +301,24 @@ main() (
         if [[ $legacy_service == 1 && $have_systemd == 0 ]]; then
             printf 'No systemd user session was found; when you log in to a desktop run:\n  systemctl --user daemon-reload && systemctl --user enable --now lablinkd\n'
         fi
+    elif [[ $restarted == 1 ]]; then
+        printf '\nUpgraded from %s; lablinkd was restarted with the new version.\n' "$installed"
     elif [[ $install_needed == 1 && -n "$installed" ]]; then
         printf '\nIf your LabLink daemon was already running, restart it when ready:\n  systemctl --user restart lablinkd\n'
     fi
-    printf '\nNext steps:\n\n  lablink init\n  lablink doctor\n  lablink status\n'
-    if [[ -z ${DISPLAY:-} && -z ${WAYLAND_DISPLAY:-} ]]; then
-        printf '\nNo graphical session detected. Open LabLink from the applications menu once you log in to a desktop.\n'
+    if [[ -f $config_home/lablink/config.yaml ]]; then
+        # An upgrade: init would only ask to replace a working configuration.
+        printf '\nYour configuration, devices and pinned host keys were kept. Check them with:\n\n  lablink status\n  lablink doctor\n'
     else
-        printf '\nOr open LabLink from your applications menu (or run lablink-gui) to set up your site and devices.\n'
+        printf '\nNext steps:\n\n  lablink init\n  lablink doctor\n  lablink status\n'
+        if [[ -z ${DISPLAY:-} && -z ${WAYLAND_DISPLAY:-} ]]; then
+            printf '\nNo graphical session detected. Open LabLink from the applications menu once you log in to a desktop.\n'
+        else
+            printf '\nOr open LabLink from your applications menu (or run lablink-gui) to set up your site and devices.\n'
+        fi
+    fi
+    if /usr/bin/lablink help update >/dev/null 2>&1; then
+        printf '\nTo upgrade later:  lablink update   (or lablink update --check)\n'
     fi
 )
 

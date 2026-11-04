@@ -140,7 +140,21 @@ fn install_completions_writes_under_xdg_data_home() {
         .unwrap();
     assert_eq!(o.status.code(), Some(0));
     let p = d.path().join("bash-completion/completions/lablink");
-    assert!(String::from_utf8_lossy(&o.stdout).contains(&format!("wrote {}", p.display())));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    // On a host with the Debian package installed, the system-wide script
+    // already serves every user, and nothing is written per user.
+    if Path::new("/usr/share/bash-completion/completions/lablink").exists() {
+        assert!(
+            stdout.contains("already installed for all users"),
+            "{stdout}"
+        );
+        assert!(!p.exists());
+        return;
+    }
+    assert!(
+        stdout.contains(&format!("wrote {}", p.display())),
+        "{stdout}"
+    );
     assert!(std::fs::read_to_string(p).unwrap().contains("_lablink()"));
 }
 
