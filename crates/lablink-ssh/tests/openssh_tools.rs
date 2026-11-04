@@ -919,9 +919,12 @@ fn scp_copies_through_the_pin_and_never_to_an_impostor() {
     std::fs::write(local.join("a.txt"), "alpha\n").unwrap();
     std::fs::write(local.join("b c:d.txt"), "beta\n").unwrap();
     std::fs::write(local.join("tree/inner/deep.bin"), [0u8, 1, 255]).unwrap();
-    let scp = |flags: &[&str], src: Vec<lablink_ssh::ScpPath>, dst: lablink_ssh::ScpPath| {
+    let scp = |t: &lablink_ssh::Target,
+               flags: &[&str],
+               src: Vec<lablink_ssh::ScpPath>,
+               dst: lablink_ssh::ScpPath| {
         let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
-        let args = lablink_ssh::scp_args(&t, &flags, &src, &dst).unwrap();
+        let args = lablink_ssh::scp_args(t, &flags, &src, &dst).unwrap();
         Command::new("scp").args(&args).output().unwrap()
     };
     let ok = |o: std::process::Output| {
@@ -929,6 +932,7 @@ fn scp_copies_through_the_pin_and_never_to_an_impostor() {
     };
 
     ok(scp(
+        &t,
         &[],
         vec![
             Local(s(local.join("a.txt"))),
@@ -945,6 +949,7 @@ fn scp_copies_through_the_pin_and_never_to_an_impostor() {
         "beta\n"
     );
     ok(scp(
+        &t,
         &["-r"],
         vec![Local(s(local.join("tree")))],
         Remote(s(remote.clone())),
@@ -954,6 +959,7 @@ fn scp_copies_through_the_pin_and_never_to_an_impostor() {
         [0u8, 1, 255]
     );
     ok(scp(
+        &t,
         &[],
         vec![Remote(s(remote.join("b c:d.txt")))],
         Local(s(local.join("back.txt"))),
@@ -963,6 +969,7 @@ fn scp_copies_through_the_pin_and_never_to_an_impostor() {
         "beta\n"
     );
     ok(scp(
+        &t,
         &["-O"],
         vec![Remote(s(remote.join("a.txt")))],
         Local(s(local.join("legacy.txt"))),
@@ -986,7 +993,7 @@ fn scp_copies_through_the_pin_and_never_to_an_impostor() {
             Local(s(local.join("pwned.txt"))),
         ),
     ] {
-        let o = scp(&[], vec![src], dst);
+        let o = scp(&t, &[], vec![src], dst);
         let err = String::from_utf8_lossy(&o.stderr);
         assert!(!o.status.success(), "{err}");
         assert!(
