@@ -4486,7 +4486,7 @@ Used by:
 - ambient-authority 0.0.2 (https://github.com/sunfishcode/ambient-authority)
 - arrayvec 0.7.8 (https://github.com/bluss/arrayvec)
 - async-channel 2.5.0 (https://github.com/smol-rs/async-channel)
-- async-executor 1.14.0 (https://github.com/smol-rs/async-executor)
+- async-executor 1.14.1 (https://github.com/smol-rs/async-executor)
 - async-io 2.6.0 (https://github.com/smol-rs/async-io)
 - async-lock 3.4.2 (https://github.com/smol-rs/async-lock)
 - async-process 2.5.0 (https://github.com/smol-rs/async-process)
@@ -9367,4 +9367,4 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-<!-- Cargo.lock sha256: 152da80887c2fe98be85047a69f6b9d9ec91f18d9e4ce9144abb4d40d76f9b4e -->
+<!-- Cargo.lock sha256: 777d2ccfb46d294114b2b99384cdea122b111edd19567984a8250aede52ee7ef -->

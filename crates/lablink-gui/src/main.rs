@@ -33,7 +33,16 @@ pub fn version_line() -> String {
     )
 }
 
-fn main() -> eframe::Result {
+/// True when some graphical session is reachable (X11 or Wayland).
+fn have_display() -> bool {
+    ["DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()))
+}
+
+const NO_DISPLAY: &str = "no graphical session found (DISPLAY and WAYLAND_DISPLAY are not set), so the desktop app cannot open here. Over SSH or on a server use the command line: `lablink status`, `lablink --help`.";
+
+fn main() {
     // Answer informational flags without opening a window, so scripts and
     // installers can check the binary on headless machines.
     if let Some(a) = std::env::args().nth(1) {
@@ -43,17 +52,21 @@ fn main() -> eframe::Result {
                     "lablink-gui {}",
                     version_line().trim_start_matches("LabLink ")
                 );
-                return Ok(());
+                return;
             }
             "--help" | "-h" => {
                 println!("{}\n\nUsage: lablink-gui\n\nOpens the LabLink desktop app. It needs a graphical session and talks to lablinkd; use `lablink` for the command line.", version_line());
-                return Ok(());
+                return;
             }
             other => {
                 eprintln!("lablink-gui: unknown argument '{other}' (try --help)");
                 std::process::exit(2);
             }
         }
+    }
+    if !have_display() {
+        eprintln!("lablink-gui: {NO_DISPLAY}");
+        std::process::exit(2);
     }
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("LabLink")
@@ -68,9 +81,12 @@ fn main() -> eframe::Result {
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
+    if let Err(e) = eframe::run_native(
         "LabLink",
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
-    )
+    ) {
+        eprintln!("lablink-gui: could not open the desktop app: {e}");
+        std::process::exit(1);
+    }
 }

@@ -386,6 +386,13 @@ fn unavailable_device_goes_red_after_threshold_then_recovers() {
     });
     assert_eq!(s.color, Color::Red);
     assert_eq!(s.latency_ms, None);
+    // A device that stopped answering is not "accepting SSH connections".
+    assert_ne!(s.ssh_port, PortState::Open);
+    let e = lablink_core::explain::explain(&s).unwrap();
+    assert!(
+        !e.still_works.iter().any(|w| w.contains("SSH server")),
+        "{e:?}"
+    );
     net.host("10.9.0.31", |h| h.up = true);
     wait_for(&d, "jetson-a", 20, "recovered", |s| s.color == Color::Green);
     let k = kinds(&history(&d, "jetson-a"))
@@ -837,6 +844,66 @@ fn unknown_host_at_old_dhcp_address_releases_it() {
             .any(|h| h["ip"] == "10.9.0.31"),
         "{disc:#}"
     );
+    // The released address must not be re-adopted from the device's own
+    // address history on the next checks: that looped located -> released
+    // every few seconds, flooding the history while the laptop stayed.
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let h: serde_json::Value = d
+        .client()
+        .call(&Request::History {
+            device: Some("jetson-a".into()),
+            limit: 500,
+        })
+        .unwrap();
+    let released = h["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "ip_released")
+        .count();
+    assert_eq!(released, 1, "{h:#}");
+    let s = status(&d, "jetson-a");
+    assert_eq!(s.ip, None);
+    // Said as it is, not "not checked yet" (the daemon did not just start).
+    assert!(
+        s.reasons
+            .iter()
+            .any(|r| r.contains("10.9.0.31 now answers as a different host")),
+        "{:?}",
+        s.reasons
+    );
+    let e = lablink_core::explain::explain(&s).unwrap();
+    assert_eq!(e.headline, "Searching for it", "{e:?}");
+    // A later discovery still lists the laptop as an unmatched host (the
+    // explanation points there), not hidden as jetson-a's old address.
+    let _: DiscoverReport = d
+        .client()
+        .call_typed(&Request::Discover { scan_cidr: None })
+        .unwrap();
+    let disc: serde_json::Value = d.client().call(&Request::Discovered).unwrap();
+    assert!(
+        disc["discovered"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["ip"] == "10.9.0.31"),
+        "{disc:#}"
+    );
+    // jetson-a gets the address back: discovery recognizes its pinned key
+    // there at once, without waiting out the release.
+    net.with(|w| {
+        let h = w.hosts.get_mut(&"10.9.0.31".parse().unwrap()).unwrap();
+        h.keys = vec![fake_key("jetson-a")];
+        h.mac = Some(JETSON_A_MAC.into());
+    });
+    let _: DiscoverReport = d
+        .client()
+        .call_typed(&Request::Discover { scan_cidr: None })
+        .unwrap();
+    let s = wait_for(&d, "jetson-a", 20, "back at .31", |s| {
+        s.ip.as_deref() == Some("10.9.0.31") && s.color == Color::Green
+    });
+    assert_eq!(s.identity, IdentityState::Verified);
     d.stop().unwrap();
 }
 

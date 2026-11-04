@@ -55,7 +55,7 @@ Evaluated in this order (`lablink_core::model::compute_color`):
 | GRAY | `site_state: away`: you are at another site (or none); the device is not checked and never counted as failed |
 | GRAY | network `offline` while `site_state: unknown`: unreachable, but the site is not confirmed, so not a failure |
 | GRAY | never located (`discovery: never_seen`) |
-| GRAY | network `unknown` (not checked yet since daemon start, or the gateway of a `via:` device is unusable; the reason says which) |
+| GRAY | network `unknown` (not checked yet since daemon start, searching after another host took its last address, or the gateway of a `via:` device is unusable; the reason says which) |
 | RED | network `offline`: expected (seen before) but unavailable after the failure threshold |
 | GREEN | network `online`, and for SSH devices: port `open`, identity `verified`, and login `ok` (unless `auth_check: false`) |
 | YELLOW | anything else: located but degraded, port closed or filtered, identity unpinned or unknown, login failed or not yet checked |

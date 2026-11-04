@@ -158,6 +158,21 @@ fn failed_exclusive_creation_and_publication_preserve_existing_files() {
     );
 }
 #[test]
+fn a_lease_released_moments_later_is_acquired() {
+    // A copy of a released lease's descriptor can live on briefly in a child
+    // forked by another thread; the next folder of a transfer must not fail.
+    use lablink_files::staging::LocalLease;
+    let root = tempfile::tempdir().unwrap();
+    let (dir, _) = fs::local_root(root.path()).unwrap();
+    let lease = LocalLease::acquire(&dir).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(lease);
+    });
+    assert!(LocalLease::acquire(&dir).is_ok());
+    release.join().unwrap();
+}
+#[test]
 fn directory_leases_conflict_in_process_and_across_processes() {
     use lablink_files::staging::LocalLease;
     use std::process::Command;
