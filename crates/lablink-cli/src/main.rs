@@ -619,6 +619,15 @@ fn main() {
 /// Replacing the process preserves GUI signals and its exit status.
 fn launch_gui(socket: Option<&std::path::Path>) -> ! {
     use std::os::unix::process::CommandExt;
+    let have_display = ["DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
+    if !have_display {
+        eprintln!(
+            "lablink: no graphical session found (DISPLAY and WAYLAND_DISPLAY are not set), so the desktop app cannot open here.\nUse a subcommand instead, for example `lablink status`; `lablink --help` lists them all."
+        );
+        std::process::exit(exit::USAGE);
+    }
     let result = (|| {
         let executable = std::env::current_exe()?;
         let gui = executable

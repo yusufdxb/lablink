@@ -125,6 +125,7 @@ fn bare_command_launches_paired_gui_without_a_daemon_and_preserves_status() {
         let output = Command::new(&cli)
             .args(&args)
             .env("LABLINK_SOCKET", "/nonexistent/lablink/test.sock")
+            .env("DISPLAY", ":99")
             .output()
             .unwrap();
         assert_eq!(code(&output), 37);
@@ -135,8 +136,20 @@ fn bare_command_launches_paired_gui_without_a_daemon_and_preserves_status() {
                 .unwrap_or("/nonexistent/lablink/test.sock")
         );
     }
+    // No graphical session (for example over SSH): a plain message and
+    // exit 2, never the windowing library's raw error.
+    let output = Command::new(&cli)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), exit::USAGE);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("no graphical session found"), "{err}");
+    assert!(err.contains("lablink status"), "{err}");
     std::fs::remove_file(gui).unwrap();
-    let output = Command::new(cli).output().unwrap();
+    let output = Command::new(cli).env("DISPLAY", ":99").output().unwrap();
     assert_eq!(code(&output), exit::REFUSED);
     assert!(String::from_utf8_lossy(&output.stderr).contains("Install lablink-gui beside lablink"));
 }
