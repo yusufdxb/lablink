@@ -14,7 +14,7 @@ main() (
     set -Eeuo pipefail
     umask 077
 
-    readonly RELEASE_VERSION='0.4.1'
+    readonly RELEASE_VERSION='0.4.2'
     readonly RELEASE_URL="https://github.com/yusufdxb/lablink/releases/download/v${RELEASE_VERSION}"
     readonly PACKAGE="lablink_${RELEASE_VERSION}_amd64.deb"
     readonly BINARIES='lablink lablinkd lablink-gui'
