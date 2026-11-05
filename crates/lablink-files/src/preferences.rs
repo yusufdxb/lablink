@@ -46,7 +46,15 @@ impl Preferences {
         let parent = path
             .parent()
             .ok_or_else(|| Error::Refused("Preferences need a parent directory".into()))?;
-        std::fs::create_dir_all(parent)?;
+        // The state directory is shared with lablinkd, which refuses one
+        // that is not private: never create it from the umask.
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
         let temporary = parent.join(format!(".files-preferences-{}", uuid::Uuid::new_v4()));
         let result = (|| {
             let mut file = std::fs::OpenOptions::new()

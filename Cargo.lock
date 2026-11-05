@@ -1868,6 +1868,7 @@ dependencies = [
  "ipnet",
  "lablink-core",
  "lablink-discovery",
+ "lablink-setup",
  "lablink-ssh",
  "libc",
  "rusqlite",

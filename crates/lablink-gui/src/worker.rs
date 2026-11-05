@@ -145,7 +145,9 @@ pub enum Event {
     Doctor(String, Result<Box<lablink_doctor::Report>, Fail>),
     Setup(Vec<lablink_setup::init::Step>),
     Service(lablink_setup::service::ServiceStatus),
-    ServiceDone(&'static str, Result<(), String>),
+    /// A service action; for those that start the daemon, `Ok` only once
+    /// it answered a ping.
+    ServiceDone(&'static str, Result<String, String>),
     ConfigSaved(Result<String, String>),
     TestSsh(String, Result<RunResult, Fail>),
     /// `(device, summary or error)`.
@@ -370,12 +372,7 @@ fn execute_inner(socket: &PathBuf, cmd: Cmd) -> Event {
         Cmd::Setup(opts) => Event::Setup(lablink_setup::init::run(&opts)),
         Cmd::Service => Event::Service(lablink_setup::service::status()),
         Cmd::ServiceControl(action) => {
-            let r = if action == "install" {
-                lablink_setup::service::install(true).map(|_| ())
-            } else {
-                lablink_setup::service::control(action)
-            };
-            Event::ServiceDone(action, r)
+            Event::ServiceDone(action, lablink_setup::service::run_verified(action, socket))
         }
         Cmd::SaveConfig {
             cfg,

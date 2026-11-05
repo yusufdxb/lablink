@@ -357,7 +357,12 @@ impl App {
                     self.daemon_build_warning = build_warning;
                     self.files_daemon_warning = files_warning;
                     self.daemon_uptime_s = Some(report.daemon.uptime_s);
-                    self.poll_error = None;
+                    if self.poll_error.take().is_some() {
+                        // Back after an outage: what the outage view showed
+                        // (service state, discovered hosts) is stale.
+                        self.worker.send(Cmd::Service);
+                        self.worker.send(Cmd::Discovered);
+                    }
                     if let Some(d) = self.selected.clone() {
                         self.worker.send(Cmd::Inspect(d));
                     }
@@ -536,10 +541,7 @@ impl App {
                 self.service = Some(st);
             }
             Event::ServiceDone(action, r) => {
-                self.banner = Some(match r {
-                    Ok(()) => (true, format!("service: {action} done")),
-                    Err(e) => (false, format!("service: {action} failed: {e}")),
-                });
+                self.banner = Some(service_banner(action, &r));
                 self.worker.send(Cmd::Service);
                 self.worker.refresh();
             }
@@ -745,8 +747,11 @@ impl App {
                                 act = Some("install");
                             }
                         }
-                        Some(_) => {
-                            ui.label(white("The service is installed but stopped (see `journalctl --user -u lablinkd`).".into()));
+                        Some(s) => {
+                            ui.label(white(match &s.last_message {
+                                Some(m) => format!("The service is {} and lablinkd is not answering. Its last message: {m}", s.active),
+                                None => format!("The service is {} (see `journalctl --user -u lablinkd`).", s.active),
+                            }));
                             if ui.add_enabled(!self.service_busy, egui::Button::new("Start daemon")).clicked() {
                                 act = Some("start");
                             }
@@ -2773,9 +2778,49 @@ fn info_grid(ui: &mut egui::Ui, d: &DeviceDetail) {
         .show(ui, |ui| event_list(ui, d.recent_events.iter().rev()));
 }
 
+/// The banner after a service action. A start only reads as success once
+/// the daemon answered (see `lablink_setup::service::run_verified`).
+fn service_banner(action: &str, r: &Result<String, String>) -> (bool, String) {
+    match r {
+        Ok(m) => (true, format!("service: {m}")),
+        Err(e) if matches!(action, "install" | "start" | "restart") => {
+            (false, format!("The LabLink daemon did not start: {e}"))
+        }
+        Err(e) => (false, format!("service: {action} failed: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+
+    #[test]
+    fn a_start_reads_as_success_only_when_the_daemon_answered() {
+        let ok = service_banner(
+            "start",
+            &Ok("started lablinkd.service; lablinkd 0.4.3 answers on /run/user/1001/lablink/lablinkd.sock (pid 42)".into()),
+        );
+        assert!(ok.0 && ok.1.contains("answers"), "{ok:?}");
+        let down = service_banner(
+            "start",
+            &Err("lablinkd exited with status 1; systemd keeps restarting it; its last message: lablinkd: state dir /x must belong to you with mode 0700".into()),
+        );
+        assert!(!down.0);
+        assert!(
+            down.1.starts_with("The LabLink daemon did not start"),
+            "{down:?}"
+        );
+        assert!(
+            down.1.contains("mode 0700"),
+            "the daemon's own reason is shown: {down:?}"
+        );
+        assert!(!down.1.contains("done"));
+        let stop = service_banner(
+            "stop",
+            &Err("systemctl --user stop lablinkd.service failed".into()),
+        );
+        assert!(!stop.0 && stop.1.starts_with("service: stop failed"));
+    }
 
     #[test]
     fn removal_dialog_says_the_device_is_not_touched() {

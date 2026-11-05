@@ -111,13 +111,42 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
             .map_err(|e| format!("cannot check state dir {}: {e}", opts.state_dir.display()))?;
         // SAFETY: getuid has no preconditions and cannot fail.
         let me = unsafe { libc::getuid() };
-        if !m.is_dir() || m.uid() != me || m.mode() & 0o777 != 0o700 {
-            return Err(format!(
-                "state dir {} must belong to you with mode 0700 (it belongs to uid {}, mode {:o})",
+        let refuse = |hint: &str| {
+            format!(
+                "state dir {} must belong to you with mode 0700 (it belongs to uid {}, mode {:o}); {hint}",
                 opts.state_dir.display(),
                 m.uid(),
                 m.mode() & 0o7777
+            )
+        };
+        if !m.is_dir() || m.uid() != me {
+            return Err(refuse(
+                "move it aside and start lablinkd again to create a new one",
             ));
+        }
+        if m.mode() & 0o777 != 0o700 {
+            // LabLink 0.4.2 and earlier could create it with the umask's
+            // mode (the desktop app's Files preferences: 0775 under umask
+            // 002), and every start then failed. A directory no other user
+            // could have written (0755, or 0775 for the user's private
+            // group) vouches for its contents: tighten it. One another user
+            // could have written stays refused, untouched.
+            if m.mode() & 0o700 != 0o700
+                || lablink_core::paths::writable_by_others(&opts.state_dir).is_some()
+            {
+                return Err(refuse(&format!(
+                    "another user could have changed it: check its files, then run `chmod 700 {}`",
+                    opts.state_dir.display()
+                )));
+            }
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&opts.state_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("cannot chmod 700 {}: {e}", opts.state_dir.display()))?;
+            tracing::warn!(
+                path = %opts.state_dir.display(),
+                was = format!("{:o}", m.mode() & 0o7777),
+                "state dir was not private; changed its mode to 0700"
+            );
         }
         // A private parent does not vouch for files planted before it
         // became private. Never take pins from a foreign file or a link.

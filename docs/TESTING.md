@@ -84,6 +84,30 @@ LABLINK_SOAK_SECS=600 cargo test -p lablink-daemon --release --test daemon soak 
 scripts/soak.sh ~/.config/lablink/config.yaml /tmp/lablink-soak 1800 60
 ```
 
+## Daemon startup (`scripts/test-daemon-startup-systemd.sh`)
+
+`crates/lablink-daemon/tests/startup_readiness.rs` runs the real `lablinkd`
+the way a service starts it and judges it with
+`lablink_setup::service::wait_ready`, the check `lablink init`,
+`lablink install-service` and the desktop app's Start button use: first
+start, a daemon that exits at once (reported before the timeout, with its
+own reason), one that never creates its socket, a socket on another path,
+a non-private state directory left by 0.4.2 (tightened; config, pins and
+history kept), and recovery after a failed start. No systemd is involved.
+
+`scripts/test-daemon-startup-systemd.sh` drives a real systemd user manager
+for a second account (uid 1001, umask 002) in a privileged clean-room
+container: it reproduces the 0.4.2 failure with `OLD_DEB`, upgrades to
+`NEW_DEB`, and, with `LIVE_TEST` set to the compiled
+`lablink-setup` `systemd_live` test, runs the Start button's code path
+against the real unit for both a failed and a successful start.
+
+```bash
+cargo test -p lablink-setup --test systemd_live --no-run   # prints the test binary path
+OLD_DEB=dist-0.4.2/lablink_0.4.2_amd64.deb NEW_DEB=dist/lablink_<v>_amd64.deb \
+LIVE_TEST=target/debug/deps/systemd_live-<hash> scripts/test-daemon-startup-systemd.sh
+```
+
 ## Clean-room install test (`scripts/cleanroom.sh`)
 
 A reproducible fresh-user run of the release artifacts, no lab hardware.

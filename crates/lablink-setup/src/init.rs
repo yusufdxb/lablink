@@ -173,7 +173,9 @@ pub fn run(opts: &InitOptions) -> Vec<Step> {
 
     // 2. Service.
     let mut service_ok = false;
+    let mut service_before = None;
     if opts.service {
+        service_before = service::unit_state();
         let was_active = service::status().is_active();
         match service::install(true) {
             Ok(log) => {
@@ -216,20 +218,26 @@ pub fn run(opts: &InitOptions) -> Vec<Step> {
         steps.push(step("completion", StepStatus::Skipped, "not requested"));
     }
 
-    // 4. Verify the daemon answers.
-    let wait = if service_ok {
-        Duration::from_secs(10)
+    // 4. Verify the daemon answers. A started service only counts once it
+    // answers a ping; one that exits during startup is reported with its
+    // last message as soon as systemd sees it go.
+    let checked = if service_ok {
+        let mut watch = service::ExitWatch::new(service_before.as_ref());
+        service::wait_ready(
+            &opts.socket,
+            service::READY_TIMEOUT,
+            || service::unit_state().and_then(|st| watch.failed(&st)),
+            || service::explain_down(&opts.socket),
+        )
     } else {
-        Duration::from_millis(300)
+        wait_for_daemon(&opts.socket, Duration::from_millis(300))
     };
-    match wait_for_daemon(&opts.socket, wait) {
+    match checked {
         Ok(d) => steps.push(step("daemon", StepStatus::Done, d)),
         Err(e) if opts.service => steps.push(step(
             "daemon",
             StepStatus::Failed,
-            format!(
-                "lablinkd did not answer within 10 s ({e}); see `journalctl --user -u lablinkd`"
-            ),
+            format!("the LabLink daemon did not start: {e}"),
         )),
         Err(_) => steps.push(step(
             "daemon",
