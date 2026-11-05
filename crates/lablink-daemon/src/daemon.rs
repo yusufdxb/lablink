@@ -131,7 +131,11 @@ pub async fn run(opts: RunOptions) -> Result<(), String> {
             // could have written (0755, or 0775 for the user's private
             // group) vouches for its contents: tighten it. One another user
             // could have written stays refused, untouched.
+            // The sticky bit and write for everyone are refused outright:
+            // the path check accepts sticky directories (only an owner can
+            // replace a file there), but anyone could have created files.
             if m.mode() & 0o700 != 0o700
+                || m.mode() & 0o1002 != 0
                 || lablink_core::paths::writable_by_others(&opts.state_dir).is_some()
             {
                 return Err(refuse(&format!(

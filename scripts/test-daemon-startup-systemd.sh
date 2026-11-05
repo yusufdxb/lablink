@@ -49,7 +49,7 @@ out_of() { as_lab2 "$1" 2>&1 || true; }
 install_deb() {
     docker cp "$1" "$c:/var/tmp/lablink.deb"
     docker exec -e DEBIAN_FRONTEND=noninteractive "$c" bash -c \
-        'apt-get install -y -qq --allow-downgrades /var/tmp/lablink.deb >/dev/null 2>&1 || dpkg -i /var/tmp/lablink.deb >/dev/null'
+        '{ [ -e /var/tmp/.apt-updated ] || { apt-get update -qq && touch /var/tmp/.apt-updated; }; } && apt-get install -y -qq --reinstall --allow-downgrades /var/tmp/lablink.deb >/dev/null'
 }
 # What the 0.4.2 desktop app did when Files preferences were saved before
 # the daemon first ran: create_dir_all() of the state dir under umask 002.
@@ -64,7 +64,8 @@ r=$(init)
 echo "$r" | sed 's/^/   | /'
 if echo "$r" | grep -q 'did not answer within 10 s'; then pass "old: init reports the field message"; else fail "old: field message not reproduced"; fi
 if as_lab2 "test -S $sock"; then fail "old: socket exists"; else pass "old: no socket at $sock"; fi
-j=$(out_of 'journalctl --user -u lablinkd -n 1 -o cat --no-pager')
+# The daemon's own last line (systemd's lines about the unit only say it exited).
+j=$(out_of 'journalctl --user _SYSTEMD_USER_UNIT=lablinkd.service -n 1 -o cat --no-pager')
 echo "   journal: $j"
 echo "$j" | grep -q 'mode 0700' && pass "old: daemon refuses its state dir (crash loop)" || fail "old: journal does not show the state-dir refusal"
 d=$(out_of 'lablink discover 2>&1'); echo "   discover: $d"

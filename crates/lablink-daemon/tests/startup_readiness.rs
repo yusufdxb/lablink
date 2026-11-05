@@ -226,6 +226,23 @@ fn a_state_dir_only_you_could_write_is_tightened_and_keeps_its_contents() {
     assert_eq!(std::fs::read(&pins).unwrap(), pins_before);
 }
 
+/// A sticky directory passes the path check (only an owner can replace a
+/// file there) but anyone could have created files in it: refused,
+/// untouched, whatever its group.
+#[test]
+fn a_sticky_shared_state_dir_is_refused_not_tightened() {
+    for m in [0o1777, 0o1775] {
+        let h = home();
+        std::fs::create_dir_all(&h.state).unwrap();
+        chmod(&h.state, m);
+        let mut c = start(&h);
+        let err = ready(&h, &mut c).expect_err("a sticky shared dir must be refused");
+        assert!(err.contains("chmod 700"), "{m:o}: {err}");
+        let now = std::fs::metadata(&h.state).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(now, m, "left untouched");
+    }
+}
+
 /// 0775 with the user's own group: tightened where the group is provably
 /// private (local accounts only), refused with the fix where it is not
 /// (an `sss`/LDAP host). Either way the daemon says which.

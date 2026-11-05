@@ -417,24 +417,18 @@ pub fn unit_state() -> Option<UnitState> {
 }
 
 /// The daemon's last `n` log lines from the user journal (empty when the
-/// journal is not readable here).
+/// journal is not readable here). Only what lablinkd itself wrote:
+/// systemd's lines about the unit ("Failed with result 'exit-code'") say
+/// that it exited, not why.
 pub fn last_log_lines(n: usize) -> Vec<String> {
     let Ok(mut c) = lablink_core::program::command("journalctl") else {
         return Vec::new();
     };
     let n = n.to_string();
-    c.args([
-        "--user",
-        "-u",
-        UNIT_NAME,
-        "-n",
-        &n,
-        "-o",
-        "cat",
-        "--no-pager",
-    ])
-    .stdin(Stdio::null())
-    .stderr(Stdio::null());
+    let unit = format!("_SYSTEMD_USER_UNIT={UNIT_NAME}");
+    c.args(["--user", &unit, "-n", &n, "-o", "cat", "--no-pager"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
     c.output()
         .ok()
         .filter(|o| o.status.success())
@@ -454,17 +448,14 @@ pub fn last_log_lines(n: usize) -> Vec<String> {
 /// start failed.
 #[derive(Debug, Default)]
 pub struct ExitWatch {
-    restarts: Option<u32>,
     pid: Option<u32>,
 }
 
 impl ExitWatch {
-    /// Begin watching; `before` is the unit state before the start, if known.
-    pub fn new(before: Option<&UnitState>) -> Self {
-        Self {
-            restarts: before.map(|b| b.restarts),
-            pid: None,
-        }
+    /// Begin watching; `before` is the unit state before the start, if
+    /// known. Only what happens after the start is judged.
+    pub fn new(_before: Option<&UnitState>) -> Self {
+        Self { pid: None }
     }
 
     /// Why the start failed, if `now` shows it did.
@@ -477,7 +468,10 @@ impl ExitWatch {
         if now.active == "failed" {
             return Some(format!("lablinkd exited{status} and the service failed"));
         }
-        if now.sub == "auto-restart" || self.restarts.is_some_and(|r| now.restarts > r) {
+        // Not NRestarts: `systemctl start` of a unit waiting in auto-restart
+        // counts as one more restart of a healthy daemon, and a manual
+        // restart resets the counter. A new PID is the reliable sign.
+        if now.sub == "auto-restart" {
             return Some(format!(
                 "lablinkd exited{status}; systemd keeps restarting it"
             ));
@@ -631,10 +625,28 @@ pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// message as soon as systemd sees it go.
 pub fn run_verified(action: &str, socket: &Path) -> Result<String, String> {
     let before = unit_state();
+    if matches!(action, "install" | "start" | "restart")
+        && before.as_ref().is_some_and(|b| b.active == "failed")
+    {
+        // A crash loop can leave the unit failed (start limit hit), and a
+        // failed unit refuses to start: once the cause is fixed, Start must
+        // work.
+        let _ = systemctl(&["reset-failed", UNIT_NAME]);
+    }
+    // systemctl itself can fail the start (a daemon that exits before the
+    // job completes): say why the daemon exited, not only that it did.
+    let why = |e: String| {
+        let mut m = e;
+        for line in explain_down(socket) {
+            m.push_str("; ");
+            m.push_str(&line);
+        }
+        m
+    };
     let done = match action {
-        "install" => install(true)?.join("; "),
+        "install" => install(true).map_err(why)?.join("; "),
         "start" | "restart" => {
-            control(action)?;
+            control(action).map_err(why)?;
             format!("{action}ed {UNIT_NAME}")
         }
         other => {
@@ -724,9 +736,16 @@ mod tests {
             .failed(&st("active", "running", 3, 200, 1))
             .unwrap()
             .contains("pid 100 -> 200"));
-        // Without a baseline the restart counter still shows the loop.
-        let mut w = super::ExitWatch::new(Some(&before));
-        assert!(w.failed(&st("active", "running", 5, 300, 1)).is_some());
+        // `systemctl start` of a unit waiting in auto-restart: one more
+        // restart, a healthy new daemon. Not a failure.
+        let looping = st("activating", "auto-restart", 4, 0, 1);
+        let mut w = super::ExitWatch::new(Some(&looping));
+        assert_eq!(w.failed(&st("active", "running", 5, 300, 0)), None);
+        assert_eq!(w.failed(&st("active", "running", 5, 300, 0)), None);
+        // A manual restart resets the counter: still judged by PID.
+        let mut w = super::ExitWatch::new(Some(&st("active", "running", 9, 50, 0)));
+        assert_eq!(w.failed(&st("active", "running", 0, 60, 0)), None);
+        assert!(w.failed(&st("active", "running", 0, 61, 1)).is_some());
         let mut w = super::ExitWatch::new(None);
         assert!(w
             .failed(&st("failed", "failed", 0, 0, 2))
