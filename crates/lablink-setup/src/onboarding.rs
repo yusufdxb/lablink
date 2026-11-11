@@ -642,10 +642,23 @@ mod tests {
         let bin = d.path().join("bin");
         let path = ssh_shim(&bin, &fake).unwrap();
         assert_eq!(std::env::split_paths(&path).next().unwrap(), bin);
-        let out = Command::new("ssh")
-            .env("PATH", &path)
-            .args(["-o", "A=b c", "host"])
-            .output()
+        // A parallel test that forks while this one still holds the new
+        // script open for writing makes exec fail with ETXTBSY; retry.
+        let out = (0..50)
+            .find_map(|_| {
+                match Command::new("ssh")
+                    .env("PATH", &path)
+                    .args(["-o", "A=b c", "host"])
+                    .output()
+                {
+                    Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        None
+                    }
+                    r => Some(r),
+                }
+            })
+            .expect("ssh shim stayed busy")
             .unwrap();
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
