@@ -4272,7 +4272,7 @@ limitations under the License.
 ## Apache License 2.0
 
 Used by:
-- mdns-sd 0.21.5 (https://github.com/keepsimple1/mdns-sd)
+- mdns-sd 0.21.7 (https://github.com/keepsimple1/mdns-sd)
 
 ```text
                               Apache License
@@ -4493,7 +4493,7 @@ Used by:
 - async-signal 0.2.14 (https://github.com/smol-rs/async-signal)
 - async-task 4.7.1 (https://github.com/smol-rs/async-task)
 - atomic-waker 1.1.2 (https://github.com/smol-rs/atomic-waker)
-- base64 0.22.1 (https://github.com/marshallpierce/rust-base64)
+- base64 0.23.1 (https://github.com/marshallpierce/rust-base64)
 - bitflags 2.13.2 (https://github.com/bitflags/bitflags)
 - blocking 1.7.0 (https://github.com/smol-rs/blocking)
 - cap-fs-ext 4.0.3 (https://github.com/bytecodealliance/cap-std)
@@ -7205,7 +7205,7 @@ Used by:
 - guillotiere 0.7.0 (https://github.com/nical/guillotiere)
 - image 0.25.10 (https://github.com/image-rs/image)
 - itoa 1.0.18 (https://github.com/dtolnay/itoa)
-- libc 0.2.190 (https://github.com/rust-lang/libc)
+- libc 0.2.191 (https://github.com/rust-lang/libc)
 - linebender_resource_handle 0.1.1 (https://github.com/linebender/raw_resource_handle)
 - litrs 1.0.0 (https://github.com/LukasKalbertodt/litrs)
 - miniz_oxide 0.8.9 (https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide)
@@ -7612,8 +7612,8 @@ THE SOFTWARE.
 ## MIT License
 
 Used by:
-- libsqlite3-sys 0.38.2 (https://github.com/rusqlite/rusqlite)
-- rusqlite 0.40.2 (https://github.com/rusqlite/rusqlite)
+- libsqlite3-sys 0.39.1 (https://github.com/rusqlite/rusqlite)
+- rusqlite 0.41.1 (https://github.com/rusqlite/rusqlite)
 
 ```text
 Copyright (c) 2014 The rusqlite developers
@@ -9367,4 +9367,4 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-<!-- Cargo.lock sha256: af66f86032169602abe836db0052cb049a223aa883ac531df7635563893e3566 -->
+<!-- Cargo.lock sha256: 82ea5d5c13fe21470d822f4f21b93e1e7abffb2ba9b5b249fbb9d3fee0bba4a6 -->
