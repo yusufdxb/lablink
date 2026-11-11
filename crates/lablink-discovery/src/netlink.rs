@@ -10,7 +10,9 @@ use ipnet::IpNet;
 use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
 const NLMSG_ERROR: u16 = 2;
@@ -366,6 +368,17 @@ fn to_events(msgs: Vec<Msg>) -> Vec<NetEvent> {
 
 // ---------------------------------------------------------------- sockets --
 
+/// rtnetlink exists only on Linux; elsewhere callers fall back to periodic
+/// discovery without a network snapshot.
+#[cfg(not(target_os = "linux"))]
+fn open_socket(_groups: u32, _nonblocking: bool) -> io::Result<OwnedFd> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "rtnetlink is only available on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn open_socket(groups: u32, nonblocking: bool) -> io::Result<OwnedFd> {
     let mut flags = libc::SOCK_RAW | libc::SOCK_CLOEXEC;
     if nonblocking {
@@ -773,6 +786,7 @@ mod tests {
 
     /// [integration, localhost] Real kernel dump on this machine.
     #[test]
+    #[cfg(target_os = "linux")]
     fn real_snapshot_has_loopback() {
         let s = snapshot().expect("netlink dump");
         assert!(

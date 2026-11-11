@@ -237,12 +237,122 @@ fn uid() -> u32 {
 /// Most symbolic links followed while checking one path (the kernel's limit).
 const MAX_LINKS: u32 = 40;
 
+/// Whether the extended ACL of `p` (if it has one) has an allow entry that
+/// lets a user other than this one or root, or any group, change it: its
+/// data, its entries, its attributes or its ACL, or delete it. macOS ACLs
+/// grant on top of the mode bits, so this is checked for every path, not
+/// only group-writable ones. Deny entries take nothing away from the owner
+/// and are ignored. No ACL, or a filesystem without ACLs, means no such
+/// writer; any other failure to read it is an error.
+#[cfg(target_os = "macos")]
+fn acl_lets_others_write(p: &Path) -> std::io::Result<bool> {
+    use std::ffi::{c_char, c_int, c_void};
+    use std::os::unix::ffi::OsStrExt;
+    const ACL_TYPE_EXTENDED: c_int = 0x100;
+    const ACL_FIRST_ENTRY: c_int = 0;
+    const ACL_NEXT_ENTRY: c_int = -1;
+    const ACL_EXTENDED_ALLOW: c_int = 1;
+    const ID_TYPE_UID: c_int = 0;
+    // <sys/acl.h>: WRITE_DATA/ADD_FILE, DELETE, APPEND_DATA/ADD_SUBDIRECTORY,
+    // DELETE_CHILD, WRITE_ATTRIBUTES, WRITE_EXTATTRIBUTES, WRITE_SECURITY,
+    // CHANGE_OWNER.
+    const WRITES: [c_int; 8] = [
+        1 << 2,
+        1 << 4,
+        1 << 5,
+        1 << 6,
+        1 << 8,
+        1 << 10,
+        1 << 12,
+        1 << 13,
+    ];
+    extern "C" {
+        fn acl_get_link_np(path: *const c_char, kind: c_int) -> *mut c_void;
+        fn acl_free(obj: *mut c_void) -> c_int;
+        fn acl_get_entry(acl: *mut c_void, id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
+        fn acl_get_permset(entry: *mut c_void, set: *mut *mut c_void) -> c_int;
+        fn acl_get_perm_np(set: *mut c_void, perm: c_int) -> c_int;
+        fn acl_get_qualifier(entry: *mut c_void) -> *mut c_void;
+        fn mbr_uuid_to_id(uu: *const u8, id: *mut libc::id_t, kind: *mut c_int) -> c_int;
+    }
+    /// Frees an object the acl_* calls returned.
+    struct Owned(*mut c_void);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from acl_get_link_np or
+            // acl_get_qualifier and is freed once.
+            unsafe { acl_free(self.0) };
+        }
+    }
+    let path = std::ffi::CString::new(p.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: `path` is NUL-terminated; the result is checked for NULL.
+    let acl = unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let e = std::io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ENOENT) | Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) => Ok(false),
+            _ => Err(e),
+        };
+    }
+    let acl = Owned(acl);
+    let me = uid();
+    let mut id = ACL_FIRST_ENTRY;
+    loop {
+        let mut entry = std::ptr::null_mut();
+        // SAFETY: `acl.0` is a live ACL and `entry` a valid out pointer.
+        if unsafe { acl_get_entry(acl.0, id, &mut entry) } != 0 {
+            let e = std::io::Error::last_os_error();
+            // EINVAL marks the end of the entries.
+            return if e.raw_os_error() == Some(libc::EINVAL) {
+                Ok(false)
+            } else {
+                Err(e)
+            };
+        }
+        id = ACL_NEXT_ENTRY;
+        let mut tag = 0;
+        let mut set = std::ptr::null_mut();
+        // SAFETY: `entry` belongs to the live ACL; out pointers are valid.
+        if unsafe { acl_get_tag_type(entry, &mut tag) } != 0
+            || unsafe { acl_get_permset(entry, &mut set) } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        if tag != ACL_EXTENDED_ALLOW {
+            continue;
+        }
+        // SAFETY: `set` belongs to the live entry.
+        if !WRITES
+            .iter()
+            .any(|&w| unsafe { acl_get_perm_np(set, w) } == 1)
+        {
+            continue;
+        }
+        // SAFETY: `entry` belongs to the live ACL; the result is checked.
+        let who = unsafe { acl_get_qualifier(entry) };
+        if who.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let who = Owned(who);
+        let (mut uid, mut kind) = (0, -1);
+        // SAFETY: an extended entry's qualifier is a 16-byte guid_t.
+        let known = unsafe { mbr_uuid_to_id(who.0.cast(), &mut uid, &mut kind) } == 0;
+        // An unresolvable entry, a group or another user may write.
+        if !(known && kind == ID_TYPE_UID && (uid == me || uid == 0)) {
+            return Ok(true);
+        }
+    }
+}
+
 /// Whether the POSIX access ACL of `p` (if it has one) lets a user other
 /// than this one or root, or a group other than the private group, write
 /// it. With an ACL, the group bits of the mode are only the ACL's mask, so
 /// they do not show who the named entries are. No ACL, or a filesystem
 /// without ACLs, means no such writer; any other failure to read it is an
 /// error.
+#[cfg(not(target_os = "macos"))]
 fn acl_lets_others_write(p: &Path) -> std::io::Result<bool> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(p.as_os_str().as_bytes())
@@ -293,6 +403,7 @@ fn acl_lets_others_write(p: &Path) -> std::io::Result<bool> {
 /// format: a little-endian version 2, then 8-byte tag, permissions and id
 /// entries) gives write to a user other than `me` or root or a group other
 /// than `private`. `None` if it is not in that format.
+#[cfg(not(target_os = "macos"))]
 fn acl_writers(acl: &[u8], me: u32, private: Option<u32>) -> Option<bool> {
     const ACL_USER: u16 = 0x02;
     const ACL_GROUP: u16 = 0x08;
@@ -377,6 +488,7 @@ pub fn trusted_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
             }
             // The group bits are an ACL's mask if it has one: the named
             // users and groups it lists may write too.
+            #[cfg(not(target_os = "macos"))]
             match acl_lets_others_write(p) {
                 Ok(false) => {}
                 Ok(true) => {
@@ -387,6 +499,17 @@ pub fn trusted_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
                 }
                 Err(e) => return Err(cannot(p, &e)),
             }
+        }
+        #[cfg(target_os = "macos")]
+        match acl_lets_others_write(p) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(format!(
+                    "{} has an ACL that lets another user or group change it (chmod -N)",
+                    p.display()
+                ))
+            }
+            Err(e) => return Err(cannot(p, &e)),
         }
         Ok(())
     };
@@ -729,6 +852,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn acl_read_errors_fail_closed() {
         if uid() != 0 {
             eprintln!("SKIP: ACL error fixture requires root in a disposable container");
@@ -892,9 +1016,56 @@ mod tests {
         }
     }
 
+    /// A macOS ACL grants on top of the mode bits: an allow entry that
+    /// lets anyone but this user or root change the file is refused.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_macos_acl_that_lets_another_user_write_is_refused() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.yaml");
+        std::fs::write(&file, "trusted").unwrap();
+        chmod(&file, 0o600);
+        let acl = |entry: &str| {
+            let ok = Command::new("chmod")
+                .args(["+a", entry])
+                .arg(&file)
+                .status();
+            assert!(ok.unwrap().success(), "{entry}");
+        };
+        let clear = || {
+            let ok = Command::new("chmod").arg("-N").arg(&file).status();
+            assert!(ok.unwrap().success());
+        };
+        let me = Command::new("id").arg("-un").output().unwrap().stdout;
+        let me = String::from_utf8(me).unwrap();
+        assert!(!acl_lets_others_write(&file).unwrap(), "no ACL");
+        let clean = trusted_metadata(&file);
+        assert!(clean.is_ok(), "temp dir is not trusted: {clean:?}");
+        for (entry, writer) in [
+            ("everyone deny delete", false),
+            ("everyone allow read", false),
+            (&*format!("user:{} allow write,delete", me.trim()), false),
+            ("everyone allow write", true),
+            ("group:staff allow append", true),
+            ("everyone allow delete", true),
+            ("everyone allow writesecurity", true),
+            ("user:nobody allow chown", true),
+        ] {
+            acl(entry);
+            assert_eq!(acl_lets_others_write(&file).unwrap(), writer, "{entry}");
+            if writer {
+                let why = trusted_metadata(&file).unwrap_err();
+                assert!(why.contains("ACL"), "{why}");
+            }
+            clear();
+        }
+    }
+
     /// With a POSIX ACL the group bits are only the ACL's mask: the users
     /// and groups it names are judged too.
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn an_acl_that_lets_another_user_write_is_refused() {
         let acl = |entries: &[(u16, u16, u32)]| {
             let mut b = 2u32.to_le_bytes().to_vec();
