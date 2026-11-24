@@ -23,8 +23,9 @@ pub mod proof;
 pub mod run;
 
 pub use command::{
-    automated_session_args, build_args, control_path, copy_id_args, proxy_command_through,
-    proxy_command_through_files, push_remote_command, scp_args, shell_quote, Mode, ScpPath, Target,
+    automated_session_args, build_args, control_path, copy_id_args, forward_stdin,
+    proxy_command_through, proxy_command_through_files, push_remote_command, scp_args, shell_quote,
+    Mode, ScpPath, Target,
     AUTOMATED_SESSION_OPTIONS,
 };
 pub use fingerprint::fingerprint_of_blob;
