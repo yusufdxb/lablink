@@ -446,14 +446,22 @@ fn exec_passes_piped_stdin_unless_no_stdin() {
     let sep = |a: &[String]| a.iter().position(|x| x == "--").unwrap();
 
     // `printf pw | lablink exec dev 'sudo -S ...'`: the input reaches the command.
-    let o = lablink_with_stdin(&e, &["exec", "jetson-a", "read -r x; echo got=$x"], "secret\n");
+    let o = lablink_with_stdin(
+        &e,
+        &["exec", "jetson-a", "read -r x; echo got=$x"],
+        "secret\n",
+    );
     assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(String::from_utf8_lossy(&o.stdout), "got=secret\n");
     let a = recorded_args(&e);
     assert!(!a[..sep(&a)].contains(&"-n".to_string()), "{a:?}");
 
     // --json captures output but still forwards the input.
-    let v = json(&lablink_with_stdin(&e, &["exec", "jetson-a", "cat", "--json"], "abc"));
+    let v = json(&lablink_with_stdin(
+        &e,
+        &["exec", "jetson-a", "cat", "--json"],
+        "abc",
+    ));
     assert_eq!(v["exit_code"], 0);
     assert_eq!(v["stdout"], "abc");
 
