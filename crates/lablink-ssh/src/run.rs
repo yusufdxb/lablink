@@ -19,6 +19,9 @@ pub enum OutputMode {
     Inherit,
     /// Live stdin/stdout/stderr, retaining stderr for failure advice.
     InheritAndCaptureStderr,
+    /// Capture stdout and stderr, but pass the parent's stdin through
+    /// (input piped into `lablink exec --json`).
+    CaptureWithStdin,
 }
 
 /// Result of a finished (or killed) child process.
@@ -185,6 +188,11 @@ fn run_inner(
         OutputMode::InheritAndCaptureStderr => {
             cmd.stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
+                .stderr(Stdio::piped());
+        }
+        OutputMode::CaptureWithStdin => {
+            cmd.stdin(Stdio::inherit())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
         }
     }
