@@ -278,7 +278,7 @@ ssh -o HostName=<current ip> -o Port=<port>
     [-o HostKeyAlias=lablink.<site>.jetson-a -o UserKnownHostsFile=<state>/known_hosts
      -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes
      -o UpdateHostKeys=no -o CheckHostIP=no]          # only when pinned
-    [-o BatchMode=yes -o ConnectTimeout=N -T -n]       # exec only
+    [-o BatchMode=yes -o ConnectTimeout=N -T [-n]]   # exec only; -n unless stdin is piped (and not --no-stdin)
     [-l <user>] [-o <config ssh.options>] -- <ssh_host> [CMD]   # `lablink ssh DEV -- ARGS`: ARGS are CMD
 ```
 
