@@ -91,6 +91,7 @@ operations and security limits.
 ```bash
 lablink status [device]              # health of the current site, or one device (exit code = color)
 lablink doctor [device...]           # read-only checks: SSH, disk, GPU, temperature, ROS 2, DDS, reachability
+lablink doctor --expect 5080         # that `availability: on_demand` device must be up: RED if it is not
 lablink devices                      # full identity and health detail
 lablink discover                     # run discovery now
 lablink ssh <device>                 # interactive SSH with the pinned identity
@@ -262,7 +263,7 @@ file with `lablink check-config`.
 | 6 | host-key mismatch: security stop |
 | 7 | refused by policy (for example a scan outside the allowlist, or `trust` without confirmation) |
 | 8 | ambiguous device name: use `site/name` |
-| 10 / 11 / 12 | `status <device>` / `doctor`: YELLOW / RED / GRAY (GRAY includes AWAY) |
+| 10 / 11 / 12 | `status <device>` / `doctor`: YELLOW / RED / GRAY (GRAY includes AWAY; a doctor device that is `asleep/off (expected)` never counts) |
 | 124 | `exec --timeout` expired |
 | 255 | the OpenSSH client failed (`exec`) |
 

@@ -6,6 +6,28 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `lablink doctor` tells a machine that is meant to be asleep or off from one
+  that should be up and is not. A device with `availability: on_demand` in
+  the config that does not answer (SSH timeout, no route, host down, the
+  gateway hop closed with no host, or not located) is reported as
+  `asleep/off (expected)` instead of RED; a device routed through such a
+  gateway is off too (`gateway orin off (expected)`). Expected-off devices do
+  not count as failures (exit code unaffected, like AWAY devices) and the
+  verdict is `standby` (new, exit 0) instead of `ready` when nothing is red,
+  yellow or gray but some device is expected off; `ready` means everything is
+  up. RED is reserved for a device that should be up. Security and auth failures (host
+  key or identity mismatch, authentication, connection refused, a session
+  that ran and failed) stay RED or YELLOW. `lablink doctor --expect DEVICE`
+  (repeatable) treats an `on_demand` device as one that must be up for that
+  run. JSON adds `availability` and `expected_off` per device
+  (`schema_version` stays 1); the desktop app's Health tab shows the state
+  in blue-grey, never red. `lablink status` keeps the daemon's raw color.
+  The default is `availability: always`, so existing configs behave as
+  before. A config that uses `availability` needs 0.4.4 on the CLI, daemon
+  and app (older builds reject the unknown key).
+
 ### Security
 
 - Fixes RUSTSEC-2026-0486 (rustix xattr with a zero-length buffer): rustix

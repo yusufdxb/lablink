@@ -199,19 +199,40 @@ networks and device counts, and the local signals.
 
 ## Doctor (`lablink doctor`)
 
-`lablink doctor [DEVICE...] [--site ID | --all] [--json] [--timeout S] [--config PATH]` runs read-only health checks (SSH, GPU, thermal, disk, ROS 2 install, CycloneDDS interface, reachability) and prints a one-screen verdict. By default it checks the devices of the site(s) you are at. Checks come from the `checks:` section of each site in the config (see `config/example.yaml`); a device without an entry gets its profile's default checks (see the README), and otherwise its implicit checks (`ssh`, reach-via-gateway for `ssh: false` devices behind a gateway, or a `network` check from the daemon's state for directly attached `ssh: false` devices). Each device uses one batch SSH session through the same path as `lablink exec` (identity mismatch is a security stop: nothing is run). The checks are fixed command templates; no config value is ever run as a command.
+`lablink doctor [DEVICE...] [--site ID | --all] [--expect DEVICE]... [--json] [--timeout S] [--config PATH]` runs read-only health checks (SSH, GPU, thermal, disk, ROS 2 install, CycloneDDS interface, reachability) and prints a one-screen verdict. By default it checks the devices of the site(s) you are at. Checks come from the `checks:` section of each site in the config (see `config/example.yaml`); a device without an entry gets its profile's default checks (see the README), and otherwise its implicit checks (`ssh`, reach-via-gateway for `ssh: false` devices behind a gateway, or a `network` check from the daemon's state for directly attached `ssh: false` devices). Each device uses one batch SSH session through the same path as `lablink exec` (identity mismatch is a security stop: nothing is run). The checks are fixed command templates; no config value is ever run as a command.
 
-Exit codes: 0 all devices GREEN (`ready`), 10 worst is YELLOW (`degraded`), 12 worst is GRAY (not located), 11 any RED (`not_ready`; red outranks gray), 3 daemon unavailable, 4 unknown device, 8 ambiguous name. Devices of AWAY sites (`--all`) are reported with `"away": true` and never count toward the verdict or the exit code.
+Exit codes: 0 all devices GREEN (`ready`) or none red, yellow or gray but at least one expected off (`standby`), 10 worst is YELLOW (`degraded`), 12 worst is GRAY (not located), 11 any RED (`not_ready`; red outranks gray), 3 daemon unavailable, 4 unknown device, 8 ambiguous name. Devices of AWAY sites (`--all`) are reported with `"away": true` and never count toward the verdict or the exit code.
+
+### Expected off (`availability: on_demand`)
+
+A machine that is meant to be asleep or powered off (a workstation that suspends, a Jetson that is switched off between sessions) is not a failure. Mark it in the config:
+
+```yaml
+devices:
+  - name: 5080
+    availability: on_demand   # default: always
+```
+
+The verdict is `ready` only when every device in scope is up; it is `standby` (exit 0) when nothing is red, yellow or gray but at least one non-AWAY device is expected off. Nothing that should be up is down, but not everything is up: do not treat `standby` as `ready` when the task needs the off machine.
+
+When an `on_demand` device does not answer, doctor reports **`asleep/off (expected)`** instead of RED: `"expected_off": true`, `"color": "gray"`, the `ssh` check is `skip` with `asleep/off (expected): <why>`, and the device **does not count** toward the verdict or the exit code (the same as an AWAY device). RED is reserved for a device that should be up and is not. Only a machine that did not answer counts: the SSH client timed out, had no route, the host is down, or the gateway hop was closed with no host to connect to (`Connection closed by UNKNOWN port 65535`, what a suspended machine behind a gateway looks like), or the daemon has not located it. Everything else stays as before even for an `on_demand` device: host-key or identity mismatch (exit 6, a security stop), authentication failure, `connection refused` (the host is up, its SSH server is not), a session that ran and failed a check, a session that timed out after connecting. A device reached through an off `on_demand` gateway (`go2` via `orin`) that is itself unreachable is off too, with the reason `gateway orin off (expected)`.
+
+`--expect DEVICE` (repeatable, `name` or `site/name`) says that device must be up right now: for this run it is treated as `always`, so it is RED if it does not answer, and a device behind it stays GRAY or RED. An unknown name exits 4. If everything in scope is expected off the verdict is `standby` and the exit code is 0. `--expect` on a device that is down gives `not_ready` and exit 11.
+
+`lablink status` and `status <device> --json` are unchanged: they keep reporting the daemon's raw color (an unreachable device is RED or GRAY there) and do not read `availability`. Only doctor, and the desktop app's Health tab (blue-grey, never red), apply it.
+
+Every exit code keeps its meaning; only the set of devices that count changes. A config with `availability` needs 0.4.4 or newer on the CLI, the daemon and the desktop app: older builds reject the unknown key (`lablink check-config` fails).
 
 ```json
-{"schema_version": 1, "verdict": "ready|degraded|not_ready", "scope": "Site Alpha",
+{"schema_version": 1, "verdict": "ready|standby|degraded|not_ready", "scope": "Site Alpha",
  "devices": [{"name": "jetson-a", "id": "site-alpha/jetson-a", "site": "site-alpha", "away": false,
-   "color": "green", "ip": "192.168.10.71", "via": null,
+   "color": "green", "availability": "always|on_demand", "expected_off": false,
+   "ip": "192.168.10.71", "via": null,
    "checks": [{"id": "ssh", "kind": "ssh", "label": "SSH", "status": "ok|warn|fail|skip", "detail": "host key pinned"}],
    "duration_ms": 812}]}
 ```
 
-Devices are sorted by site and name, and checks keep their configured order (`ssh` first); keys are in a fixed order. Only measured values (`duration_ms`, and live readings such as GPU utilization, temperatures, disk use and rtt inside `detail`) change between runs; compare on `verdict`, `color` and `status`. A `skip` never degrades a device; GRAY devices and failed sessions skip their remaining checks.
+Devices are sorted by site and name, and checks keep their configured order (`ssh` first); keys are in a fixed order. Only measured values (`duration_ms`, and live readings such as GPU utilization, temperatures, disk use and rtt inside `detail`) change between runs; compare on `verdict`, `color`, `expected_off` and `status`. `availability` and `expected_off` (added in 0.4.4, `schema_version` stays 1: additive) are absent in older reports and default to `always` and `false`. A `skip` never degrades a device; GRAY devices and failed sessions skip their remaining checks.
 
 ## Suggested agent instructions
 
@@ -220,7 +241,7 @@ For an agent's instruction file (for example `CLAUDE.md` or `AGENTS.md`):
 ```markdown
 ## Lab machines
 - Use LabLink for every robot/Jetson/workstation connection. Do not scan or guess IPs.
-- Start lab diagnostics with `lablink doctor --json` (read-only; exit 0 = the current site is ready).
+- Start lab diagnostics with `lablink doctor --json` (read-only; verdict `ready` = everything is up; `standby` = exit 0 but some machine is expected off, wake it only if the task needs it). A device with `"expected_off": true` is asleep or powered off by plan: do not treat it as a failure, and do not try to wake or work around it unless the user asked; `--expect <device>` makes one RED if it is down.
 - Per device: `lablink status <device> --json` (exit 0 = ready, 10 yellow, 11 red, 12 gray or away, 3 = daemon down, 8 = ambiguous name).
 - Use `site/name` when a name exists at several sites; `lablink sites` shows where the user is.
 - Run commands with `lablink exec <device> "<cmd>" --json --timeout <s>`; remote exit code is preserved.

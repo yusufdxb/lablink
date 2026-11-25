@@ -898,6 +898,11 @@ pub fn collect(opts: &BundleOptions) -> Collected {
             timeout: Duration::from_secs(15),
             site: None,
             all: true,
+            availability: cfg
+                .as_ref()
+                .map(|c| c.availability_by_id())
+                .unwrap_or_default(),
+            expect: vec![],
         };
         match lablink_doctor::run(&client, &checks, &o) {
             Ok(rep) => serde_json::to_string_pretty(&rep).unwrap_or_default(),

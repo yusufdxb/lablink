@@ -48,6 +48,8 @@ sites:
       - name: jetson-a             # `lablink ssh jetson-a`
         label: Jetson A
         profile: jetson            # picks the doctor checks: disk, Jetson GPU, temperature
+        # availability: on_demand  # may be switched off or asleep: `lablink doctor` shows it as
+        #                          # "asleep/off (expected)", not RED (default: always)
         usernames: [ops]           # tried in order by the login check
         hostnames: [jetson-a-host, jetson-a-host.local]
         expected_networks: [robot_net, lab]
@@ -70,6 +72,9 @@ sites:
         profile: gpu_workstation   # disk, NVIDIA GPU, temperature
         usernames: [lab]
         hostnames: [gpu-ws, gpu-ws.local]
+        availability: on_demand    # suspends when idle: doctor says "asleep/off (expected)"
+                                   # instead of RED; `lablink doctor --expect gpu-workstation`
+                                   # insists it be up
 
     # Read-only health checks for `lablink doctor`, keyed by device name
     # (adopted devices work too). They replace the profile's defaults.
