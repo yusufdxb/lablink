@@ -132,6 +132,12 @@ enum Cmd {
         /// Do not print the connection line.
         #[arg(long, short)]
         quiet: bool,
+        /// One ssh option for the local ssh, placed before the host (repeatable),
+        /// with its value attached: `--ssh-opt=-N --ssh-opt=-L8765:127.0.0.1:8765
+        /// --ssh-opt=-oExitOnForwardFailure=yes`. LabLink's host-key options
+        /// still come first and cannot be weakened.
+        #[arg(long = "ssh-opt", value_name = "OPT", allow_hyphen_values = true)]
+        ssh_opts: Vec<String>,
         /// Remote command, after `--`: `lablink ssh DEV -- ls -la`. One word is
         /// a command line, several words are quoted one by one. Never read as
         /// ssh options (use `~/.ssh/config` or `lablink exec` for those).
@@ -999,8 +1005,17 @@ fn run(cmd: Cmd, client: &Client) -> R {
             force,
             unpinned,
             quiet,
+            ssh_opts,
             ssh_args,
-        } => cmd_ssh(client, &device, user, (force, unpinned), quiet, &ssh_args),
+        } => cmd_ssh(
+            client,
+            &device,
+            user,
+            (force, unpinned),
+            quiet,
+            &ssh_opts,
+            &ssh_args,
+        ),
         Cmd::Scp {
             paths,
             user,
@@ -1540,11 +1555,15 @@ fn cmd_ssh(
     user: Option<String>,
     force: (bool, bool),
     quiet: bool,
+    ssh_opts: &[String],
     extra: &[String],
 ) -> R {
     use std::os::unix::process::CommandExt;
+    for o in ssh_opts {
+        lablink_ssh::validate_ssh_opt(o).map_err(|m| Fail::new(exit::USAGE, "bad_request", m))?;
+    }
     let (r, t) = resolve_target(client, device, user, force, false)?;
-    let mut args = build_args(&t, &Mode::Interactive, &[]);
+    let mut args = build_args(&t, &Mode::Interactive, ssh_opts);
     push_remote_command(&mut args, extra);
     if !quiet {
         let who = t
