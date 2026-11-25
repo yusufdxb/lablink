@@ -512,28 +512,81 @@ fn an_unreadable_state_path_is_a_refusal_not_a_host_key_mismatch() {
 fn ssh_uses_interactive_mode_with_pinned_identity() {
     let e = setup("");
     wait_color(&e, "jetson-a", "green");
-    let o = lablink(
-        Some(&e),
-        &["ssh", "jetson-a", "--", "-o", "StrictHostKeyChecking=no"],
-    );
+    let o = lablink(Some(&e), &["ssh", "jetson-a"]);
     assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
     assert!(String::from_utf8_lossy(&o.stderr)
         .contains("jetson-a -> ops@10.9.0.31:22 (host key pinned by LabLink)"));
     let a = recorded_args(&e);
     assert!(!a.contains(&"BatchMode=yes".to_string()));
-    let strict = a
-        .iter()
-        .position(|x| x == "StrictHostKeyChecking=yes")
-        .unwrap();
-    let weak = a
-        .iter()
-        .position(|x| x == "StrictHostKeyChecking=no")
-        .unwrap();
-    assert!(
-        strict < weak,
-        "user extras cannot weaken host-key checking: {a:?}"
-    );
+    assert!(a.contains(&"StrictHostKeyChecking=yes".to_string()));
     assert_eq!(a.last().unwrap(), "jetson-a");
+}
+
+/// Run `lablink ssh jetson-a -- <remote>` and return the argv the fake ssh saw.
+fn ssh_with_remote(remote: &[&str]) -> Vec<String> {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    let mut args = vec!["ssh", "-q", "jetson-a", "--"];
+    args.extend_from_slice(remote);
+    let o = lablink(Some(&e), &args);
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    recorded_args(&e)
+}
+
+/// Everything the user put after `--` comes after `-- jetson-a`, and the
+/// destination is the last thing before it: nothing can reach local ssh as an
+/// option or as the host.
+fn assert_remote_after_host(a: &[String], remote: &[&str]) {
+    let dd = a.iter().position(|x| x == "--").expect("-- present");
+    assert_eq!(a[dd + 1], "jetson-a", "{a:?}");
+    assert_eq!(a.iter().filter(|x| *x == "--").count(), 1, "{a:?}");
+    for r in remote {
+        assert!(
+            !a[..dd].contains(&r.to_string()),
+            "remote arg {r:?} reached ssh before the host: {a:?}"
+        );
+    }
+    assert!(a[..dd].contains(&"StrictHostKeyChecking=yes".to_string()));
+}
+
+#[test]
+fn ssh_remote_command_with_flags_goes_after_host() {
+    let a = ssh_with_remote(&["ls", "-la"]);
+    assert_remote_after_host(&a, &["ls", "-la"]);
+    assert_eq!(&a[a.len() - 3..], ["--", "jetson-a", "'ls' '-la'"]);
+}
+
+#[test]
+fn ssh_single_argument_is_a_command_line() {
+    let a = ssh_with_remote(&["echo hi"]);
+    assert_remote_after_host(&a, &["echo hi"]);
+    assert_eq!(&a[a.len() - 3..], ["--", "jetson-a", "echo hi"]);
+}
+
+#[test]
+fn ssh_remote_args_with_spaces_stay_one_word() {
+    let a = ssh_with_remote(&["echo", "a b", "it's"]);
+    assert_remote_after_host(&a, &["echo"]);
+    let remote = a[a.len() - 1].clone();
+    assert_eq!(a[a.len() - 2], "jetson-a");
+    assert_eq!(remote, "'echo' 'a b' 'it'\\''s'");
+}
+
+#[test]
+fn ssh_remote_args_that_look_like_options_or_hosts_are_inert() {
+    for remote in [
+        vec!["-v"],
+        vec!["--help"],
+        vec!["-oProxyCommand=touch /tmp/pwned"],
+        vec!["-J", "evil.example"],
+        vec!["user@evil.example"],
+        vec!["-T", "echo hi"],
+    ] {
+        let a = ssh_with_remote(&remote);
+        assert_remote_after_host(&a, &remote);
+        let dd = a.iter().position(|x| x == "--").unwrap();
+        assert!(a.len() > dd + 2, "remote command missing: {a:?}");
+    }
 }
 
 #[test]
