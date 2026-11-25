@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-25
+
 ### Added
 
 - `lablink scp [-r] [-p] [-C] [--limit KBIT] [--legacy] SOURCE... DEST`:
@@ -13,6 +15,29 @@ All notable changes are listed here. The format follows
   address and pinned host key as `lablink ssh` (`device:path` names the
   device side). Unpinned devices, device-to-device and local-only copies are
   refused. See `docs/SSH_IDENTITY.md`.
+
+### Fixed
+
+- lablinkd no longer fails every start when the desktop app created its
+  state directory first: saving Files preferences (for example changing the
+  appearance) before the daemon had ever run created
+  `~/.local/state/lablink` with the umask's mode (0775 under Ubuntu's usual
+  umask of 002), lablinkd refused it ("must belong to you with mode 0700"),
+  exited before creating its socket, and systemd restarted it every 5 s. The
+  desktop app now creates the directory 0700, and lablinkd tightens one that
+  no other user could have written (0755, or 0775 for the user's private
+  group). One another user could have written is still refused, untouched,
+  and the error names the fix.
+- A service start is reported as successful only once the daemon answers a
+  ping. `lablink init`, `lablink install-service`, the desktop app's Start
+  and Install buttons, and the restarts after a configuration change watch
+  the service: a daemon that exits during startup is reported at once with
+  its own last message, one that runs but never answers is reported with
+  its state and socket path, and a socket path that differs between the
+  session and the user manager is named. The desktop app said
+  "service: start done" while the daemon was crash-looping.
+- "lablinkd is not running" errors from the CLI and the desktop app now
+  include the service state and the daemon's last message.
 
 ## [0.4.2] - 2026-11-04
 
@@ -340,6 +365,7 @@ Earlier in the 0.3.0 cycle:
 - LabLink no longer starts, restarts or stops a systemd user service whose
   manager runs with a different home or config directory.
 
+[0.4.3]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.3
 [0.4.2]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.2
 [0.4.1]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.1
 [0.4.0]: https://github.com/yusufdxb/lablink/releases/tag/v0.4.0

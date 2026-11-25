@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "lablink-cli"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "clap",
  "lablink-core",
@@ -1854,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "lablink-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "ipnet",
  "libc",
@@ -1867,12 +1867,13 @@ dependencies = [
 
 [[package]]
 name = "lablink-daemon"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "clap",
  "ipnet",
  "lablink-core",
  "lablink-discovery",
+ "lablink-setup",
  "lablink-ssh",
  "libc",
  "rusqlite",
@@ -1887,7 +1888,7 @@ dependencies = [
 
 [[package]]
 name = "lablink-discovery"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "ipnet",
  "lablink-core",
@@ -1902,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "lablink-doctor"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "lablink-core",
  "lablink-ssh",
@@ -1912,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "lablink-files"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -1932,7 +1933,7 @@ dependencies = [
 
 [[package]]
 name = "lablink-gui"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "eframe",
@@ -1948,14 +1949,14 @@ dependencies = [
 
 [[package]]
 name = "lablink-platform"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "lablink-setup"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "ipnet",
  "lablink-core",
@@ -1971,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "lablink-ssh"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "base64",
  "lablink-core",

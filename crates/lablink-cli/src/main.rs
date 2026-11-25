@@ -538,11 +538,14 @@ impl Fail {
 impl From<ClientError> for Fail {
     fn from(e: ClientError) -> Self {
         match e {
-            ClientError::Unavailable { path, source } => Fail::new(
-                exit::DAEMON_UNAVAILABLE,
-                "daemon_unavailable",
-                format!("lablinkd is not running (socket {path}: {source}). Start it with `systemctl --user start lablinkd` or run `lablinkd`."),
-            ),
+            ClientError::Unavailable { path, source } => {
+                Fail::new(exit::DAEMON_UNAVAILABLE, "daemon_unavailable", {
+                    // Why it is down (the service's state and the daemon's
+                    // last message) saves a trip to the journal.
+                    let why = lablink_setup::service::explain_down(std::path::Path::new(&path));
+                    format!("lablinkd is not running (socket {path}: {source}); {}. Start it with `systemctl --user start lablinkd` or run `lablinkd`.", why.join("; "))
+                })
+            }
             ClientError::Protocol(m) => Fail::new(exit::FAILURE, "protocol", m),
             ClientError::Api(a) => {
                 let kind = match a.code {
@@ -1342,6 +1345,20 @@ fn run(cmd: Cmd, client: &Client) -> R {
             }
             for line in service::install(!no_enable).map_err(svc)? {
                 println!("{line}");
+            }
+            if !no_enable {
+                // `enable --now` returns once the process is forked: only a
+                // ping shows that the daemon is serving.
+                let socket = lablink_core::paths::default_socket_path();
+                let mut watch = service::ExitWatch::new(None);
+                let ready = service::wait_ready(
+                    &socket,
+                    service::READY_TIMEOUT,
+                    || service::unit_state().and_then(|st| watch.failed(&st)),
+                    || service::explain_down(&socket),
+                )
+                .map_err(|e| svc(format!("the LabLink daemon did not start: {e}")))?;
+                println!("{ready}");
             }
             Ok(exit::OK)
         }
