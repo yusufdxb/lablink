@@ -381,6 +381,36 @@ pub struct DeviceConfig {
     /// Extra capabilities beyond what `ssh`, `via` and the profile imply.
     #[serde(default)]
     pub capabilities: Vec<Capability>,
+    /// Whether the device is expected to be up (`always`, the default) or may
+    /// legitimately be asleep or powered off (`on_demand`). `lablink doctor`
+    /// reports an unreachable `on_demand` device as "asleep/off (expected)"
+    /// instead of RED. Status colors are unchanged.
+    #[serde(default, skip_serializing_if = "Availability::is_always")]
+    pub availability: Availability,
+}
+
+/// How a device is expected to be kept: see [`DeviceConfig::availability`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Availability {
+    /// Should be up whenever you look (a failure is RED).
+    #[default]
+    Always,
+    /// May be asleep or powered off (an unreachable device is "off").
+    OnDemand,
+}
+
+impl Availability {
+    pub fn is_always(&self) -> bool {
+        *self == Availability::Always
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Availability::Always => "always",
+            Availability::OnDemand => "on_demand",
+        }
+    }
 }
 
 /// A user-defined service check: a command run on the device over SSH
@@ -987,6 +1017,15 @@ impl Config {
         }
     }
 
+    /// Configured `availability` keyed by device id (`site/name`); devices
+    /// that are `always` are left out.
+    pub fn availability_by_id(&self) -> BTreeMap<String, Availability> {
+        self.devices()
+            .filter(|(_, d)| !d.availability.is_always())
+            .map(|(s, d)| (device_id(&s.id, &d.name), d.availability))
+            .collect()
+    }
+
     /// `doctor` checks keyed by device id (`site/name`).
     pub fn checks_by_id(&self) -> BTreeMap<String, Vec<crate::checks::CheckSpec>> {
         let mut out = BTreeMap::new();
@@ -1305,6 +1344,7 @@ impl DeviceConfig {
             via: None,
             profile: None,
             capabilities: vec![],
+            availability: Availability::Always,
         }
     }
 
@@ -1781,6 +1821,23 @@ mod site_tests {
         assert!(
             Config::parse(&text.replace("interface: eth0", "unknown: eth0"), "invalid").is_err()
         );
+    }
+
+    #[test]
+    fn availability_defaults_to_always_and_round_trips() {
+        let text = "devices:\n  - name: gpu\n    availability: on_demand\n  - name: jetson\n  - name: lab\n    availability: always\n";
+        let cfg = Config::parse(text, "t").unwrap();
+        let by = cfg.availability_by_id();
+        assert_eq!(by.len(), 1);
+        assert_eq!(by["default/gpu"], Availability::OnDemand);
+        // `always` is the default and is not written back.
+        let yaml = cfg.to_yaml();
+        assert_eq!(yaml.matches("availability").count(), 1, "{yaml}");
+        assert_eq!(Config::parse(&yaml, "saved").unwrap(), cfg);
+        // Existing configs are unchanged.
+        let old = Config::parse("devices:\n  - name: a\n", "t").unwrap();
+        assert!(old.availability_by_id().is_empty());
+        assert!(Config::parse(&text.replace("on_demand", "sometimes"), "t").is_err());
     }
 
     fn errs(text: &str) -> Vec<String> {

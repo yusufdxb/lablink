@@ -60,6 +60,13 @@ Evaluated in this order (`lablink_core::model::compute_color`):
 | GREEN | network `online`, and for SSH devices: port `open`, identity `verified`, and login `ok` (unless `auth_check: false`) |
 | YELLOW | anything else: located but degraded, port closed or filtered, identity unpinned or unknown, login failed or not yet checked |
 
+This table is the daemon's raw color and is what `lablink status` reports. It
+does not read `availability`: a machine that is switched off is RED (or GRAY)
+here even when the config says `availability: on_demand`. Only `lablink
+doctor` applies `availability` (an unreachable `on_demand` device becomes
+`asleep/off (expected)` and stops counting, and the doctor verdict is `standby`
+instead of `ready` while any such device is off), see `docs/AUTOMATION.md`.
+
 Devices with `ssh: false` (e.g. a robot base reached through its onboard
 computer) are GREEN on reachability alone. Each non-green status carries `reasons`, e.g.
 `"SSH login as ops failed: server only accepts password authentication; ..."`.

@@ -9,6 +9,9 @@ pub const GREEN: Color32 = crate::theme::SUCCESS;
 pub const YELLOW: Color32 = crate::theme::WARNING;
 pub const RED: Color32 = crate::theme::ERROR;
 pub const GRAY: Color32 = crate::theme::MUTED;
+/// Expected asleep/off (doctor, `availability: on_demand`): a cool blue-grey,
+/// distinct from the gray of "not located" and never red.
+pub const OFF: Color32 = Color32::from_rgb(120, 144, 180);
 
 /// Traffic-light color for the big state dot.
 pub fn state_color(c: Color) -> Color32 {

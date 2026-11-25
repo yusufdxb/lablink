@@ -359,6 +359,38 @@ pub fn push_remote_command(args: &mut Vec<String>, words: &[String]) {
     }
 }
 
+/// Options that take a value as a separate argument. `--ssh-opt` carries one
+/// argv token, so these must be written with the value attached
+/// (`-L8765:host:80`, `-oKey=value`).
+const VALUE_OPTIONS: &str = "BbcDEeFIiJLlmOopQRSWw";
+
+/// Check one `lablink ssh --ssh-opt` value: a single ssh option token that
+/// starts with `-`, is not `--`, and has its value attached when it takes one.
+pub fn validate_ssh_opt(o: &str) -> Result<(), String> {
+    let bad = |why: &str| {
+        Err(format!(
+            "--ssh-opt must be one ssh option with its value attached (for example -N, -oKey=value, -L8765:127.0.0.1:8765), not {o:?}: {why}"
+        ))
+    };
+    let mut ch = o.chars();
+    if ch.next() != Some('-') {
+        return bad("it does not start with '-'");
+    }
+    let Some(flag) = ch.next() else {
+        return bad("no option letter");
+    };
+    if flag == '-' {
+        return bad("'--' would end ssh option parsing");
+    }
+    if o.chars().any(|c| c.is_control()) {
+        return bad("control character");
+    }
+    if VALUE_OPTIONS.contains(flag) && ch.next().is_none() {
+        return bad(&format!("-{flag} needs its value attached"));
+    }
+    Ok(())
+}
+
 /// `w` as one POSIX shell word.
 fn shell_word(w: &str) -> String {
     format!("'{}'", w.replace('\'', "'\\''"))
@@ -856,6 +888,29 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(!text.contains("evil"), "{text}");
         assert!(text.contains("hostname jetson-a"), "{text}");
+    }
+
+    #[test]
+    fn ssh_opt_validation() {
+        for ok in [
+            "-N",
+            "-T",
+            "-t",
+            "-q",
+            "-oExitOnForwardFailure=yes",
+            "-L8765:127.0.0.1:8765",
+            "-R5597:127.0.0.1:5597",
+            "-p2222",
+            "-i/k/id",
+            "-Jhop",
+        ] {
+            assert!(validate_ssh_opt(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", "ls", "-", "--", "--help", "-o", "-L", "-J", "-p", "-N\n",
+        ] {
+            assert!(validate_ssh_opt(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

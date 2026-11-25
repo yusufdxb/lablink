@@ -132,6 +132,12 @@ enum Cmd {
         /// Do not print the connection line.
         #[arg(long, short)]
         quiet: bool,
+        /// One ssh option for the local ssh, placed before the host (repeatable),
+        /// with its value attached: `--ssh-opt=-N --ssh-opt=-L8765:127.0.0.1:8765
+        /// --ssh-opt=-oExitOnForwardFailure=yes`. LabLink's host-key options
+        /// still come first and cannot be weakened.
+        #[arg(long = "ssh-opt", value_name = "OPT", allow_hyphen_values = true)]
+        ssh_opts: Vec<String>,
         /// Remote command, after `--`: `lablink ssh DEV -- ls -la`. One word is
         /// a command line, several words are quoted one by one. Never read as
         /// ssh options (use `~/.ssh/config` or `lablink exec` for those).
@@ -300,6 +306,7 @@ enum Cmd {
     },
     /// Read-only health checks (SSH, GPU, disk, ROS 2, DDS, reachability) of lab machines.
     /// Exit 0 when every device is GREEN, else 10 (yellow), 12 (gray) or 11 (red).
+    /// Expected-off (`availability: on_demand`) devices never count.
     /// Devices of AWAY sites never count as failures.
     Doctor {
         /// Devices to check (`name` or `site/name`) [default: the current site's devices
@@ -316,7 +323,11 @@ enum Cmd {
         /// Overall time limit per device, in seconds.
         #[arg(long, default_value_t = 25)]
         timeout: u64,
-        /// Config file holding the `checks:` section [default: $XDG_CONFIG_HOME/lablink/config.yaml]
+        /// Treat this `availability: on_demand` device as one that must be up now: it is
+        /// RED if down instead of "asleep/off (expected)" (repeatable)
+        #[arg(long = "expect", value_name = "DEVICE")]
+        expect: Vec<String>,
+        /// Config file holding the `checks:` and `availability` settings [default: $XDG_CONFIG_HOME/lablink/config.yaml]
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -999,8 +1010,17 @@ fn run(cmd: Cmd, client: &Client) -> R {
             force,
             unpinned,
             quiet,
+            ssh_opts,
             ssh_args,
-        } => cmd_ssh(client, &device, user, (force, unpinned), quiet, &ssh_args),
+        } => cmd_ssh(
+            client,
+            &device,
+            user,
+            (force, unpinned),
+            quiet,
+            &ssh_opts,
+            &ssh_args,
+        ),
         Cmd::Scp {
             paths,
             user,
@@ -1226,6 +1246,7 @@ fn run(cmd: Cmd, client: &Client) -> R {
             all,
             json,
             timeout,
+            expect,
             config,
         } => {
             if timeout == 0 {
@@ -1237,19 +1258,15 @@ fn run(cmd: Cmd, client: &Client) -> R {
             }
             let explicit = config.is_some();
             let path = config.unwrap_or_else(lablink_core::paths::default_config_path);
-            let checks = match lablink_core::Config::load(&path) {
-                Ok(c) => c.checks_by_id(),
-                // No config at the default location: implicit checks only.
-                Err(lablink_core::config::ConfigError::Io { .. }) if !explicit => {
-                    Default::default()
-                }
-                Err(e) => return Err(Fail::new(exit::USAGE, "invalid_config", e.to_string())),
-            };
+            let (checks, availability) = lablink_doctor::load_config_maps(&path, explicit)
+                .map_err(|e| Fail::new(exit::USAGE, "invalid_config", e))?;
             let opts = lablink_doctor::Options {
                 devices,
                 timeout: Duration::from_secs(timeout),
                 site,
                 all,
+                availability,
+                expect,
             };
             let report = lablink_doctor::run(client, &checks, &opts).map_err(|e| match e {
                 lablink_doctor::DoctorError::Client(c) => Fail::from(c),
@@ -1544,11 +1561,15 @@ fn cmd_ssh(
     user: Option<String>,
     force: (bool, bool),
     quiet: bool,
+    ssh_opts: &[String],
     extra: &[String],
 ) -> R {
     use std::os::unix::process::CommandExt;
+    for o in ssh_opts {
+        lablink_ssh::validate_ssh_opt(o).map_err(|m| Fail::new(exit::USAGE, "bad_request", m))?;
+    }
     let (r, t) = resolve_target(client, device, user, force, false)?;
-    let mut args = build_args(&t, &Mode::Interactive, &[]);
+    let mut args = build_args(&t, &Mode::Interactive, ssh_opts);
     push_remote_command(&mut args, extra);
     if !quiet {
         let who = t
