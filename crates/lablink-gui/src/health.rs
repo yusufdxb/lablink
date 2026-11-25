@@ -131,21 +131,39 @@ pub fn ui(ui: &mut egui::Ui, panel: &DoctorPanel, live: &[DeviceStatus]) -> Opti
             for d in live {
                 let checked = panel.device(&d.id);
                 let id = ui.make_persistent_id(("health", &d.id));
-                let open = checked.is_some_and(|c| c.color != lablink_core::model::Color::Green);
+                let off = checked.is_some_and(|c| c.expected_off);
+                let open = checked.is_some_and(|c| {
+                    !c.expected_off && c.color != lablink_core::model::Color::Green
+                });
                 egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     id,
                     open,
                 )
                 .show_header(ui, |ui| {
-                    dot(ui, crate::theme::state_color(ui, d.color), 6.0);
+                    let live = if off {
+                        crate::view::OFF
+                    } else {
+                        crate::theme::state_color(ui, d.color)
+                    };
+                    dot(ui, live, 6.0);
                     ui.label(
                         RichText::new(format!("{:<12}", d.name))
                             .monospace()
                             .strong(),
                     );
-                    ui.colored_label(crate::theme::state_color(ui, d.color), d.color.as_str());
+                    ui.colored_label(
+                        live,
+                        if off {
+                            lablink_doctor::OFF_LABEL
+                        } else {
+                            d.color.as_str()
+                        },
+                    );
                     match checked {
+                        Some(c) if c.expected_off => {
+                            ui.weak("  checks skipped");
+                        }
                         Some(c) => {
                             ui.weak("  checks");
                             ui.colored_label(
@@ -175,7 +193,7 @@ pub fn ui(ui: &mut egui::Ui, panel: &DoctorPanel, live: &[DeviceStatus]) -> Opti
                             ui.weak("Press Run all checks, or Check.");
                         }
                     }
-                    if d.color != lablink_core::model::Color::Green {
+                    if d.color != lablink_core::model::Color::Green && !off {
                         for r in &d.reasons {
                             ui.colored_label(
                                 crate::theme::level_color(ui, Level::Warn),

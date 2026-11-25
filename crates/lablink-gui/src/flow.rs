@@ -242,6 +242,9 @@ pub struct DoctorRow {
 pub struct DoctorDevice {
     pub name: String,
     pub color: Color,
+    /// Asleep or powered off by plan (`availability: on_demand`): lay it out
+    /// as [`lablink_doctor::OFF_LABEL`] in the off color, not as `color`.
+    pub expected_off: bool,
     pub address: String,
     pub duration_ms: u64,
     pub rows: Vec<DoctorRow>,
@@ -272,6 +275,7 @@ pub fn doctor_device(d: &lablink_doctor::DeviceReport) -> DoctorDevice {
     DoctorDevice {
         name: d.name.clone(),
         color: d.color,
+        expected_off: d.expected_off,
         address: match (&d.ip, &d.via) {
             (Some(ip), Some(g)) => format!("{ip} via {g}"),
             (Some(ip), None) => ip.clone(),
@@ -493,6 +497,8 @@ mod tests {
                 site: "default".into(),
                 away: false,
                 color: Color::Gray,
+                expected_off: false,
+                availability: lablink_doctor::Availability::Always,
                 ip: Some("192.168.50.161".into()),
                 via: Some("jetson-a".into()),
                 checks: vec![c(
@@ -508,6 +514,8 @@ mod tests {
                 site: "default".into(),
                 away: false,
                 color: Color::Yellow,
+                expected_off: false,
+                availability: lablink_doctor::Availability::Always,
                 ip: None,
                 via: None,
                 checks: vec![

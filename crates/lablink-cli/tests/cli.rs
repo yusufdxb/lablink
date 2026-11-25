@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 const FAKE_SSH: &str = r#"#!/bin/sh
 # Fake OpenSSH client for tests: record argv, then run the "remote" command locally.
 printf '%s\n' "$@" > "$FAKE_SSH_ARGS"
+if [ -n "$FAKE_SSH_FAIL" ]; then echo "$FAKE_SSH_FAIL" >&2; exit 255; fi
 case " $* " in
   *" -T "*) for last; do :; done; exec /bin/sh -c "$last" ;;
   *) exit 0 ;;
@@ -821,6 +822,117 @@ fn doctor_runs_read_only_checks_through_the_exec_path() {
     let o = lablink(Some(&e), &["doctor", "--config", c]);
     assert_eq!(code(&o), exit::USAGE);
     assert_eq!(code(&lablink(None, &["doctor"])), exit::DAEMON_UNAVAILABLE);
+}
+
+/// `availability: on_demand` turns a machine that did not answer into
+/// "asleep/off (expected)" (exit 0, never RED); `--expect` and every failure
+/// that is not a no-answer keep it RED.
+#[test]
+fn doctor_reports_an_unreachable_on_demand_device_as_expected_off() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    let cfg = e._dir.path().join("doctor.yaml");
+    let c = cfg.to_str().unwrap();
+    let on_demand = "checks:\n  jetson-a:\n    - disk\n";
+    let doctor = |extra: &[&str], fail: &str| {
+        let mut args = vec!["doctor", "--json", "--config", c];
+        args.extend_from_slice(extra);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lablink"));
+        cmd.args(&args)
+            .env("NO_COLOR", "1")
+            .env("LABLINK_CONFIG", "/nonexistent/lablink/config.yaml")
+            .env("LABLINK_SOCKET", &e.daemon.socket)
+            .env("FAKE_SSH_ARGS", &e.args_file)
+            .env("FAKE_SSH_FAIL", fail);
+        cmd.output().unwrap()
+    };
+    let asleep = "Connection closed by UNKNOWN port 65535";
+
+    // Default `always`: RED, exactly as before.
+    std::fs::write(&cfg, on_demand).unwrap();
+    let o = doctor(&[], asleep);
+    assert_eq!(code(&o), exit::STATUS_RED);
+    let v = json(&o);
+    assert_eq!(v["devices"][0]["color"], "red");
+    assert_eq!(v["devices"][0]["expected_off"], false);
+    assert_eq!(v["devices"][0]["availability"], "always");
+
+    // on_demand + no answer: off, not red, exit 0.
+    // The doctor reads availability from the same --config file.
+    std::fs::write(
+        &cfg,
+        "devices:\n  - name: jetson-a\n    availability: on_demand\n    expected_ips: [10.9.0.31]\nchecks:\n  jetson-a:\n    - disk\n",
+    )
+    .unwrap();
+    for why in [
+        asleep,
+        "ssh: connect to host 10.9.0.31 port 22: Connection timed out",
+        "ssh: connect to host 10.9.0.31 port 22: No route to host",
+    ] {
+        let o = doctor(&[], why);
+        assert_eq!(
+            code(&o),
+            exit::OK,
+            "{why}: {}",
+            String::from_utf8_lossy(&o.stdout)
+        );
+        let v = json(&o);
+        assert_eq!(v["verdict"], "ready");
+        let d = &v["devices"][0];
+        assert_eq!(
+            (
+                d["color"].as_str(),
+                d["expected_off"].as_bool(),
+                d["availability"].as_str()
+            ),
+            (Some("gray"), Some(true), Some("on_demand"))
+        );
+        assert!(d["checks"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("asleep/off (expected): "));
+    }
+    // Human output.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lablink"));
+    cmd.args(["doctor", "--config", c])
+        .env("NO_COLOR", "1")
+        .env("LABLINK_SOCKET", &e.daemon.socket)
+        .env("FAKE_SSH_ARGS", &e.args_file)
+        .env("FAKE_SSH_FAIL", asleep);
+    let o = cmd.output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(code(&o), exit::OK, "{text}");
+    assert!(text.starts_with("LAB READY\n"), "{text}");
+    assert!(
+        text.contains("asleep/off (expected)") && !text.contains("RED"),
+        "{text}"
+    );
+
+    // --expect: it should be up, so it is RED.
+    let o = doctor(&["--expect", "jetson-a"], asleep);
+    assert_eq!(code(&o), exit::STATUS_RED);
+    let d = &json(&o)["devices"][0];
+    assert_eq!(
+        (d["color"].as_str(), d["expected_off"].as_bool()),
+        (Some("red"), Some(false))
+    );
+    // An unknown --expect name is an error.
+    assert_eq!(
+        code(&doctor(&["--expect", "nosuch"], asleep)),
+        exit::DEVICE_NOT_FOUND
+    );
+
+    // Security and answered failures stay RED even for on_demand.
+    for why in [
+        "jetson-a: Permission denied (publickey).",
+        "ssh: connect to host 10.9.0.31 port 22: Connection refused",
+        "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@",
+        "Host key verification failed.",
+    ] {
+        let o = doctor(&[], why);
+        assert_eq!(code(&o), exit::STATUS_RED, "{why}");
+        assert_eq!(json(&o)["devices"][0]["expected_off"], false, "{why}");
+    }
 }
 
 /// `lablink forget` asks first (refuses without a terminal unless --yes),

@@ -481,13 +481,16 @@ fn run_remote(client: &Client, device: &str, command: &str) -> Result<RunResult,
 
 /// Same config loading as `lablink doctor`; reuses the read-only doctor run.
 fn run_doctor(client: &Client, devices: Vec<String>) -> Result<Box<lablink_doctor::Report>, Fail> {
-    let checks = lablink_doctor::load_checks(&lablink_core::paths::default_config_path(), false)
-        .map_err(Fail::msg)?;
+    let (checks, availability) =
+        lablink_doctor::load_config_maps(&lablink_core::paths::default_config_path(), false)
+            .map_err(Fail::msg)?;
     let opts = lablink_doctor::Options {
         devices,
         timeout: Duration::from_secs(25),
         site: None,
         all: false,
+        availability,
+        expect: Vec::new(),
     };
     lablink_doctor::run(client, &checks, &opts)
         .map(Box::new)

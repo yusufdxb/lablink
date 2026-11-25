@@ -1309,7 +1309,11 @@ impl App {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.strong("Doctor");
-                ui.colored_label(crate::theme::state_color(ui, rep.color), rep.color.as_str());
+                if rep.expected_off {
+                    ui.colored_label(crate::view::OFF, lablink_doctor::OFF_LABEL);
+                } else {
+                    ui.colored_label(crate::theme::state_color(ui, rep.color), rep.color.as_str());
+                }
                 ui.weak(format!("{} ms", rep.duration_ms));
             });
             health::check_rows(ui, rep, &name);

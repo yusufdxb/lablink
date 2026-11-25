@@ -11,6 +11,7 @@ pub mod script;
 
 use lablink_core::checks::CheckSpec;
 use lablink_core::client::{Client, ClientError};
+pub use lablink_core::config::Availability;
 use lablink_core::exit;
 use lablink_core::model::{
     Color, DeviceStatus, PortState, ResolveResult, StatusReport, SCHEMA_VERSION,
@@ -65,12 +66,32 @@ pub struct DeviceReport {
     /// The device's site is AWAY: reported, but never counted as a failure.
     #[serde(default)]
     pub away: bool,
+    /// Raw state color. An expected-off device is `gray` here (never red);
+    /// read `expected_off` to tell it from a device that was never located.
     pub color: Color,
+    /// Configured availability (`always` or `on_demand`) after `--expect`.
+    #[serde(default)]
+    pub availability: Availability,
+    /// An `on_demand` device that is asleep or powered off: reported as
+    /// "asleep/off (expected)", never RED, and it does not count toward the
+    /// verdict or the exit code.
+    #[serde(default)]
+    pub expected_off: bool,
     pub ip: Option<String>,
     pub via: Option<String>,
     pub checks: Vec<CheckResult>,
     pub duration_ms: u64,
 }
+
+impl DeviceReport {
+    /// Counts toward the verdict and exit code (not AWAY, not expected off).
+    pub fn counts(&self) -> bool {
+        !self.away && !self.expected_off
+    }
+}
+
+/// The word shown for an expected-off device.
+pub const OFF_LABEL: &str = "asleep/off (expected)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,7 +125,7 @@ impl Report {
     }
 
     /// 0 when ready, else the exit code of the worst device color
-    /// (red > gray > yellow).
+    /// (red > gray > yellow). AWAY and expected-off devices are ignored.
     pub fn exit_code(&self) -> i32 {
         let rank = |c: Color| match c {
             Color::Green => 0,
@@ -115,7 +136,7 @@ impl Report {
         match self
             .devices
             .iter()
-            .filter(|d| !d.away)
+            .filter(|d| d.counts())
             .map(|d| d.color)
             .max_by_key(|c| rank(*c))
         {
@@ -128,7 +149,7 @@ impl Report {
 }
 
 pub fn verdict(devices: &[DeviceReport]) -> Verdict {
-    let here: Vec<&DeviceReport> = devices.iter().filter(|d| !d.away).collect();
+    let here: Vec<&DeviceReport> = devices.iter().filter(|d| d.counts()).collect();
     if here
         .iter()
         .any(|d| matches!(d.color, Color::Red | Color::Gray))
@@ -271,6 +292,27 @@ pub enum Outcome {
     Mismatch(String),
     /// The device (or its gateway) has never been located.
     NotLocated(String),
+    /// The machine did not answer at all (timed out, no route, host down, or
+    /// the gateway had nobody to connect to): what a sleeping or powered-off
+    /// machine looks like. Red unless the device is `on_demand`. Refused
+    /// connections, auth, host-key and identity failures are never this.
+    Unreachable(String),
+}
+
+/// True when ssh's stderr describes a machine that did not answer, as opposed
+/// to one that answered and refused (auth, host key, connection refused).
+pub fn is_unreachable_failure(stderr: &str) -> bool {
+    use lablink_ssh::SshFailure as F;
+    match classify_ssh_failure(stderr) {
+        F::Timeout | F::NoRoute => true,
+        F::Other(_) => {
+            // ProxyJump through an up gateway to a host that is down: the
+            // gateway closes the hop and ssh names no host.
+            stderr.contains("Connection closed by UNKNOWN port 65535")
+                || stderr.contains("Host is down")
+        }
+        _ => false,
+    }
 }
 
 fn result(i: &Item, status: CheckStatus, detail: impl Into<String>) -> CheckResult {
@@ -293,7 +335,7 @@ pub fn finish(items: &[Item], outcome: Outcome) -> (Color, Vec<CheckResult>) {
                 .map(|i| result(i, CheckStatus::Skip, d.clone()))
                 .collect(),
         ),
-        Outcome::Mismatch(d) | Outcome::SessionFailed(d) => {
+        Outcome::Mismatch(d) | Outcome::SessionFailed(d) | Outcome::Unreachable(d) => {
             let out: Vec<CheckResult> = items
                 .iter()
                 .enumerate()
@@ -337,6 +379,12 @@ pub struct Options {
     pub site: Option<String>,
     /// Every site's devices (AWAY sites are listed but never fail the run).
     pub all: bool,
+    /// Configured availability by device id (`site/name`); absent = `always`
+    /// ([`lablink_core::Config::availability_by_id`]).
+    pub availability: BTreeMap<String, Availability>,
+    /// Devices that must be up now (`--expect`): their availability is
+    /// `always` for this run. Names or `site/name`.
+    pub expect: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -421,37 +469,68 @@ pub fn run(
     if selection.is_empty() {
         return Err(DoctorError::NoDevices);
     }
-    let devices: Vec<DeviceReport> = std::thread::scope(|s| {
+    // `--expect`: resolve each name the way the daemon does.
+    let mut expect_ids: Vec<String> = Vec::new();
+    for n in &opts.expect {
+        let r: Result<StatusReport, _> = client.call_typed(&Request::Status {
+            device: Some(n.clone()),
+            site: None,
+            all: false,
+        });
+        match r {
+            Ok(r) if !r.devices.is_empty() => expect_ids.push(r.devices[0].id.clone()),
+            Ok(_) => return Err(DoctorError::UnknownDevice(n.clone())),
+            Err(ClientError::Api(a)) if a.code == ErrorCode::DeviceNotFound => {
+                return Err(DoctorError::UnknownDevice(n.clone()))
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let availability = |id: &str| effective_availability(&opts.availability, &expect_ids, id);
+    let results: Vec<(DeviceReport, bool)> = std::thread::scope(|s| {
         let handles: Vec<_> = selection
             .iter()
             .map(|(id, ds, specs)| {
                 let status = &status;
-                s.spawn(move || check_device(client, status, id, ds.as_ref(), specs, opts.timeout))
+                let avail = availability(id);
+                s.spawn(move || {
+                    check_device(client, status, id, ds.as_ref(), specs, opts.timeout, avail)
+                })
             })
             .collect();
         handles
             .into_iter()
             .zip(&selection)
             .map(|(h, (id, ds, _))| {
-                h.join().unwrap_or_else(|_| DeviceReport {
-                    name: ds.as_ref().map_or_else(|| id.clone(), |d| d.name.clone()),
-                    id: id.clone(),
-                    site: ds.as_ref().map(|d| d.site.clone()).unwrap_or_default(),
-                    away: false,
-                    color: Color::Red,
-                    ip: ds.as_ref().and_then(|d| d.ip.clone()),
-                    via: ds.as_ref().and_then(|d| d.via.clone()),
-                    checks: vec![CheckResult {
-                        id: "ssh".into(),
-                        kind: "ssh".into(),
-                        label: "SSH".into(),
-                        status: CheckStatus::Fail,
-                        detail: "internal error".into(),
-                    }],
-                    duration_ms: 0,
+                h.join().unwrap_or_else(|_| {
+                    (
+                        DeviceReport {
+                            name: ds.as_ref().map_or_else(|| id.clone(), |d| d.name.clone()),
+                            id: id.clone(),
+                            site: ds.as_ref().map(|d| d.site.clone()).unwrap_or_default(),
+                            away: false,
+                            color: Color::Red,
+                            availability: availability(id),
+                            expected_off: false,
+                            ip: ds.as_ref().and_then(|d| d.ip.clone()),
+                            via: ds.as_ref().and_then(|d| d.via.clone()),
+                            checks: vec![CheckResult {
+                                id: "ssh".into(),
+                                kind: "ssh".into(),
+                                label: "SSH".into(),
+                                status: CheckStatus::Fail,
+                                detail: "internal error".into(),
+                            }],
+                            duration_ms: 0,
+                        },
+                        false,
+                    )
                 })
             })
             .collect()
+    });
+    let devices = propagate_gateway_off(results, &availability, &|site, gw| {
+        find_in_site(&status, site, gw).is_some_and(|x| matches!(x.color, Color::Red | Color::Gray))
     });
     let mut report = Report::new(devices);
     report.scope = match (&opts.site, opts.all) {
@@ -477,6 +556,73 @@ pub fn run(
     Ok(report)
 }
 
+/// Configured availability, with `--expect` forcing `always` for this run.
+pub fn effective_availability(
+    configured: &BTreeMap<String, Availability>,
+    expect_ids: &[String],
+    id: &str,
+) -> Availability {
+    if expect_ids.iter().any(|e| e.eq_ignore_ascii_case(id)) {
+        return Availability::Always;
+    }
+    configured
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(id))
+        .map_or(Availability::Always, |(_, a)| *a)
+}
+
+/// Turn a "did not answer" report of an `on_demand` device into an
+/// expected-off report. Only the not-reachable classes get here: security,
+/// auth and check failures never do.
+fn off_report(mut d: DeviceReport, why: &str) -> DeviceReport {
+    d.color = Color::Gray;
+    d.expected_off = true;
+    for (n, c) in d.checks.iter_mut().enumerate() {
+        c.status = CheckStatus::Skip;
+        c.detail = if n == 0 {
+            format!("{OFF_LABEL}: {why}")
+        } else {
+            "no SSH session".into()
+        };
+    }
+    d
+}
+
+/// A device reached through a gateway that is expected off is off too, if
+/// it was itself unreachable: "gateway <name> off (expected)".
+fn propagate_gateway_off(
+    results: Vec<(DeviceReport, bool)>,
+    availability: &dyn Fn(&str) -> Availability,
+    daemon_says_down: &dyn Fn(&str, &str) -> bool,
+) -> Vec<DeviceReport> {
+    let off_ids: Vec<String> = results
+        .iter()
+        .filter(|(d, _)| d.expected_off)
+        .map(|(d, _)| d.id.clone())
+        .collect();
+    let reported: Vec<String> = results.iter().map(|(d, _)| d.id.clone()).collect();
+    results
+        .into_iter()
+        .map(|(d, unreachable)| {
+            let Some(g) = d.via.clone().filter(|_| !d.expected_off && unreachable) else {
+                return d;
+            };
+            let gid = lablink_core::config::device_id(&d.site, &g);
+            let gateway_off = if reported.iter().any(|r| r.eq_ignore_ascii_case(&gid)) {
+                off_ids.iter().any(|r| r.eq_ignore_ascii_case(&gid))
+            } else {
+                // Not part of this run: judge from the daemon's own state.
+                availability(&gid) == Availability::OnDemand && daemon_says_down(&d.site, &g)
+            };
+            if gateway_off {
+                off_report(d, &format!("gateway {g} off (expected)"))
+            } else {
+                d
+            }
+        })
+        .collect()
+}
+
 fn check_device(
     client: &Client,
     status: &StatusReport,
@@ -484,7 +630,8 @@ fn check_device(
     ds: Option<&DeviceStatus>,
     specs: &[CheckSpec],
     timeout: Duration,
-) -> DeviceReport {
+    availability: Availability,
+) -> (DeviceReport, bool) {
     let started = Instant::now();
     let name = ds.map_or(id, |d| d.name.as_str()).to_string();
     let site = ds.map(|d| d.site.clone()).unwrap_or_default();
@@ -515,17 +662,22 @@ fn check_device(
                 ));
             }
             let (color, checks) = finish(&items, Outcome::Ran(BTreeMap::new(), String::new()));
-            return DeviceReport {
-                name,
-                id: id.to_string(),
-                site,
-                away,
-                color,
-                ip: own_ip,
-                via,
-                checks,
-                duration_ms: started.elapsed().as_millis() as u64,
-            };
+            return (
+                DeviceReport {
+                    name,
+                    id: id.to_string(),
+                    site,
+                    away,
+                    color,
+                    availability,
+                    expected_off: false,
+                    ip: own_ip,
+                    via,
+                    checks,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                },
+                false,
+            );
         }
     }
     let outcome = session(
@@ -538,18 +690,31 @@ fn check_device(
         &items,
         timeout,
     );
+    // Only "nobody answered" outcomes can mean off: never a mismatch, an
+    // auth or host-key failure, or a session that ran.
+    let (unreachable, why) = match &outcome {
+        Outcome::Unreachable(d) => (true, d.clone()),
+        Outcome::NotLocated(d) => (ds.is_some_and(|d| d.monitoring), d.clone()),
+        _ => (false, String::new()),
+    };
     let (color, checks) = finish(&items, outcome);
-    DeviceReport {
+    let report = DeviceReport {
         name,
         id: id.to_string(),
         site,
         away,
         color,
+        availability,
+        expected_off: false,
         ip: own_ip,
         via,
         checks,
         duration_ms: started.elapsed().as_millis() as u64,
+    };
+    if unreachable && availability == Availability::OnDemand {
+        return (off_report(report, &why), true);
     }
+    (report, unreachable)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -651,7 +816,11 @@ fn session(
     let why = if out.timed_out {
         format!("timed out after {}s", timeout.as_secs())
     } else if out.exit_code == Some(255) {
-        classify_ssh_failure(&stderr).describe()
+        let why = classify_ssh_failure(&stderr).describe();
+        if is_unreachable_failure(&stderr) {
+            return Outcome::Unreachable(format!("{who}{why}"));
+        }
+        why
     } else if let Some(sig) = out.signal {
         format!("session killed by signal {sig}")
     } else {
@@ -732,6 +901,27 @@ pub fn load_checks(
     match lablink_core::Config::load(path) {
         Ok(c) => Ok(c.checks_by_id()),
         Err(lablink_core::config::ConfigError::Io { .. }) if !explicit => Ok(BTreeMap::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Like [`load_checks`], plus the configured availability by device id.
+#[allow(clippy::type_complexity)]
+pub fn load_config_maps(
+    path: &std::path::Path,
+    explicit: bool,
+) -> Result<
+    (
+        BTreeMap<String, Vec<CheckSpec>>,
+        BTreeMap<String, Availability>,
+    ),
+    String,
+> {
+    match lablink_core::Config::load(path) {
+        Ok(c) => Ok((c.checks_by_id(), c.availability_by_id())),
+        Err(lablink_core::config::ConfigError::Io { .. }) if !explicit => {
+            Ok((BTreeMap::new(), BTreeMap::new()))
+        }
         Err(e) => Err(e.to_string()),
     }
 }
@@ -831,11 +1021,14 @@ pub fn render_human(r: &Report, color: bool) -> String {
     for d in &r.devices {
         let shown = label(d);
         let pad = " ".repeat(name_w.saturating_sub(shown.len()));
-        let word = if d.away { "AWAY" } else { d.color.as_str() };
-        s.push_str(&format!(
-            "{shown}{pad}{}\n",
-            paint(color, color_code(d.color), word)
-        ));
+        let (word, code) = if d.away {
+            ("AWAY", color_code(d.color))
+        } else if d.expected_off {
+            (OFF_LABEL, "34")
+        } else {
+            (d.color.as_str(), color_code(d.color))
+        };
+        s.push_str(&format!("{shown}{pad}{}\n", paint(color, code, word)));
         for c in &d.checks {
             let code = match c.status {
                 CheckStatus::Ok => "32",
@@ -983,6 +1176,8 @@ mod tests {
             site: String::new(),
             away: false,
             color,
+            availability: Availability::Always,
+            expected_off: false,
             ip: None,
             via: None,
             checks: vec![],
@@ -1110,6 +1305,8 @@ mod tests {
                 site: String::new(),
                 away: false,
                 color: Color::Green,
+                availability: Availability::Always,
+                expected_off: false,
                 ip: Some("192.168.10.71".into()),
                 via: None,
                 duration_ms: 812,
@@ -1139,6 +1336,8 @@ mod tests {
                 site: String::new(),
                 away: false,
                 color: Color::Green,
+                availability: Availability::Always,
+                expected_off: false,
                 ip: Some("192.168.50.161".into()),
                 via: Some("jetson-a".into()),
                 duration_ms: 790,
@@ -1156,6 +1355,8 @@ mod tests {
                 site: String::new(),
                 away: false,
                 color: Color::Yellow,
+                availability: Availability::Always,
+                expected_off: false,
                 ip: Some("192.168.10.80".into()),
                 via: None,
                 duration_ms: 640,
@@ -1195,6 +1396,8 @@ mod tests {
             "site",
             "away",
             "color",
+            "availability",
+            "expected_off",
             "ip",
             "via",
             "checks",
@@ -1269,5 +1472,199 @@ mod tests {
             lablink_core::profile::Profile::GpuWorkstation.default_checks()[1].kind(),
             "nvidia_gpu"
         );
+    }
+
+    // ---- expected-off (availability: on_demand) ----
+
+    /// Today's recorded stderr lines (2026-11-25) and the other ssh failures.
+    #[test]
+    fn only_not_answering_failures_are_unreachable() {
+        for s in [
+            // 5080 asleep, via the ds027827 gateway
+            "Connection closed by UNKNOWN port 65535",
+            // orin powered off
+            "ssh: connect to host 192.168.1.2 port 22: Connection timed out",
+            "ssh: connect to host 10.0.0.9 port 22: No route to host",
+            "ssh: connect to host 10.0.0.9 port 22: Network is unreachable",
+            "ssh: connect to host 10.0.0.9 port 22: Host is down",
+        ] {
+            assert!(is_unreachable_failure(s), "{s}");
+        }
+        for s in [
+            // the host answered: never "off"
+            "ssh: connect to host 10.0.0.9 port 22: Connection refused",
+            "lab@10.0.0.9: Permission denied (publickey).",
+            "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@",
+            "Host key verification failed.",
+            "ssh: Could not resolve hostname x: Name or service not known",
+            "Connection closed by 10.0.0.9 port 22",
+            "something else entirely",
+        ] {
+            assert!(!is_unreachable_failure(s), "{s}");
+        }
+    }
+
+    fn failed(name: &str, via: Option<&str>, why: &str, avail: Availability) -> DeviceReport {
+        let mut d = dev(name, Color::Red);
+        d.id = format!("lab/{name}");
+        d.site = "lab".into();
+        d.via = via.map(String::from);
+        d.availability = avail;
+        d.checks = vec![
+            CheckResult {
+                id: "ssh".into(),
+                kind: "ssh".into(),
+                label: "SSH".into(),
+                status: CheckStatus::Fail,
+                detail: why.into(),
+            },
+            CheckResult {
+                id: "disk".into(),
+                kind: "disk".into(),
+                label: "Disk".into(),
+                status: CheckStatus::Skip,
+                detail: "no SSH session".into(),
+            },
+        ];
+        d
+    }
+
+    #[test]
+    fn off_report_is_never_red_and_keeps_the_reason() {
+        let d = off_report(
+            failed("5080", None, "connection timed out", Availability::OnDemand),
+            "connection timed out",
+        );
+        assert!(d.expected_off);
+        assert_eq!(d.color, Color::Gray);
+        assert_eq!(
+            d.checks[0].detail,
+            "asleep/off (expected): connection timed out"
+        );
+        assert!(d.checks.iter().all(|c| c.status == CheckStatus::Skip));
+        assert!(!d.counts());
+    }
+
+    #[test]
+    fn off_devices_do_not_change_verdict_or_exit_code() {
+        let green = dev("a", Color::Green);
+        let off = off_report(failed("5080", None, "x", Availability::OnDemand), "x");
+        let r = Report::new(vec![green.clone(), off.clone()]);
+        assert_eq!((r.verdict, r.exit_code()), (Verdict::Ready, exit::OK));
+        // Only off devices: still ready, exit 0 (nothing that should be up is down).
+        let r = Report::new(vec![off.clone()]);
+        assert_eq!((r.verdict, r.exit_code()), (Verdict::Ready, exit::OK));
+        // A real failure still wins, and a plain red device still counts.
+        let red = failed("orin", None, "connection timed out", Availability::Always);
+        let r = Report::new(vec![green.clone(), off.clone(), red]);
+        assert_eq!(
+            (r.verdict, r.exit_code()),
+            (Verdict::NotReady, exit::STATUS_RED)
+        );
+        let r = Report::new(vec![dev("y", Color::Yellow), off]);
+        assert_eq!(
+            (r.verdict, r.exit_code()),
+            (Verdict::Degraded, exit::STATUS_YELLOW)
+        );
+    }
+
+    #[test]
+    fn expect_makes_an_on_demand_device_always() {
+        let mut cfg = BTreeMap::new();
+        cfg.insert("lab/5080".to_string(), Availability::OnDemand);
+        cfg.insert("lab/orin".to_string(), Availability::OnDemand);
+        let eff = |expect: &[&str], id: &str| {
+            let e: Vec<String> = expect.iter().map(|s| s.to_string()).collect();
+            effective_availability(&cfg, &e, id)
+        };
+        assert_eq!(eff(&[], "lab/5080"), Availability::OnDemand);
+        assert_eq!(eff(&["lab/5080"], "lab/5080"), Availability::Always);
+        assert_eq!(eff(&["LAB/5080"], "lab/5080"), Availability::Always);
+        assert_eq!(eff(&["lab/5080"], "lab/orin"), Availability::OnDemand);
+        assert_eq!(eff(&[], "lab/go2"), Availability::Always);
+    }
+
+    #[test]
+    fn a_device_behind_an_off_gateway_is_off_too() {
+        let orin = off_report(
+            failed("orin", None, "connection timed out", Availability::OnDemand),
+            "connection timed out",
+        );
+        let go2 = failed("go2", Some("orin"), "x", Availability::Always);
+        let never = |_: &str, _: &str| false;
+        let on_demand = |_: &str| Availability::OnDemand;
+        let out = propagate_gateway_off(
+            vec![(orin.clone(), true), (go2.clone(), true)],
+            &on_demand,
+            &never,
+        );
+        let go2o = out.iter().find(|d| d.name == "go2").unwrap();
+        assert!(go2o.expected_off);
+        assert_eq!(go2o.color, Color::Gray);
+        assert_eq!(
+            go2o.checks[0].detail,
+            "asleep/off (expected): gateway orin off (expected)"
+        );
+        // The gateway was expected (--expect orin): it is red, so go2 is not off.
+        let orin_red = failed("orin", None, "connection timed out", Availability::Always);
+        let out = propagate_gateway_off(
+            vec![(orin_red, true), (go2.clone(), true)],
+            &on_demand,
+            &never,
+        );
+        assert!(out.iter().all(|d| !d.expected_off));
+        // A go2 that failed a real check (reachable, not a no-answer): untouched.
+        let out = propagate_gateway_off(
+            vec![(orin.clone(), true), (go2.clone(), false)],
+            &on_demand,
+            &never,
+        );
+        assert!(!out.iter().find(|d| d.name == "go2").unwrap().expected_off);
+        // Gateway not in this run: the daemon's state decides, only if on_demand.
+        let down = |_: &str, _: &str| true;
+        let out = propagate_gateway_off(vec![(go2.clone(), true)], &on_demand, &down);
+        assert!(out[0].expected_off);
+        let always = |_: &str| Availability::Always;
+        let out = propagate_gateway_off(vec![(go2, true)], &always, &down);
+        assert!(!out[0].expected_off);
+    }
+
+    #[test]
+    fn unreachable_outcome_is_red_unless_the_device_is_on_demand() {
+        let items = plan(&[], true, None, None, &|_| None);
+        let (color, checks) = finish(&items, Outcome::Unreachable("connection timed out".into()));
+        assert_eq!(color, Color::Red);
+        assert_eq!(checks[0].status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn human_report_names_the_off_state_and_json_has_the_flag() {
+        let off = off_report(
+            failed("5080", None, "connection timed out", Availability::OnDemand),
+            "connection timed out",
+        );
+        let r = Report::new(vec![dev("a", Color::Green), off]);
+        let h = render_human(&r, false);
+        assert!(h.starts_with("LAB READY\n"), "{h}");
+        assert!(
+            h.contains("5080") && h.contains("asleep/off (expected)"),
+            "{h}"
+        );
+        assert!(!h.contains("RED"), "{h}");
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        let d = &v["devices"][1];
+        assert_eq!(d["expected_off"], true);
+        assert_eq!(d["availability"], "on_demand");
+        assert_eq!(d["color"], "gray");
+        assert_eq!(v["devices"][0]["expected_off"], false);
+        assert_eq!(v["schema_version"], 1);
+        // Older reports without the new fields still parse.
+        let mut old = v.clone();
+        for d in old["devices"].as_array_mut().unwrap() {
+            d.as_object_mut().unwrap().remove("expected_off");
+            d.as_object_mut().unwrap().remove("availability");
+        }
+        let back: Report = serde_json::from_value(old).unwrap();
+        assert!(back.devices.iter().all(|d| !d.expected_off));
     }
 }
