@@ -16,7 +16,7 @@ use lablink_core::client::{Client, ClientError};
 use lablink_core::exit;
 use lablink_core::model::*;
 use lablink_core::protocol::{DeviceChanges, ErrorCode, Request};
-use lablink_ssh::{build_args, Mode, OutputMode, Target};
+use lablink_ssh::{build_args, push_remote_command, Mode, OutputMode, Target};
 use serde_json::json;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -132,7 +132,9 @@ enum Cmd {
         /// Do not print the connection line.
         #[arg(long, short)]
         quiet: bool,
-        /// Extra arguments passed to ssh after `--` (cannot override host-key checking).
+        /// Remote command, after `--`: `lablink ssh DEV -- ls -la`. One word is
+        /// a command line, several words are quoted one by one. Never read as
+        /// ssh options (use `~/.ssh/config` or `lablink exec` for those).
         #[arg(last = true)]
         ssh_args: Vec<String>,
     },
@@ -1540,7 +1542,8 @@ fn cmd_ssh(
 ) -> R {
     use std::os::unix::process::CommandExt;
     let (r, t) = resolve_target(client, device, user, force, false)?;
-    let args = build_args(&t, &Mode::Interactive, extra);
+    let mut args = build_args(&t, &Mode::Interactive, &[]);
+    push_remote_command(&mut args, extra);
     if !quiet {
         let who = t
             .username
