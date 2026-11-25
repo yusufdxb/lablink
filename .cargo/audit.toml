@@ -1,3 +1,5 @@
 [advisories]
 # Unmaintained notice only (no vulnerability): zvariant/zbus_names were merged into zbus 6. Reached only through eframe -> accesskit (Linux screen-reader support); the newest accesskit_unix (0.24.1) still requires zbus 5, so no upgrade exists. Revisit when accesskit moves to zbus 6.
-ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372"]
+# RUSTSEC-2026-0543 (chrono unmaintained) and RUSTSEC-2026-0486 (rustix xattr, not reachable: we call libc::lgetxattr directly):
+# temporary, remove in 0.4.4. https://github.com/yusufdxb/lablink/issues/46
+ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372", "RUSTSEC-2026-0543", "RUSTSEC-2026-0486"]
