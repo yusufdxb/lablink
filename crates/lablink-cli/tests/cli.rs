@@ -590,6 +590,77 @@ fn ssh_remote_args_that_look_like_options_or_hosts_are_inert() {
 }
 
 #[test]
+fn ssh_opt_goes_before_the_host_and_cannot_weaken_pinning() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    let o = lablink(
+        Some(&e),
+        &[
+            "ssh",
+            "-q",
+            "--ssh-opt=-N",
+            "--ssh-opt=-oExitOnForwardFailure=yes",
+            "--ssh-opt=-L8765:127.0.0.1:8765",
+            "--ssh-opt=-oStrictHostKeyChecking=no",
+            "jetson-a",
+            "--",
+            "ls",
+            "-la",
+        ],
+    );
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    let a = recorded_args(&e);
+    let dd = a.iter().position(|x| x == "--").unwrap();
+    assert_eq!(a[dd + 1], "jetson-a", "{a:?}");
+    for w in ["-N", "-oExitOnForwardFailure=yes", "-L8765:127.0.0.1:8765"] {
+        let i = a
+            .iter()
+            .position(|x| x == w)
+            .unwrap_or_else(|| panic!("{w} missing: {a:?}"));
+        assert!(i < dd, "{w} must precede the host: {a:?}");
+    }
+    let strict = a
+        .iter()
+        .position(|x| x == "StrictHostKeyChecking=yes")
+        .unwrap();
+    let weak = a
+        .iter()
+        .position(|x| x == "-oStrictHostKeyChecking=no")
+        .unwrap();
+    assert!(strict < weak, "user options cannot weaken pinning: {a:?}");
+    assert_eq!(
+        &a[dd + 2..],
+        ["'ls' '-la'"],
+        "remote command stays after the host"
+    );
+}
+
+#[test]
+fn ssh_opt_rejects_values_that_are_not_one_option_token() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    for bad in ["ls", "--", "-", "-o", "-L", "-J", "", "-N\nx"] {
+        let arg = format!("--ssh-opt={bad}");
+        let o = lablink(Some(&e), &["ssh", "-q", &arg, "jetson-a"]);
+        assert_eq!(
+            code(&o),
+            exit::USAGE,
+            "{bad:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("one ssh option"),
+            "{bad:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    assert!(
+        !e.args_file.exists(),
+        "ssh must not run for a refused option"
+    );
+}
+
+#[test]
 fn offline_and_mismatch_are_refused_before_ssh_runs() {
     let e = setup("");
     wait_color(&e, "jetson-a", "green");
