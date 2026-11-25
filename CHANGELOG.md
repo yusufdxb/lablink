@@ -39,6 +39,14 @@ All notable changes are listed here. The format follows
 - "lablinkd is not running" errors from the CLI and the desktop app now
   include the service state and the daemon's last message.
 
+### Known issues
+
+- Two dependency advisories are temporarily ignored in `deny.toml` and the
+  cargo audit configuration: RUSTSEC-2026-0543 (chrono unmaintained) and
+  RUSTSEC-2026-0486 (rustix xattr, not reachable). Both were already present
+  in 0.4.2. Tracked in
+  [#46](https://github.com/yusufdxb/lablink/issues/46) for 0.4.4.
+
 ## [0.4.2] - 2026-11-04
 
 Makes upgrading one command. Configuration and state are unchanged; the
