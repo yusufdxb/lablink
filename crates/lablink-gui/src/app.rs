@@ -121,6 +121,9 @@ pub struct App {
     files: Files,
     worker: Worker,
     rx: Receiver<Event>,
+    ctx: egui::Context,
+    terminal_tx: std::sync::mpsc::Sender<(bool, String)>,
+    terminal_rx: Receiver<(bool, String)>,
     socket: PathBuf,
     config_path: PathBuf,
     tab: Tab,
@@ -196,7 +199,11 @@ impl App {
         let (worker, rx) = Worker::spawn(socket.clone(), cc.egui_ctx.clone());
         let wizard = lablink_setup::init::needs_setup(&config_path)
             .then(|| Wizard::new(config_path.clone(), socket.clone()));
+        let (terminal_tx, terminal_rx) = std::sync::mpsc::channel();
         Self {
+            ctx: cc.egui_ctx.clone(),
+            terminal_tx,
+            terminal_rx,
             files: Files::new(socket.clone(), cc.egui_ctx.clone()),
             worker,
             rx,
@@ -311,16 +318,25 @@ impl App {
         self.worker.send(Cmd::TrustPreview(device.to_string()));
     }
 
+    /// Launch the terminal off the UI thread (the launch is judged for up to
+    /// a second or two); the outcome arrives in `terminal_rx` and becomes the
+    /// notice, so a refused launch is shown instead of silent.
     fn open_terminal(&mut self, args: &[&str]) {
-        self.notice = Some(
-            match term::open_lablink_in_terminal(args, self.terminal.as_deref()) {
-                Ok(t) => (
-                    true,
-                    format!("opened {t} running lablink {}", args.join(" ")),
-                ),
-                Err(e) => (false, e),
-            },
-        );
+        let shown = args.join(" ");
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let preferred = self.terminal.clone();
+        let tx = self.terminal_tx.clone();
+        let ctx = self.ctx.clone();
+        self.notice = Some((true, format!("opening a terminal for lablink {shown}...")));
+        std::thread::spawn(move || {
+            let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+            let outcome = match term::open_lablink_in_terminal(&refs, preferred.as_deref()) {
+                Ok(t) => (true, format!("opened {t} running lablink {shown}")),
+                Err(e) => (false, format!("could not open a terminal: {e}")),
+            };
+            let _ = tx.send(outcome);
+            ctx.request_repaint();
+        });
     }
 
     fn apply_changes(&mut self, device: &str, changes: DeviceChanges) {
@@ -331,6 +347,9 @@ impl App {
     }
 
     fn drain_events(&mut self) {
+        while let Ok(outcome) = self.terminal_rx.try_recv() {
+            self.notice = Some(outcome);
+        }
         while let Ok(ev) = self.rx.try_recv() {
             self.handle(ev);
         }

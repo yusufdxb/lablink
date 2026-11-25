@@ -327,6 +327,33 @@ pub fn build_args(t: &Target, mode: &Mode, extra: &[String]) -> Vec<String> {
     a
 }
 
+/// Append a user-supplied remote command to an argv that already ends with
+/// `-- <host>`. Everything lands after the destination, so none of it can be
+/// read by the local ssh as an option or as the host (the `--` before the host
+/// ends option parsing, which OpenSSH keeps doing after the host otherwise).
+///
+/// One word is a command line for the remote shell (`'echo hi'`, like
+/// `lablink exec`). Several words are an argument vector: ssh joins its
+/// arguments with spaces for the remote shell, so each is single-quoted here
+/// and survives as exactly one word.
+pub fn push_remote_command(args: &mut Vec<String>, words: &[String]) {
+    match words {
+        [] => {}
+        [one] => args.push(one.clone()),
+        many => args.push(
+            many.iter()
+                .map(|w| shell_word(w))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+    }
+}
+
+/// `w` as one POSIX shell word.
+fn shell_word(w: &str) -> String {
+    format!("'{}'", w.replace('\'', "'\\''"))
+}
+
 /// The master connection path for a pinned device: a socket in `dir` (a
 /// private directory of LabLink's) named after the device's alias and pins,
 /// then ssh's `%C` (local host, address, port, user). Only ssh started by
@@ -752,6 +779,73 @@ mod tests {
         a.iter()
             .position(|x| x == s)
             .unwrap_or_else(|| panic!("{s} missing from {a:?}"))
+    }
+
+    #[test]
+    fn remote_command_goes_after_the_host_and_is_quoted_per_word() {
+        let mut a = build_args(&target(true), &Mode::Interactive, &[]);
+        let host = a.len() - 1;
+        let words: Vec<String> = [
+            "printf",
+            "%s\\n",
+            "a b",
+            "it's",
+            "",
+            "-oProxyCommand=x",
+            "-J",
+            "h",
+            "u@h",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        push_remote_command(&mut a, &words);
+        assert_eq!(a[host], "jetson-a");
+        assert_eq!(a[host - 1], "--");
+        assert_eq!(a.len(), host + 2, "one remote word after the host: {a:?}");
+        assert_eq!(
+            a[host + 1],
+            "'printf' '%s\\n' 'a b' 'it'\\''s' '' '-oProxyCommand=x' '-J' 'h' 'u@h'"
+        );
+        // Nothing user-supplied appears before the host.
+        assert!(!a[..host]
+            .iter()
+            .any(|x| x.contains("ProxyCommand=x") || x == "-J"));
+    }
+
+    #[test]
+    fn single_remote_word_is_a_command_line_and_none_adds_nothing() {
+        let base = build_args(&target(false), &Mode::Interactive, &[]);
+        let mut a = base.clone();
+        push_remote_command(&mut a, &[]);
+        assert_eq!(a, base);
+        push_remote_command(&mut a, &["-v".to_string()]);
+        assert_eq!(&a[a.len() - 2..], ["jetson-a", "-v"]);
+    }
+
+    #[test]
+    fn real_ssh_reads_nothing_after_the_host_as_an_option() {
+        // `ssh -G` parses a command line without connecting. A hostile word
+        // after `-- host` must stay a command, not become a ProxyCommand.
+        let out = std::process::Command::new("ssh")
+            .args([
+                "-F",
+                "/dev/null",
+                "-G",
+                "--",
+                "jetson-a",
+                "-oProxyCommand=evil",
+                "-J",
+                "evil",
+            ])
+            .output();
+        let Ok(out) = out else { return };
+        if !out.status.success() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.contains("evil"), "{text}");
+        assert!(text.contains("hostname jetson-a"), "{text}");
     }
 
     #[test]

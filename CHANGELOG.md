@@ -28,6 +28,16 @@ All notable changes are listed here. The format follows
   before. A config that uses `availability` needs 0.4.4 on the CLI, daemon
   and app (older builds reject the unknown key).
 
+### Security
+
+- Fixes RUSTSEC-2026-0486 (rustix xattr with a zero-length buffer): rustix
+  1.1.5 to 1.1.6. LabLink's own code did not reach the affected functions.
+- Fixes RUSTSEC-2026-0543 (chrono unmaintained): russh-sftp 3.0.1 to 4.0.0
+  (which uses jiff) and the desktop app's file-date formatting moved from
+  chrono to jiff, so chrono is no longer in the dependency tree. The
+  temporary ignores for both advisories are removed from `deny.toml` and the
+  cargo audit configuration ([#46](https://github.com/yusufdxb/lablink/issues/46)).
+
 ## [0.4.3] - 2026-11-25
 
 ### Added

@@ -3,10 +3,13 @@
 //!
 //! This is the documented fallback instead of an embedded PTY terminal.
 
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// Terminal emulators tried after the preference and `$TERMINAL`, in order.
 const CANDIDATES: [&str; 7] = [
@@ -113,10 +116,28 @@ fn trusted_executable(p: &Path) -> Result<PathBuf, String> {
         .map_err(|why| format!("not running {}: {why}", p.display()))
 }
 
+/// GNOME Terminal routing variables. A terminal screen exports them to its
+/// children; if LabLink was started from one that has since closed, they point
+/// at a screen that no longer exists and GNOME Terminal refuses to open a
+/// window ("Failed to get screen from object path ..."), while still exiting 0.
+/// A new terminal must not be tied to the screen that launched LabLink.
+const STALE_TERMINAL_ENV: [&str; 2] = ["GNOME_TERMINAL_SCREEN", "GNOME_TERMINAL_SERVICE"];
+
+/// How long a launcher gets to fail before the launch counts as successful.
+/// GNOME Terminal's client reports a rejected request within milliseconds;
+/// emulators that stay in the foreground are still running when this ends.
+const LAUNCH_GRACE: Duration = Duration::from_millis(1500);
+
+/// Longest diagnostic kept from the launcher's stderr.
+const DIAGNOSTIC_MAX: u64 = 4096;
+
 /// Spawn a detached terminal running `lablink <args...>`, for commands that
 /// talk to the user (for example `copy-id`, which may ask for the device
 /// password there; the GUI never sees it). Returns the terminal used; the
-/// preference from Settings wins over `$TERMINAL`.
+/// preference from Settings wins over `$TERMINAL`. Waits up to
+/// [`LAUNCH_GRACE`], so call it off the UI thread. A launcher that exits
+/// non-zero, or that reports an error on stderr, is an `Err` carrying its
+/// diagnostic.
 pub fn open_lablink_in_terminal(
     lablink_args: &[&str],
     preferred: Option<&str>,
@@ -129,21 +150,76 @@ pub fn open_lablink_in_terminal(
         "no terminal emulator found (choose one in Settings, set $TERMINAL, or install gnome-terminal, konsole or xterm)"
             .to_string()
     })?;
-    let (program, args) = terminal_command(&found, &lablink_binary()?, lablink_args);
-    let mut child = lablink_core::program::command(&program)
-        .map_err(|e| format!("failed to start {program}: {e}"))?
+    launch(&found, &lablink_binary()?, lablink_args, LAUNCH_GRACE)
+}
+
+/// Run terminal `found` with `<lablink> <args...>` and judge the launch.
+fn launch(
+    found: &str,
+    lablink: &Path,
+    lablink_args: &[&str],
+    grace: Duration,
+) -> Result<String, String> {
+    let (program, args) = terminal_command(found, lablink, lablink_args);
+    let mut command = lablink_core::program::command(&program)
+        .map_err(|e| format!("failed to start {program}: {e}"))?;
+    for var in STALE_TERMINAL_ENV {
+        command.env_remove(var);
+    }
+    let mut child = command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
         .map_err(|e| format!("failed to start {program}: {e}"))?;
-    // Reap the child when it exits so it does not linger as a zombie.
+    let mut stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel();
+    // This thread also reaps the child when it exits, so it does not linger
+    // as a zombie, and keeps draining stderr so the terminal never blocks.
     std::thread::spawn(move || {
-        let _ = child.wait();
+        let mut text = Vec::new();
+        if let Some(e) = stderr.as_mut() {
+            let _ = e.by_ref().take(DIAGNOSTIC_MAX).read_to_end(&mut text);
+            let _ = std::io::copy(e, &mut std::io::sink());
+        }
+        let status = child.wait();
+        let _ = tx.send((status, String::from_utf8_lossy(&text).into_owned()));
     });
-    Ok(program)
+    match rx.recv_timeout(grace) {
+        // Still running (or still talking to its server): it opened.
+        Err(_) => Ok(program),
+        Ok((status, text)) => judge_exit(&program, status, &text).map(|()| program),
+    }
+}
+
+/// A launcher that exited inside the grace period failed if it said so by
+/// exit status, or (GNOME Terminal exits 0) by an error line on stderr.
+fn judge_exit(
+    program: &str,
+    status: std::io::Result<std::process::ExitStatus>,
+    stderr: &str,
+) -> Result<(), String> {
+    let text = stderr.trim();
+    let reported = text.to_ascii_lowercase().contains("error");
+    let failed = match &status {
+        Ok(s) => !s.success() || reported,
+        Err(_) => true,
+    };
+    if !failed {
+        return Ok(());
+    }
+    let how = match &status {
+        Ok(s) if !s.success() => format!("{program} exited with {s}"),
+        Ok(_) => format!("{program} did not open a window"),
+        Err(e) => format!("could not wait for {program}: {e}"),
+    };
+    Err(if text.is_empty() {
+        how
+    } else {
+        format!("{how}: {}", text.trim_start_matches(['#', ' ']))
+    })
 }
 
 #[cfg(test)]
@@ -269,6 +345,90 @@ mod tests {
         if let Ok(p) = lablink_binary() {
             assert!(p.is_absolute(), "{}", p.display());
         }
+    }
+
+    /// A fake terminal on disk that records its environment and prints `msg`
+    /// to stderr, then exits with `code`.
+    fn fake_terminal(dir: &Path, msg: &str, code: i32) -> (PathBuf, PathBuf) {
+        let out = dir.join("env.txt");
+        let bin = dir.join("gnome-terminal");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nenv > '{}'\nprintf '%s\\n' '{msg}' >&2\nexit {code}\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, out)
+    }
+
+    /// Issue #28: stale GNOME Terminal routing variables inherited from the
+    /// parent are never passed to the new terminal.
+    #[test]
+    fn stale_gnome_terminal_environment_is_not_passed_on() {
+        let d = tempfile::tempdir().unwrap();
+        let (bin, out) = fake_terminal(d.path(), "", 0);
+        std::env::set_var("GNOME_TERMINAL_SCREEN", "/org/gnome/Terminal/screen/stale");
+        std::env::set_var("GNOME_TERMINAL_SERVICE", ":1.999");
+        let got = launch(
+            bin.to_str().unwrap(),
+            Path::new("/bin/true"),
+            &["ssh", "jetson-a"],
+            Duration::from_secs(5),
+        );
+        assert!(got.is_ok(), "{got:?}");
+        let env = std::fs::read_to_string(out).unwrap();
+        assert!(!env.contains("GNOME_TERMINAL_SCREEN"), "{env}");
+        assert!(!env.contains("GNOME_TERMINAL_SERVICE"), "{env}");
+        assert!(env.contains("PATH="), "other variables are kept");
+    }
+
+    /// Issue #28: GNOME Terminal rejects the request but exits 0; the error
+    /// text still reaches the caller (the GUI shows it).
+    #[test]
+    fn a_rejected_launch_is_an_error_with_the_diagnostic() {
+        let d = tempfile::tempdir().unwrap();
+        let msg = "# Error creating terminal: Failed to get screen from object path /org/gnome/Terminal/screen/x";
+        let (bin, _) = fake_terminal(d.path(), msg, 0);
+        let err = launch(
+            bin.to_str().unwrap(),
+            Path::new("/bin/true"),
+            &[],
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Failed to get screen from object path"),
+            "{err}"
+        );
+        // A non-zero exit is an error too, even with no output.
+        let (bin, _) = fake_terminal(d.path(), "", 3);
+        let err = launch(
+            bin.to_str().unwrap(),
+            Path::new("/bin/true"),
+            &[],
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(err.contains("exited with"), "{err}");
+    }
+
+    /// A terminal that keeps running past the grace period opened fine.
+    #[test]
+    fn a_running_terminal_counts_as_opened() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("xterm");
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 3\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let got = launch(
+            bin.to_str().unwrap(),
+            Path::new("/bin/true"),
+            &[],
+            Duration::from_millis(300),
+        );
+        assert_eq!(got.unwrap(), bin.to_str().unwrap());
     }
 
     #[test]

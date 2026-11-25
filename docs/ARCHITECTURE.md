@@ -279,7 +279,7 @@ ssh -o HostName=<current ip> -o Port=<port>
      -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes
      -o UpdateHostKeys=no -o CheckHostIP=no]          # only when pinned
     [-o BatchMode=yes -o ConnectTimeout=N -T -n]       # exec only
-    [-l <user>] [-o <config ssh.options>] [<user extras>] -- <ssh_host> [CMD]
+    [-l <user>] [-o <config ssh.options>] -- <ssh_host> [CMD]   # `lablink ssh DEV -- ARGS`: ARGS are CMD
 ```
 
 - `ssh_host` defaults to the logical name and can name a `Host` block in

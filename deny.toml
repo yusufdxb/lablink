@@ -11,9 +11,6 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "Unmaintained notice only (no vulnerability): zvariant/zbus_names were merged into zbus 6. Reached only through eframe -> accesskit (Linux screen-reader support); the newest accesskit_unix (0.24.1) still requires zbus 5, so no upgrade exists. Revisit when accesskit moves to zbus 6." },
     { id = "RUSTSEC-2026-0371", reason = "Unmaintained notice only (no vulnerability): zvariant/zbus_names were merged into zbus 6. Reached only through eframe -> accesskit (Linux screen-reader support); the newest accesskit_unix (0.24.1) still requires zbus 5, so no upgrade exists. Revisit when accesskit moves to zbus 6." },
     { id = "RUSTSEC-2026-0372", reason = "Unmaintained notice only (no vulnerability): zvariant/zbus_names were merged into zbus 6. Reached only through eframe -> accesskit (Linux screen-reader support); the newest accesskit_unix (0.24.1) still requires zbus 5, so no upgrade exists. Revisit when accesskit moves to zbus 6." },
-    # Temporary: remove in 0.4.4 (https://github.com/yusufdxb/lablink/issues/46).
-    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (informational, no vulnerability); reached via lablink-gui and russh-sftp. Temporary: remove in 0.4.4. https://github.com/yusufdxb/lablink/issues/46" },
-    { id = "RUSTSEC-2026-0486", reason = "rustix 1.1.5 unsound xattr with a zero-length buffer; not reachable: lablink calls libc::lgetxattr directly and no rustix dependent in the tree calls rustix xattr. Temporary: remove in 0.4.4. https://github.com/yusufdxb/lablink/issues/46" },
 ]
 
 [licenses]

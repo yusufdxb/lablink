@@ -1436,9 +1436,11 @@ fn browser_ui(
                             );
                             let date = entry
                                 .modified
-                                .and_then(|s| chrono::DateTime::from_timestamp(s as i64, 0))
-                                .map(|d| {
-                                    d.format(if compact {
+                                .and_then(|s| {
+                                    jiff::Timestamp::from_second(i64::try_from(s).ok()?).ok()
+                                })
+                                .map(|t| {
+                                    t.strftime(if compact {
                                         "%m-%d %H:%M"
                                     } else {
                                         "%Y-%m-%d %H:%M"
