@@ -14,7 +14,7 @@ lablink-core.workspace = true
 lablink-ssh.workspace = true
 tokio = { workspace = true, features = ["rt", "process", "io-util", "time", "sync", "macros"] }
 tokio-util.workspace = true
-russh-sftp = "=3.0.1"
+russh-sftp = "=4.0.0"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 serde.workspace = true
