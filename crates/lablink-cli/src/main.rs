@@ -147,7 +147,8 @@ enum Cmd {
     /// Run one command on a device; the remote exit code is preserved.
     Exec {
         device: String,
-        /// Command line, interpreted by the remote login shell.
+        /// Command line, interpreted by the remote login shell. Input piped
+        /// into `lablink exec` (stdin not a terminal) reaches the command.
         command: String,
         #[arg(long, short = 'l')]
         user: Option<String>,
@@ -160,6 +161,10 @@ enum Cmd {
         /// Allow password/passphrase prompts on this terminal (disables BatchMode).
         #[arg(long)]
         interactive_auth: bool,
+        /// Never pass stdin to the command (as `ssh -n`), e.g. inside a
+        /// `while read` loop.
+        #[arg(long, short = 'n')]
+        no_stdin: bool,
         /// Try even if the device is currently offline.
         #[arg(long)]
         force: bool,
@@ -1047,6 +1052,7 @@ fn run(cmd: Cmd, client: &Client) -> R {
             timeout,
             json,
             interactive_auth,
+            no_stdin,
             force,
             unpinned,
         } => cmd_exec(
@@ -1056,7 +1062,7 @@ fn run(cmd: Cmd, client: &Client) -> R {
             user,
             timeout,
             json,
-            interactive_auth,
+            (interactive_auth, no_stdin),
             (force, unpinned),
         ),
         Cmd::Trust {
@@ -1598,7 +1604,7 @@ fn cmd_exec(
     user: Option<String>,
     timeout: u64,
     json: bool,
-    interactive: bool,
+    (interactive, no_stdin): (bool, bool),
     force: (bool, bool),
 ) -> R {
     if timeout == 0 {
@@ -1616,7 +1622,7 @@ fn cmd_exec(
         ));
     }
     let (r, t) = resolve_target(client, device, user, force, !interactive)?;
-    let args = build_args(
+    let mut args = build_args(
         &t,
         &Mode::Exec {
             command: command.into(),
@@ -1624,10 +1630,16 @@ fn cmd_exec(
         },
         &[],
     );
-    let mode = if json {
-        OutputMode::Capture
-    } else {
-        OutputMode::InheritAndCaptureStderr
+    // Piped input (`printf ... | lablink exec dev 'sudo -S ...'`) goes to
+    // the remote command; a terminal or --no-stdin keeps ssh's -n.
+    let piped = !no_stdin && !std::io::stdin().is_terminal();
+    if piped {
+        lablink_ssh::forward_stdin(&mut args);
+    }
+    let mode = match (json, piped) {
+        (true, true) => OutputMode::CaptureWithStdin,
+        (true, false) => OutputMode::Capture,
+        (false, _) => OutputMode::InheritAndCaptureStderr,
     };
     let out = lablink_ssh::run_captured_interruptible(
         &t.binary,

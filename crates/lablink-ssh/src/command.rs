@@ -179,6 +179,16 @@ fn opt(args: &mut Vec<String>, k: &str, v: impl AsRef<str>) {
     args.push(format!("{k}={}", v.as_ref()));
 }
 
+/// Let an exec argument vector (from [`build_args`] with [`Mode::Exec`])
+/// pass the caller's stdin to the remote command: drops ssh's `-n`, which
+/// only ever appears among LabLink's options before the `--` separator.
+pub fn forward_stdin(args: &mut Vec<String>) {
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(i) = args[..end].iter().position(|a| a == "-n") {
+        args.remove(i);
+    }
+}
+
 /// Build the argument vector (excluding the binary). `extra` are additional
 /// user-supplied ssh options; they come after LabLink's options and therefore
 /// cannot override them.
@@ -950,6 +960,23 @@ mod tests {
         assert_eq!(a.last().unwrap(), "uname -a; echo 'x y'");
         assert_eq!(a[a.len() - 2], "jetson-a");
         assert_eq!(a[a.len() - 3], "--");
+    }
+
+    #[test]
+    fn forward_stdin_drops_only_lablinks_dash_n() {
+        let mut a = build_args(
+            &target(false),
+            &Mode::Exec {
+                command: "cat -n".into(),
+                batch: true,
+            },
+            &[],
+        );
+        forward_stdin(&mut a);
+        let sep = a.iter().position(|x| x == "--").unwrap();
+        assert!(!a[..sep].contains(&"-n".to_string()), "{a:?}");
+        assert!(a.contains(&"-T".to_string()));
+        assert_eq!(a.last().unwrap(), "cat -n", "remote command untouched");
     }
 
     #[test]

@@ -23,9 +23,9 @@ pub mod proof;
 pub mod run;
 
 pub use command::{
-    automated_session_args, build_args, control_path, copy_id_args, proxy_command_through,
-    proxy_command_through_files, push_remote_command, scp_args, shell_quote, validate_ssh_opt,
-    Mode, ScpPath, Target, AUTOMATED_SESSION_OPTIONS,
+    automated_session_args, build_args, control_path, copy_id_args, forward_stdin,
+    proxy_command_through, proxy_command_through_files, push_remote_command, scp_args, shell_quote,
+    validate_ssh_opt, Mode, ScpPath, Target, AUTOMATED_SESSION_OPTIONS,
 };
 pub use fingerprint::fingerprint_of_blob;
 pub use keys::{parse_keyscan_output, parse_known_hosts_lines, write_known_hosts, KnownHostsEntry};

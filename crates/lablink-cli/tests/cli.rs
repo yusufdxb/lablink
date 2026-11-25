@@ -14,6 +14,9 @@ const FAKE_SSH: &str = r#"#!/bin/sh
 # Fake OpenSSH client for tests: record argv, then run the "remote" command locally.
 printf '%s\n' "$@" > "$FAKE_SSH_ARGS"
 if [ -n "$FAKE_SSH_FAIL" ]; then echo "$FAKE_SSH_FAIL" >&2; exit 255; fi
+# Like OpenSSH, -n (among the options before --) means stdin is /dev/null.
+n=; for a; do [ "$a" = -- ] && break; [ "$a" = -n ] && n=1; done
+[ -n "$n" ] && exec </dev/null
 case " $* " in
   *" -T "*) for last; do :; done; exec /bin/sh -c "$last" ;;
   *) exit 0 ;;
@@ -375,7 +378,6 @@ fn exec_preserves_exit_code_output_and_pins_host_key() {
         "BatchMode=yes",
         "UpdateHostKeys=no",
         "-T",
-        "-n",
     ] {
         assert!(a.contains(&want.to_string()), "{want} missing from {a:?}");
     }
@@ -415,6 +417,302 @@ fn exec_preserves_exit_code_output_and_pins_host_key() {
     let v = json(&lablink(Some(&e), &["exec", "jetson-a", "true", "--json"]));
     assert_eq!(v["status"], "ok");
     assert_eq!(v["exit_code"], 0);
+}
+
+fn lablink_with_stdin(env: &Env, args: &[&str], input: &str) -> Output {
+    use std::io::Write as _;
+    let mut c = Command::new(env!("CARGO_BIN_EXE_lablink"));
+    c.args(args)
+        .env("NO_COLOR", "1")
+        .env("LABLINK_CONFIG", "/nonexistent/lablink/config.yaml")
+        .env("LABLINK_SOCKET", &env.daemon.socket)
+        .env("FAKE_SSH_ARGS", &env.args_file)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn exec_passes_piped_stdin_unless_no_stdin() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    let sep = |a: &[String]| a.iter().position(|x| x == "--").unwrap();
+
+    // `printf pw | lablink exec dev 'sudo -S ...'`: the input reaches the command.
+    let o = lablink_with_stdin(
+        &e,
+        &["exec", "jetson-a", "read -r x; echo got=$x"],
+        "secret\n",
+    );
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "got=secret\n");
+    let a = recorded_args(&e);
+    assert!(!a[..sep(&a)].contains(&"-n".to_string()), "{a:?}");
+
+    // --json captures output but still forwards the input.
+    let v = json(&lablink_with_stdin(
+        &e,
+        &["exec", "jetson-a", "cat", "--json"],
+        "abc",
+    ));
+    assert_eq!(v["exit_code"], 0);
+    assert_eq!(v["stdout"], "abc");
+
+    // -n / --no-stdin behaves like `ssh -n` (safe inside `while read` loops).
+    for flag in ["-n", "--no-stdin"] {
+        let o = lablink_with_stdin(&e, &["exec", flag, "jetson-a", "cat; echo end"], "leak\n");
+        assert_eq!(code(&o), 0);
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "end\n");
+        let a = recorded_args(&e);
+        assert!(a[..sep(&a)].contains(&"-n".to_string()), "{a:?}");
+    }
+}
+
+/// Run `lablink exec` with `input` written to its stdin by a thread, so a
+/// multi-megabyte pipe cannot deadlock against the captured stdout. When
+/// `hold_open` the writer keeps the pipe open (never EOF) until the process
+/// has exited. Fails the test if the process outlives `limit`.
+fn exec_with_input(
+    env: &Env,
+    args: &[&str],
+    input: Vec<u8>,
+    hold_open: bool,
+    limit: Duration,
+) -> Output {
+    use std::io::{Read as _, Write as _};
+    let mut c = Command::new(env!("CARGO_BIN_EXE_lablink"));
+    c.args(args)
+        .env("NO_COLOR", "1")
+        .env("LABLINK_CONFIG", "/nonexistent/lablink/config.yaml")
+        .env("LABLINK_SOCKET", &env.daemon.socket)
+        .env("FAKE_SSH_ARGS", &env.args_file)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let writer = std::thread::spawn(move || {
+        // A reader that exits early closes the pipe: ignore EPIPE.
+        let _ = stdin.write_all(&input);
+        if hold_open {
+            let _ = done_rx.recv();
+        }
+        drop(stdin);
+    });
+    let mut out = child.stdout.take().unwrap();
+    let mut err = child.stderr.take().unwrap();
+    let t_out = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        out.read_to_end(&mut v).unwrap();
+        v
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        err.read_to_end(&mut v).unwrap();
+        v
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = done_tx.send(());
+            panic!("lablink exec still running after {limit:?} (stdin held open: {hold_open})");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = done_tx.send(());
+    writer.join().unwrap();
+    Output {
+        status,
+        stdout: t_out.join().unwrap(),
+        stderr: t_err.join().unwrap(),
+    }
+}
+
+fn local_sha256(data: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut c = Command::new("sha256sum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut si = c.stdin.take().unwrap();
+    let d = data.to_vec();
+    let w = std::thread::spawn(move || si.write_all(&d).unwrap());
+    let o = c.wait_with_output().unwrap();
+    w.join().unwrap();
+    String::from_utf8_lossy(&o.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// Deterministic pseudo-random bytes (xorshift), no extra dependency.
+fn noise(n: usize) -> Vec<u8> {
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+#[test]
+fn exec_forwards_small_empty_large_and_binary_stdin() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    let lim = Duration::from_secs(60);
+
+    // small
+    let o = exec_with_input(
+        &e,
+        &["exec", "jetson-a", "read -r x; echo \"got=[$x]\""],
+        b"hello\n".to_vec(),
+        false,
+        lim,
+    );
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "got=[hello]\n");
+
+    // empty (EOF at once): the remote read fails, status 1 is preserved
+    let o = exec_with_input(
+        &e,
+        &["exec", "jetson-a", "read -r x; echo rc=$?"],
+        Vec::new(),
+        false,
+        lim,
+    );
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "rc=1\n");
+
+    // 8 MiB: sha256 of what the remote saw equals sha256 of what was sent
+    let big = noise(8 << 20);
+    let want = local_sha256(&big);
+    let o = exec_with_input(
+        &e,
+        &["exec", "jetson-a", "sha256sum"],
+        big.clone(),
+        false,
+        lim,
+    );
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap(),
+        want
+    );
+
+    // binary: every byte value, NUL included, round-trips unchanged
+    let bin: Vec<u8> = (0..4u32).flat_map(|_| 0..=255u8).collect();
+    let o = exec_with_input(&e, &["exec", "jetson-a", "cat"], bin.clone(), false, lim);
+    assert_eq!(code(&o), 0);
+    assert_eq!(o.stdout, bin);
+}
+
+#[test]
+fn exec_json_forwards_stdin_too() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    let o = exec_with_input(
+        &e,
+        &["exec", "--json", "jetson-a", "tr a-z A-Z"],
+        b"piped\n".to_vec(),
+        false,
+        Duration::from_secs(30),
+    );
+    let v = json(&o);
+    assert_eq!(v["exit_code"], 0);
+    assert_eq!(v["stdout"], "PIPED\n");
+}
+
+/// Hang guard: a remote command that never reads stdin returns promptly even
+/// though the local stdin is an open pipe whose writer never closes it.
+#[test]
+fn exec_without_reading_stdin_returns_while_stdin_stays_open() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    for extra in [&["exec"][..], &["exec", "--json"][..]] {
+        let mut a: Vec<&str> = extra.to_vec();
+        a.extend(["jetson-a", "echo done"]);
+        let o = exec_with_input(&e, &a, b"unread\n".to_vec(), true, Duration::from_secs(10));
+        assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+        assert!(String::from_utf8_lossy(&o.stdout).contains("done"));
+    }
+}
+
+#[test]
+fn exec_no_stdin_flag_does_not_forward_even_when_piped() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    for flag in ["-n", "--no-stdin"] {
+        let o = exec_with_input(
+            &e,
+            &["exec", flag, "jetson-a", "cat; echo end"],
+            noise(1 << 20),
+            true,
+            Duration::from_secs(10),
+        );
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "end\n", "{flag}");
+        let a = recorded_args(&e);
+        let sep = a.iter().position(|x| x == "--").unwrap();
+        assert!(a[..sep].contains(&"-n".to_string()), "{a:?}");
+    }
+}
+
+/// A terminal on stdin is never forwarded (ssh keeps -n) and never waited on.
+#[test]
+fn exec_with_a_terminal_stdin_does_not_forward_or_hang() {
+    let e = setup("");
+    wait_color(&e, "jetson-a", "green");
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("skipped: no `script` to provide a pseudo-terminal");
+        return;
+    }
+    let cmd = format!(
+        "{} exec jetson-a 'cat; echo end'",
+        env!("CARGO_BIN_EXE_lablink")
+    );
+    let mut c = Command::new("script");
+    c.args(["-qec", &cmd, "/dev/null"])
+        .env("NO_COLOR", "1")
+        .env("LABLINK_CONFIG", "/nonexistent/lablink/config.yaml")
+        .env("LABLINK_SOCKET", &e.daemon.socket)
+        .env("FAKE_SSH_ARGS", &e.args_file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("lablink exec on a terminal stdin did not finish");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let a = recorded_args(&e);
+    let sep = a.iter().position(|x| x == "--").unwrap();
+    assert!(a[..sep].contains(&"-n".to_string()), "{a:?}");
 }
 
 #[test]
