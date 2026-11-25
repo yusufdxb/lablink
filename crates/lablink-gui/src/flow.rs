@@ -260,6 +260,7 @@ pub struct DoctorView {
 pub fn doctor_view(r: &Report) -> DoctorView {
     let (header, level) = match r.verdict {
         Verdict::Ready => ("LAB READY", Level::Good),
+        Verdict::Standby => ("LAB STANDBY", Level::Neutral),
         Verdict::Degraded => ("LAB DEGRADED", Level::Warn),
         Verdict::NotReady => ("LAB NOT READY", Level::Bad),
     };

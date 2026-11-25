@@ -64,7 +64,8 @@ This table is the daemon's raw color and is what `lablink status` reports. It
 does not read `availability`: a machine that is switched off is RED (or GRAY)
 here even when the config says `availability: on_demand`. Only `lablink
 doctor` applies `availability` (an unreachable `on_demand` device becomes
-`asleep/off (expected)` and stops counting), see `docs/AUTOMATION.md`.
+`asleep/off (expected)` and stops counting, and the doctor verdict is `standby`
+instead of `ready` while any such device is off), see `docs/AUTOMATION.md`.
 
 Devices with `ssh: false` (e.g. a robot base reached through its onboard
 computer) are GREEN on reachability alone. Each non-green status carries `reasons`, e.g.

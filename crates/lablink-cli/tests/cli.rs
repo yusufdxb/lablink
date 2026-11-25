@@ -877,7 +877,7 @@ fn doctor_reports_an_unreachable_on_demand_device_as_expected_off() {
             String::from_utf8_lossy(&o.stdout)
         );
         let v = json(&o);
-        assert_eq!(v["verdict"], "ready");
+        assert_eq!(v["verdict"], "standby");
         let d = &v["devices"][0];
         assert_eq!(
             (
@@ -902,7 +902,7 @@ fn doctor_reports_an_unreachable_on_demand_device_as_expected_off() {
     let o = cmd.output().unwrap();
     let text = String::from_utf8_lossy(&o.stdout);
     assert_eq!(code(&o), exit::OK, "{text}");
-    assert!(text.starts_with("LAB READY\n"), "{text}");
+    assert!(text.starts_with("LAB STANDBY\n"), "{text}");
     assert!(
         text.contains("asleep/off (expected)") && !text.contains("RED"),
         "{text}"
@@ -916,6 +916,7 @@ fn doctor_reports_an_unreachable_on_demand_device_as_expected_off() {
         (d["color"].as_str(), d["expected_off"].as_bool()),
         (Some("red"), Some(false))
     );
+    assert_eq!(json(&o)["verdict"], "not_ready");
     // An unknown --expect name is an error.
     assert_eq!(
         code(&doctor(&["--expect", "nosuch"], asleep)),

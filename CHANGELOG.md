@@ -14,8 +14,10 @@ All notable changes are listed here. The format follows
   gateway hop closed with no host, or not located) is reported as
   `asleep/off (expected)` instead of RED; a device routed through such a
   gateway is off too (`gateway orin off (expected)`). Expected-off devices do
-  not count toward the verdict or the exit code (like AWAY devices); RED is
-  reserved for a device that should be up. Security and auth failures (host
+  not count as failures (exit code unaffected, like AWAY devices) and the
+  verdict is `standby` (new, exit 0) instead of `ready` when nothing is red,
+  yellow or gray but some device is expected off; `ready` means everything is
+  up. RED is reserved for a device that should be up. Security and auth failures (host
   key or identity mismatch, authentication, connection refused, a session
   that ran and failed) stay RED or YELLOW. `lablink doctor --expect DEVICE`
   (repeatable) treats an `on_demand` device as one that must be up for that

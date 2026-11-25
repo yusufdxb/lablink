@@ -96,7 +96,12 @@ pub const OFF_LABEL: &str = "asleep/off (expected)";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
+    /// Every device in scope is up and green.
     Ready,
+    /// Nothing is red, yellow or gray, but at least one device in scope is
+    /// expected off (`availability: on_demand`): nothing that should be up is
+    /// down, yet not everything is up. Exit code 0.
+    Standby,
     Degraded,
     NotReady,
 }
@@ -157,6 +162,8 @@ pub fn verdict(devices: &[DeviceReport]) -> Verdict {
         Verdict::NotReady
     } else if here.iter().any(|d| d.color == Color::Yellow) {
         Verdict::Degraded
+    } else if devices.iter().any(|d| !d.away && d.expected_off) {
+        Verdict::Standby
     } else {
         Verdict::Ready
     }
@@ -989,6 +996,7 @@ pub fn render_human(r: &Report, color: bool) -> String {
     let scope = printable(scope);
     let head = match r.verdict {
         Verdict::Ready => (format!("{scope} READY"), Color::Green),
+        Verdict::Standby => (format!("{scope} STANDBY"), Color::Gray),
         Verdict::Degraded => (format!("{scope} DEGRADED"), Color::Yellow),
         Verdict::NotReady => (format!("{scope} NOT READY"), Color::Red),
     };
@@ -1549,10 +1557,18 @@ mod tests {
     fn off_devices_do_not_change_verdict_or_exit_code() {
         let green = dev("a", Color::Green);
         let off = off_report(failed("5080", None, "x", Availability::OnDemand), "x");
-        let r = Report::new(vec![green.clone(), off.clone()]);
+        let r = Report::new(vec![green.clone()]);
         assert_eq!((r.verdict, r.exit_code()), (Verdict::Ready, exit::OK));
-        // Only off devices: still ready, exit 0 (nothing that should be up is down).
+        // Green plus off: standby, exit 0.
+        let r = Report::new(vec![green.clone(), off.clone()]);
+        assert_eq!((r.verdict, r.exit_code()), (Verdict::Standby, exit::OK));
+        // Only off devices: standby, exit 0 (nothing that should be up is down).
         let r = Report::new(vec![off.clone()]);
+        assert_eq!((r.verdict, r.exit_code()), (Verdict::Standby, exit::OK));
+        // An off device of an AWAY site does not make a standby.
+        let mut away_off = off.clone();
+        away_off.away = true;
+        let r = Report::new(vec![green.clone(), away_off]);
         assert_eq!((r.verdict, r.exit_code()), (Verdict::Ready, exit::OK));
         // A real failure still wins, and a plain red device still counts.
         let red = failed("orin", None, "connection timed out", Availability::Always);
@@ -1645,7 +1661,7 @@ mod tests {
         );
         let r = Report::new(vec![dev("a", Color::Green), off]);
         let h = render_human(&r, false);
-        assert!(h.starts_with("LAB READY\n"), "{h}");
+        assert!(h.starts_with("LAB STANDBY\n"), "{h}");
         assert!(
             h.contains("5080") && h.contains("asleep/off (expected)"),
             "{h}"
@@ -1657,6 +1673,7 @@ mod tests {
         assert_eq!(d["availability"], "on_demand");
         assert_eq!(d["color"], "gray");
         assert_eq!(v["devices"][0]["expected_off"], false);
+        assert_eq!(v["verdict"], "standby");
         assert_eq!(v["schema_version"], 1);
         // Older reports without the new fields still parse.
         let mut old = v.clone();
