@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
       # Installs the exact toolchain pinned in rust-toolchain.toml.
       - run: rustup toolchain install && rustup show active-toolchain
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       # docs/COMPATIBILITY.md: Behaviour changes need a minor bump before 1.0.
       - run: python3 scripts/check-compat.py --self-test && python3 scripts/check-compat.py
@@ -44,7 +44,7 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # ssh-keygen and a throwaway, unprivileged sshd on 127.0.0.1 are used by
       # the OpenSSH cross-check tests (skipped if absent).
       - run: sudo apt-get update && sudo apt-get install -y openssh-client openssh-server
@@ -73,7 +73,7 @@ jobs:
           case $msrv in *.*.*) ;; *) msrv=$msrv.0 ;; esac
           echo "MSRV=$msrv" >> "$GITHUB_ENV"
           rustup toolchain install "$msrv" --profile minimal
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: msrv
       - run: cargo "+$MSRV" check --workspace --all-targets --locked
@@ -289,5 +289,5 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --release --locked -p lablink-daemon -p lablink-cli
