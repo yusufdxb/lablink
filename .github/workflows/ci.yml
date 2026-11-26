@@ -55,6 +55,29 @@ jobs:
       # network, configuration or systemd user manager.
       - run: cargo test --workspace --locked
 
+  msrv:
+    # The minimum supported Rust is `rust-version` in Cargo.toml; development
+    # and release builds use the newer compiler pinned in rust-toolchain.toml.
+    # Check the workspace with exactly the declared minimum so it stays true.
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: install the declared minimum toolchain
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          [ -n "$msrv" ] || { echo "no rust-version in Cargo.toml"; exit 1; }
+          # "1.95" means 1.95.0, not the newest 1.95.x.
+          case $msrv in *.*.*) ;; *) msrv=$msrv.0 ;; esac
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+          rustup toolchain install "$msrv" --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: msrv
+      - run: cargo "+$MSRV" check --workspace --all-targets --locked
+
   dependencies:
     timeout-minutes: 60
     runs-on: ubuntu-24.04
