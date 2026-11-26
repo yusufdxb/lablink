@@ -69,4 +69,7 @@ of the commit, so artifacts always match one commit.
 - `cargo fmt`, clippy with `-D warnings` and the full test suite must pass;
   CI runs them, plus the clean-room tests on Ubuntu 20.04, 22.04 and 24.04.
 - Update the docs and `CHANGELOG.md` (under "Unreleased") when behavior
-  changes.
+  changes. A change to the CLI contract (flags, argument placement, stdin
+  handling, JSON, exit codes; see [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md))
+  goes under `### Behaviour changes` and needs a minor version bump before
+  1.0. JSON fields and exit codes are added, never renamed.
