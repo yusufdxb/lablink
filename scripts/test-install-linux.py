@@ -438,6 +438,49 @@ class InstallerTests(unittest.TestCase):
         self.run_installer()
         self.assertIn("Unexpected CLI version", self.output)
 
+    def hold(self, text, base=".local/state/lablink"):
+        path = self.root / "home" / base / "update-hold"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def test_update_hold_refuses_before_any_download(self):
+        self.existing("0.0.1")
+        self.hold('{\n  "reason": "frozen for a field test",\n  "since": 1,\n  "version": "0.4.3"\n}\n')
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 7, self.output)
+        self.assertIn("updates are held on this machine: frozen for a field test", self.output)
+        self.assertFalse(any(event[0] == "curl" and "releases" in " ".join(event[1]) for event in self.events), self.events)
+        self.no_install()
+
+    def test_plain_text_or_empty_hold_still_refuses(self):
+        self.existing("0.0.1")
+        for text, shown in (("pinned by hand\n", ": pinned by hand"), ("", "")):
+            self.hold(text)
+            result = self.run_installer()
+            self.assertEqual(result.returncode, 7, self.output)
+            self.assertIn("updates are held on this machine" + shown + ".", self.output)
+            self.no_install()
+
+    def test_update_hold_honours_lablink_state_dir(self):
+        self.existing("0.0.1")
+        custom = self.root / "custom-state"
+        custom.mkdir()
+        (custom / "update-hold").write_text("custom\n")
+        self.env["LABLINK_STATE_DIR"] = str(custom)
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 7, self.output)
+        self.no_install()
+
+    def test_dry_run_reports_the_hold(self):
+        self.existing("0.0.1")
+        self.hold("frozen\n")
+        (self.root / "scenario.json").write_text(json.dumps(self.cfg))
+        result = subprocess.run(["/bin/bash", str(self.script), "--dry-run"], text=True,
+                                capture_output=True, env=self.env, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("updates are held on this machine: frozen", result.stdout)
+
     def test_daemon_version_mismatch_is_reported(self):
         self.cfg["daemon_version"] = "0.0.0"
         self.run_installer()

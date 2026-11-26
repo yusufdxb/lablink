@@ -89,6 +89,11 @@ verifies the release's SHA-256 checksum, installs the package with
 `sudo apt install`, and restarts your running `lablinkd` so the CLI and
 daemon match. It does nothing when you are already up to date.
 
+To keep a machine on its installed version, `lablink update --hold --reason
+TEXT`; `lablink update` and the installer then refuse (exit 7) until
+`lablink update --unhold`. See
+[AUTOMATION.md](AUTOMATION.md#pinning-a-version-version---require-update---hold).
+
 On older versions, run the same one-command installer again. An older
 package is upgraded to the selected release. A matching version is verified
 without reinstalling; a newer installed package is retained rather than

@@ -108,9 +108,10 @@ are not fallback triggers either: report them.
 | 4 | Unknown device or site | device commands, `--site` |
 | 5 | Device has no usable address, is offline, or belongs to an AWAY site (pass `--force` to `ssh`/`exec`/`resolve` to try anyway) | `ssh`, `exec`, `resolve`, `trust` |
 | 6 | SSH host key does not match the pinned identity (never overridable by flags) | `ssh`, `exec`, `resolve` |
-| 7 | Refused by policy: scan outside limits, trust or forget not confirmed, device has no pinned host key (`ssh`/`exec`; `--unpinned` to let OpenSSH decide), address not identity-verified (`resolve`; `--force` prints it anyway) | `discover --scan-cidr`, `trust`, `forget`, `adopt`, `ssh`, `exec`, `resolve` |
+| 7 | Refused by policy: scan outside limits, trust or forget not confirmed, device has no pinned host key (`ssh`/`exec`; `--unpinned` to let OpenSSH decide), address not identity-verified (`resolve`; `--force` prints it anyway), installed version outside `version --require`, update held (`update --hold`) | `discover --scan-cidr`, `trust`, `forget`, `adopt`, `ssh`, `exec`, `resolve`, `version --require`, `update` |
 | 8 | Ambiguous device name: it exists at several sites; use `site/name` | device commands |
 | 10 / 11 / 12 | `status <device>` is YELLOW / RED / GRAY (GRAY includes AWAY) | `status <device>`, `doctor` |
+| 10 | A newer release is available | `update --check` |
 | 124 | `exec --timeout` expired; the local ssh was stopped (the remote command may still be running, see below) | `exec` |
 | 255 | The OpenSSH client failed (connection, authentication, host key) | `exec`, `ssh` |
 | anything else | For `exec` and `ssh`: the remote command's own exit code, passed through unchanged | `exec`, `ssh` |
@@ -123,6 +124,59 @@ Because `exec` passes remote exit codes through, a remote command that itself
 exits with 3-7 is indistinguishable from a LabLink error by exit code alone.
 Use `--json`: LabLink errors always have `"status": "lablink_error"` and an
 `error.code` string; remote results never do.
+
+## Pinning a version (`version --require`, `update --hold`)
+
+A runbook, preflight or frozen build that depends on one LabLink version
+(argument placement, stdin handling, JSON) should check it before it runs
+anything, and a machine that must stay on its version should hold updates.
+
+```bash
+lablink version --require '>=0.4.3,<0.4.4'          # exit 0 in range, 7 outside
+lablink version --require '>=0.4.3,<0.4.4' --json   # same, with a JSON answer
+lablink update --hold --reason 'frozen for a field test'  # refuse updates on this machine
+lablink update --check                                # still reports (exit 10 if newer)
+lablink update --unhold                               # allow updates again
+```
+
+`--require RANGE` takes comma-separated comparators that must all hold:
+`>=`, `>`, `<=`, `<`, `=` (or `==`), and a bare version meaning exactly that
+version. Versions compare numerically (`0.4.10` > `0.4.9`, a missing part is
+0, so `<0.5` means any 0.4.x). A pre-release build (`0.4.4-rc1`) matches only
+a range that itself names a pre-release, so `<0.4.4` never admits a 0.4.4
+release candidate. An invalid range (`^0.4`, `>=0.4.x`) exits 2. The check is
+offline and concerns this CLI, which is the installed package; `lablink
+version --json` reports the daemon too.
+
+```json
+{"schema_version": 1, "version": "0.4.4", "git_sha": null, "require": ">=0.4.3,<0.4.4", "satisfied": false, "exit_code": 7}
+```
+
+`lablink version` on 0.4.4 and older does not know `--require` and exits 2
+(usage), so a guard must stop on **any** non-zero exit, not only 7:
+
+```bash
+lablink version --require '>=0.4.3,<0.4.4' || { echo "wrong LabLink version" >&2; exit 1; }
+```
+
+**Update hold.** `lablink update --hold [--reason TEXT]` writes
+`update-hold` in the state dir (`$LABLINK_STATE_DIR`, else
+`$XDG_STATE_HOME/lablink`, else `~/.local/state/lablink`). While it exists:
+
+- `lablink update` and `lablink update --migrate` refuse with exit 7 and
+  print the reason (JSON error code `update_held`). Nothing is downloaded.
+- `lablink update --check` still reports and adds a note that updates are held.
+- The official installer (`scripts/install-linux.sh`, also what `lablink
+  update` runs) refuses with exit 7 before downloading anything; `--dry-run`
+  only notes the hold. Because `lablink update` always downloads the newest
+  installer, this also holds machines on an older CLI that has no `--hold`:
+  create the file by hand, e.g.
+  `mkdir -p ~/.local/state/lablink && echo 'frozen for a field test' > ~/.local/state/lablink/update-hold`.
+  (A plain-text file holds with its text as the reason.) That covers
+  `lablink update` and the one-command installer; installing a `.deb` by hand
+  with `apt` or `dpkg` bypasses it.
+- The hold fails closed: a hold file that is empty, corrupt or unreadable
+  still holds. `lablink update --unhold` (or deleting the file) lifts it.
 
 ## JSON shapes (schema_version 1)
 

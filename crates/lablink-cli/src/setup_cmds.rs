@@ -371,6 +371,33 @@ pub fn cmd_version(client: &Client, json_out: bool) -> R {
     Ok(exit::OK)
 }
 
+/// `lablink version --require RANGE`: exit 0 when this CLI's version is in
+/// RANGE, exit 7 (refused by policy) when it is not, exit 2 for a bad RANGE.
+/// Offline: the daemon is not asked (the installed package is what a frozen
+/// caller depends on; `lablink version --json` reports the daemon).
+pub fn cmd_version_require(_client: &Client, json_out: bool, range: &str) -> R {
+    let parsed =
+        crate::guard::Range::parse(range).map_err(|e| Fail::new(exit::USAGE, "bad_request", e))?;
+    let version = lablink_core::VERSION;
+    let ok = parsed.matches(version);
+    let code = if ok { exit::OK } else { exit::REFUSED };
+    if json_out {
+        print_json(&json!({
+            "schema_version": SCHEMA_VERSION,
+            "version": version,
+            "git_sha": lablink_core::GIT_SHA,
+            "require": range,
+            "satisfied": ok,
+            "exit_code": code,
+        }));
+    } else if ok {
+        println!("lablink {version} satisfies {range}");
+    } else {
+        eprintln!("lablink: version {version} does not satisfy {range} (refused by policy)");
+    }
+    Ok(code)
+}
+
 fn find_pubkey(explicit: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(p) = explicit {
         let p = if p.extension().is_some_and(|e| e == "pub") {

@@ -6,6 +6,18 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `lablink version --require RANGE` (e.g. `">=0.4.3,<0.4.4"`): exit 0 when the
+  installed CLI's version is in the range, exit 7 (refused by policy) when it
+  is not, exit 2 for an invalid range; `--json` adds `require`, `satisfied`
+  and `exit_code`.
+- Update hold: `lablink update --hold [--reason TEXT]` and `--unhold`. While a
+  hold file is in the state dir, `lablink update` refuses with exit 7 (error
+  code `update_held`) and the official installer refuses before downloading;
+  `--check` still reports. Any hold file holds, including one written by hand
+  or one that cannot be parsed.
+
 ## [0.4.4] - 2026-11-25
 
 ### Behaviour changes

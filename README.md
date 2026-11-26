@@ -32,6 +32,10 @@ from their applications menu.
 
 To upgrade later, run `lablink update` (0.4.2 and newer); `lablink update --check`
 only reports. See [installation, upgrades and troubleshooting](docs/INSTALL.md).
+A machine or script that must stay on one version can pin it:
+`lablink update --hold --reason TEXT` makes `lablink update` and the installer
+refuse (exit 7) until `--unhold`, and `lablink version --require '>=0.4.3,<0.4.4'`
+exits 7 outside the range ([details](docs/AUTOMATION.md#pinning-a-version-version---require-update---hold)).
 
 It is a small per-user daemon (`lablinkd`), a CLI (`lablink`) and a desktop
 app (`lablink-gui`), written in Rust for Linux. The daemon runs as you (a

@@ -125,7 +125,61 @@ fn run_installer(script: &[u8], args: &[&str]) -> Result<i32, Fail> {
     Ok(status.code().unwrap_or(exit::FAILURE))
 }
 
-pub fn cmd_update(check: bool, migrate: bool, installer: Option<PathBuf>) -> R {
+fn describe_hold(h: &crate::guard::Hold) -> String {
+    let mut s = String::from("updates are held on this machine");
+    if let Some(v) = &h.version {
+        s.push_str(&format!(" at {v}"));
+    }
+    if let Some(r) = &h.reason {
+        s.push_str(&format!(": {r}"));
+    }
+    s
+}
+
+/// `lablink update --hold [--reason TEXT]`.
+pub fn cmd_hold(state_dir: &Path, reason: Option<String>) -> R {
+    let hold = crate::guard::Hold {
+        reason: reason.filter(|r| !r.trim().is_empty()),
+        since: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs()),
+        version: Some(lablink_core::VERSION.to_string()),
+    };
+    let p = crate::guard::write_hold(state_dir, &hold)
+        .map_err(|e| fail(format!("could not place the update hold: {e}")))?;
+    println!(
+        "Held: {}. `lablink update` and the official installer refuse (exit 7) until `lablink update --unhold`.
+Hold file: {}",
+        describe_hold(&hold),
+        p.display()
+    );
+    Ok(exit::OK)
+}
+
+/// `lablink update --unhold`.
+pub fn cmd_unhold(state_dir: &Path) -> R {
+    match crate::guard::remove_hold(state_dir) {
+        Ok(true) => println!("Update hold removed. `lablink update` works again."),
+        Ok(false) => println!("No update hold was in place."),
+        Err(e) => return Err(fail(format!("could not remove the update hold: {e}"))),
+    }
+    Ok(exit::OK)
+}
+
+pub fn cmd_update(state_dir: &Path, check: bool, migrate: bool, installer: Option<PathBuf>) -> R {
+    // Checked before anything is downloaded; `--check` only reports.
+    let hold = crate::guard::read_hold(state_dir);
+    if let (Some(h), false) = (&hold, check) {
+        return Err(Fail::new(
+            exit::REFUSED,
+            "update_held",
+            format!(
+                "{}. Nothing was changed. Run `lablink update --unhold` to allow updates.",
+                describe_hold(h)
+            ),
+        ));
+    }
     if !cfg!(target_os = "linux") {
         return Err(fail(
             "`lablink update` supports Linux (Ubuntu) only; see docs/INSTALL.md.",
@@ -144,6 +198,12 @@ pub fn cmd_update(check: bool, migrate: bool, installer: Option<PathBuf>) -> R {
     let current = lablink_core::VERSION;
     let newer = is_newer(&latest, current);
     if check {
+        if let Some(h) = &hold {
+            println!(
+                "Note: {} (`lablink update` refuses until `--unhold`).",
+                describe_hold(h)
+            );
+        }
         if newer {
             println!("LabLink {latest} is available (this is {current}). Run `lablink update` to install it.");
             return Ok(UPDATE_AVAILABLE);

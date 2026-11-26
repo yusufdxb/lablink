@@ -44,6 +44,34 @@ main() (
     done
 
     [[ $EUID -ne 0 ]] || fail 'Run this installer as your normal user, without sudo. Only the package installation requests administrator privileges.'
+
+    # ---- Update hold (`lablink update --hold`) -----------------------------
+    # The same file `lablink update` checks, so an older lablink that
+    # downloads this installer is held too. Any hold file holds, even one that
+    # cannot be parsed. Lift it with `lablink update --unhold` or by removing it.
+    local state_dir hold_file
+    case ${LABLINK_STATE_DIR:-} in
+        /*) state_dir=$LABLINK_STATE_DIR ;;
+        *) case ${XDG_STATE_HOME:-} in /*) state_dir=$XDG_STATE_HOME/lablink ;; *) state_dir=$HOME/.local/state/lablink ;; esac ;;
+    esac
+    hold_file=$state_dir/update-hold
+    if [[ -e $hold_file || -L $hold_file ]]; then
+        local hold_text='' hold_reason=''
+        if [[ -f $hold_file && -r $hold_file ]]; then hold_text=$(<"$hold_file") || hold_text=''; fi
+        if [[ $hold_text =~ \"reason\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+            hold_reason=${BASH_REMATCH[1]}
+        elif [[ $hold_text != '{'* ]]; then
+            hold_reason=${hold_text%%$'\n'*}
+        fi
+        hold_reason=${hold_reason//[^[:print:]]/}
+        hold_reason=${hold_reason:0:300}
+        if [[ $dry_run == 1 ]]; then
+            printf 'Note: LabLink updates are held on this machine%s (%s).\n' "${hold_reason:+: $hold_reason}" "$hold_file"
+        else
+            printf 'LabLink installer: updates are held on this machine%s.\nHold file: %s\nNothing was changed. Run "lablink update --unhold" (or remove that file) to allow updates.\n' "${hold_reason:+: $hold_reason}" "$hold_file" >&2
+            exit 7
+        fi
+    fi
     local utility
     for utility in uname curl sha256sum mktemp rm mv cp mkdir cat date dirname basename chmod awk grep timeout readlink dpkg dpkg-query dpkg-deb apt sudo; do
         command -v "$utility" >/dev/null 2>&1 || fail "Missing prerequisite: $utility. On Ubuntu run: sudo apt update && sudo apt install curl ca-certificates coreutils grep mawk dpkg apt sudo"
