@@ -6,7 +6,28 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-25
+
+### Behaviour changes
+
+- `lablink ssh DEVICE -- ...`: everything after `--` is now the remote
+  command and is placed after the destination host. It is never passed to the
+  local ssh as an option, so ssh options after `--` no longer take effect.
+  Use `--ssh-opt` (below) or `~/.ssh/config` for local ssh options.
+- `lablink exec` now forwards stdin to the remote command when stdin is not a
+  terminal (for example `printf pw | lablink exec dev "sudo -S ..."`). It
+  used to run ssh with `-n`, so piped input was silently dropped. Use
+  `-n` / `--no-stdin` for the old behaviour, for example inside `while read`
+  loops.
+
 ### Added
+
+- `lablink ssh --ssh-opt OPT` (repeatable): ssh options for the local ssh,
+  placed before the host, with the value attached (`--ssh-opt=-N
+  --ssh-opt=-L8765:127.0.0.1:8765`). LabLink's host-key options still come
+  first and cannot be weakened.
+- `lablink exec -n` / `--no-stdin`: do not forward stdin (see Behaviour
+  changes).
 
 - `lablink doctor` tells a machine that is meant to be asleep or off from one
   that should be up and is not. A device with `availability: on_demand` in
@@ -27,6 +48,20 @@ All notable changes are listed here. The format follows
   The default is `availability: always`, so existing configs behave as
   before. A config that uses `availability` needs 0.4.4 on the CLI, daemon
   and app (older builds reject the unknown key).
+
+### Fixed
+
+- Open in terminal (desktop app) ignores a stale GNOME Terminal environment
+  (`GNOME_TERMINAL_SCREEN`, `GNOME_TERMINAL_SERVICE` are removed from the
+  terminal's environment, so a closed parent screen cannot reject the
+  launch) and shows launch failures: the launcher's stderr and exit status
+  are watched for a short time and a failure, including exit 0 with an error
+  line, appears in the app's notice. The launch runs off the UI thread
+  ([#28](https://github.com/yusufdxb/lablink/issues/28)).
+- `lablink ssh` remote arguments can no longer be read by the local ssh as
+  options or as the host ([#44](https://github.com/yusufdxb/lablink/issues/44)).
+- `lablink exec` forwards piped stdin
+  ([#43](https://github.com/yusufdxb/lablink/issues/43)).
 
 ### Security
 
