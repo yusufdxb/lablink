@@ -239,9 +239,14 @@ jobs:
           path: dist/lablink_0.3.0_amd64.deb
 
   upgrade:
-    # A working 0.3.0 install (site, devices, pinned keys, open SSH session)
-    # is upgraded with the real 0.3.1 .deb: state preserved, old daemon
-    # refused by security-sensitive commands, restart, everything recovers.
+    # A working install of an earlier release (site, devices, pinned keys,
+    # open SSH session) is upgraded with the .deb built from this commit:
+    # state preserved, old daemon refused by security-sensitive commands,
+    # restart, everything recovers. Two baselines: 0.3.0 (built from its
+    # pinned commit above, the oldest supported upgrade) and the published
+    # 0.4.3 .deb (what installed machines run: 0.4.2 to 0.4.4), downloaded
+    # from the release and verified against its SHA256SUMS, whose own hash is
+    # pinned here.
     timeout-minutes: 60
     runs-on: ubuntu-24.04
     needs: [release, baseline]
@@ -249,6 +254,10 @@ jobs:
       fail-fast: false
       matrix:
         base: ["ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
+        from: ["0.3.0", "0.4.3"]
+    env:
+      # sha256 of https://github.com/yusufdxb/lablink/releases/download/v0.4.3/SHA256SUMS
+      SUMS_SHA256_0_4_3: 8144e8411bbeb7d651c60ff7d4b40089c3f6530436799396f07054a665bce18c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -257,15 +266,18 @@ jobs:
         with:
           name: lablink-dist
           path: dist/
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - if: matrix.from == '0.3.0'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: lablink-baseline-0.3.0
           path: baseline/
-      - run: BASE=${{ matrix.base }} scripts/upgrade-test.sh baseline/lablink_0.3.0_amd64.deb "$RUNNER_TEMP/upgrade"
+      - if: matrix.from == '0.4.3'
+        run: scripts/fetch-release-deb.sh 0.4.3 "$SUMS_SHA256_0_4_3" baseline
+      - run: BASE=${{ matrix.base }} scripts/upgrade-test.sh "baseline/lablink_${{ matrix.from }}_amd64.deb" "$RUNNER_TEMP/upgrade"
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: upgrade-${{ strategy.job-index }}
+          name: upgrade-${{ matrix.from }}-${{ strategy.job-index }}
           path: ${{ runner.temp }}/upgrade/
 
   aarch64-check:
