@@ -1386,20 +1386,35 @@ fn forget_needs_confirmation_and_clears_the_pin() {
 
 fn update_with(script: &str, args: &[&str]) -> (Output, std::path::PathBuf, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let installer = dir.path().join("install-linux.sh");
+    let (o, out) = update_in(dir.path(), script, args);
+    (o, out, dir)
+}
+
+/// Run `lablink update` with a fixture installer; the state dir is `dir/state`
+/// (never the real one, which may hold an update hold).
+fn update_in(dir: &Path, script: &str, args: &[&str]) -> (Output, std::path::PathBuf) {
+    let installer = dir.join("install-linux.sh");
     std::fs::write(&installer, script).unwrap();
-    let out = dir.path().join("ran");
+    let out = dir.join("ran");
+    let _ = std::fs::remove_file(&out);
     let mut all = vec!["update", "--installer", installer.to_str().unwrap()];
     all.extend_from_slice(args);
-    let o = Command::new(env!("CARGO_BIN_EXE_lablink"))
-        .args(&all)
-        .env("NO_COLOR", "1")
-        .env("LABLINK_CONFIG", "/nonexistent/lablink/config.yaml")
-        .env("LABLINK_SOCKET", "/nonexistent/lablink/test.sock")
+    let o = offline_lablink(dir, &all)
         .env("UPDATE_FIXTURE_OUT", &out)
         .output()
         .unwrap();
-    (o, out, dir)
+    (o, out)
+}
+
+/// A `lablink` command with no daemon, no config and a private state dir.
+fn offline_lablink(dir: &Path, args: &[&str]) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_lablink"));
+    c.args(args)
+        .env("NO_COLOR", "1")
+        .env("LABLINK_CONFIG", "/nonexistent/lablink/config.yaml")
+        .env("LABLINK_SOCKET", "/nonexistent/lablink/test.sock")
+        .env("LABLINK_STATE_DIR", dir.join("state"));
+    c
 }
 
 const FIXTURE_INSTALLER: &str = "main() {\n    readonly RELEASE_VERSION='99.0.0'\n    printf '%s\\n' ran \"$@\" > \"$UPDATE_FIXTURE_OUT\"\n    exit 7\n}\nmain \"$@\"\n";
@@ -1442,4 +1457,101 @@ fn update_refuses_an_installer_without_a_release() {
 fn update_check_and_migrate_conflict() {
     let (o, _ran, _d) = update_with(FIXTURE_INSTALLER, &["--check", "--migrate"]);
     assert_eq!(code(&o), 2, "{o:?}");
+}
+
+/// An update hold refuses `lablink update` (exit 7, installer never runs),
+/// `--check` still reports, and `--unhold` lifts it.
+#[test]
+fn update_hold_refuses_until_unhold() {
+    let d = tempfile::tempdir().unwrap();
+    let o = offline_lablink(
+        d.path(),
+        &["update", "--hold", "--reason", "frozen for Stage 2"],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(code(&o), 0, "{o:?}");
+    assert!(d.path().join("state/update-hold").exists());
+
+    for args in [&[][..], &["--migrate"][..]] {
+        let (o, ran) = update_in(d.path(), FIXTURE_INSTALLER, args);
+        assert_eq!(code(&o), exit::REFUSED, "{o:?}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            err.contains("held") && err.contains("frozen for Stage 2"),
+            "{err}"
+        );
+        assert!(!ran.exists(), "a held update must never run the installer");
+    }
+
+    let (o, ran) = update_in(d.path(), FIXTURE_INSTALLER, &["--check"]);
+    assert_eq!(code(&o), 10, "{o:?}");
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("99.0.0 is available") && out.contains("held"),
+        "{out}"
+    );
+    assert!(!ran.exists());
+
+    let o = offline_lablink(d.path(), &["update", "--unhold"])
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "{o:?}");
+    let (o, ran) = update_in(d.path(), FIXTURE_INSTALLER, &[]);
+    assert_eq!(code(&o), 7, "fixture installer's own exit code: {o:?}");
+    assert!(ran.exists(), "after --unhold the installer runs again");
+}
+
+/// A hold file written by hand (or one that cannot be parsed) still holds,
+/// and the JSON error names the refusal.
+#[test]
+fn hand_written_update_hold_refuses() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("state")).unwrap();
+    std::fs::write(d.path().join("state/update-hold"), "GROOT build\n").unwrap();
+    let (o, ran) = update_in(d.path(), FIXTURE_INSTALLER, &[]);
+    assert_eq!(code(&o), exit::REFUSED, "{o:?}");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("GROOT build"));
+    assert!(!ran.exists());
+}
+
+#[test]
+fn update_hold_flag_conflicts() {
+    let d = tempfile::tempdir().unwrap();
+    for args in [
+        &["update", "--hold", "--unhold"][..],
+        &["update", "--hold", "--check"][..],
+        &["update", "--reason", "x"][..],
+        &["update", "--unhold", "--migrate"][..],
+    ] {
+        let o = offline_lablink(d.path(), args).output().unwrap();
+        assert_eq!(code(&o), exit::USAGE, "{args:?}: {o:?}");
+    }
+    assert!(!d.path().join("state/update-hold").exists());
+}
+
+#[test]
+fn version_require_matches_or_refuses() {
+    let d = tempfile::tempdir().unwrap();
+    let v = lablink_core::VERSION;
+    let run = |args: &[&str]| offline_lablink(d.path(), args).output().unwrap();
+    let o = run(&["version", "--require", &format!(">={v}")]);
+    assert_eq!(code(&o), 0, "{o:?}");
+    assert!(String::from_utf8_lossy(&o.stdout).contains("satisfies"));
+    let o = run(&["version", "--require", &format!("<{v}")]);
+    assert_eq!(code(&o), exit::REFUSED, "{o:?}");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("does not satisfy"));
+    let o = run(&["version", "--require", ">=0.0.1,<0.0.2", "--json"]);
+    assert_eq!(code(&o), exit::REFUSED, "{o:?}");
+    let j = json(&o);
+    assert_eq!(j["satisfied"], false);
+    assert_eq!(j["version"], v);
+    assert_eq!(j["require"], ">=0.0.1,<0.0.2");
+    assert_eq!(j["exit_code"], exit::REFUSED);
+    let o = run(&["version", "--require", v, "--json"]);
+    assert_eq!(code(&o), 0, "{o:?}");
+    assert_eq!(json(&o)["satisfied"], true);
+    let o = run(&["version", "--require", "^0.4", "--json"]);
+    assert_eq!(code(&o), exit::USAGE, "{o:?}");
+    assert_eq!(json(&o)["error"]["code"], "bad_request");
 }

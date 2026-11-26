@@ -6,6 +6,7 @@
 //! `docs/AUTOMATION.md` and defined in `lablink_core::exit`.
 
 mod complete;
+mod guard;
 mod output;
 mod scp_cmds;
 mod setup_cmds;
@@ -364,10 +365,13 @@ enum Cmd {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Version of this CLI and of the running daemon.
+    /// Version of this CLI and of the running daemon. `--require RANGE` exits 7 when this CLI's version is outside RANGE
     Version {
         #[arg(long)]
         json: bool,
+        /// Exit 0 only if this CLI's version is in RANGE (comma-separated comparators, all must hold, e.g. ">=0.4.3,<0.4.4"); otherwise exit 7 (refused by policy).
+        #[arg(long, value_name = "RANGE")]
+        require: Option<String>,
     },
     /// Upgrade to the latest release with the official installer (verifies the checksum, then installs the package with apt). `--check` only reports; exit 10 when a newer release is available
     Update {
@@ -377,6 +381,15 @@ enum Cmd {
         /// Move an older per-user installation (tarball, source build) aside into a restorable backup.
         #[arg(long, conflicts_with = "check")]
         migrate: bool,
+        /// Hold this machine at the installed version: `lablink update` (and the official installer) refuse with exit 7 until `--unhold`. `--check` still reports.
+        #[arg(long, conflicts_with_all = ["check", "migrate", "unhold"])]
+        hold: bool,
+        /// Why the machine is held (shown whenever an update is refused).
+        #[arg(long, requires = "hold", value_name = "TEXT")]
+        reason: Option<String>,
+        /// Remove the update hold.
+        #[arg(long, conflicts_with_all = ["check", "migrate"])]
+        unhold: bool,
         /// Run this local installer script instead of downloading it (testing).
         #[arg(long, hide = true)]
         installer: Option<PathBuf>,
@@ -656,7 +669,7 @@ fn main() {
             | Cmd::Metrics { json: true }
             | Cmd::Ping { json: true }
             | Cmd::Doctor { json: true, .. }
-            | Cmd::Version { json: true }
+            | Cmd::Version { json: true, .. }
     );
     let code = match run(cmd, &client) {
         Ok(c) => c,
@@ -1415,12 +1428,27 @@ fn run(cmd: Cmd, client: &Client) -> R {
             force,
             config,
         ),
-        Cmd::Version { json } => setup_cmds::cmd_version(client, json),
+        Cmd::Version { json, require } => match require {
+            Some(range) => setup_cmds::cmd_version_require(client, json, &range),
+            None => setup_cmds::cmd_version(client, json),
+        },
         Cmd::Update {
             check,
             migrate,
+            hold,
+            reason,
+            unhold,
             installer,
-        } => update::cmd_update(check, migrate, installer),
+        } => {
+            let state = lablink_core::paths::default_state_dir();
+            if hold {
+                update::cmd_hold(&state, reason)
+            } else if unhold {
+                update::cmd_unhold(&state)
+            } else {
+                update::cmd_update(&state, check, migrate, installer)
+            }
+        }
         Cmd::OnboardSsh { session } => {
             lablink_setup::onboarding::run_helper(client, &session)
                 .map_err(|e| Fail::new(exit::FAILURE, "onboarding", e))?;
