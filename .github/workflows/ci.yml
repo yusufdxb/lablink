@@ -32,6 +32,8 @@ jobs:
       - run: rustup toolchain install && rustup show active-toolchain
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
+      # docs/COMPATIBILITY.md: Behaviour changes need a minor bump before 1.0.
+      - run: python3 scripts/check-compat.py --self-test && python3 scripts/check-compat.py
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:

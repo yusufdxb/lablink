@@ -153,3 +153,17 @@ Rust wrapper.
       security steps: password isolation, other local user, package
       privileges, hostile import, security stop)
 - [ ] CHANGELOG `Security` section lists fixed issues
+- [ ] The version bump follows [COMPATIBILITY.md](COMPATIBILITY.md): any
+      change to the CLI contract (flags, argument placement, stdin handling,
+      JSON, exit codes) is under `### Behaviour changes`, and a release with
+      that section bumps the minor version before 1.0
+      (`python3 scripts/check-compat.py` passes)
+- [ ] If the CHANGELOG entry has a `### Behaviour changes` section: search
+      the known callers (lab runbooks and preflights, agent instructions,
+      dependent repositories, `docs/` examples) for every changed command
+      and flag, and list in the release pull request each caller that is
+      affected, with the search used. "None found" is a valid entry only with
+      the search that found nothing. Affected callers that cannot be changed
+      first must pin their version (`lablink version --require`,
+      `lablink update --hold`) before the installer on `main` selects the
+      release.
