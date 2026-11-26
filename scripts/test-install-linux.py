@@ -446,16 +446,16 @@ class InstallerTests(unittest.TestCase):
 
     def test_update_hold_refuses_before_any_download(self):
         self.existing("0.0.1")
-        self.hold('{\n  "reason": "frozen for Stage 2",\n  "since": 1,\n  "version": "0.4.3"\n}\n')
+        self.hold('{\n  "reason": "frozen for a field test",\n  "since": 1,\n  "version": "0.4.3"\n}\n')
         result = self.run_installer()
         self.assertEqual(result.returncode, 7, self.output)
-        self.assertIn("updates are held on this machine: frozen for Stage 2", self.output)
+        self.assertIn("updates are held on this machine: frozen for a field test", self.output)
         self.assertFalse(any(event[0] == "curl" and "releases" in " ".join(event[1]) for event in self.events), self.events)
         self.no_install()
 
     def test_plain_text_or_empty_hold_still_refuses(self):
         self.existing("0.0.1")
-        for text, shown in (("GROOT build\n", ": GROOT build"), ("", "")):
+        for text, shown in (("pinned by hand\n", ": pinned by hand"), ("", "")):
             self.hold(text)
             result = self.run_installer()
             self.assertEqual(result.returncode, 7, self.output)

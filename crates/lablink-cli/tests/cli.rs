@@ -1466,7 +1466,7 @@ fn update_hold_refuses_until_unhold() {
     let d = tempfile::tempdir().unwrap();
     let o = offline_lablink(
         d.path(),
-        &["update", "--hold", "--reason", "frozen for Stage 2"],
+        &["update", "--hold", "--reason", "frozen for a field test"],
     )
     .output()
     .unwrap();
@@ -1478,7 +1478,7 @@ fn update_hold_refuses_until_unhold() {
         assert_eq!(code(&o), exit::REFUSED, "{o:?}");
         let err = String::from_utf8_lossy(&o.stderr);
         assert!(
-            err.contains("held") && err.contains("frozen for Stage 2"),
+            err.contains("held") && err.contains("frozen for a field test"),
             "{err}"
         );
         assert!(!ran.exists(), "a held update must never run the installer");
@@ -1508,10 +1508,10 @@ fn update_hold_refuses_until_unhold() {
 fn hand_written_update_hold_refuses() {
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(d.path().join("state")).unwrap();
-    std::fs::write(d.path().join("state/update-hold"), "GROOT build\n").unwrap();
+    std::fs::write(d.path().join("state/update-hold"), "pinned by hand\n").unwrap();
     let (o, ran) = update_in(d.path(), FIXTURE_INSTALLER, &[]);
     assert_eq!(code(&o), exit::REFUSED, "{o:?}");
-    assert!(String::from_utf8_lossy(&o.stderr).contains("GROOT build"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("pinned by hand"));
     assert!(!ran.exists());
 }
 

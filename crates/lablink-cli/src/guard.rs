@@ -158,7 +158,7 @@ pub fn read_hold(state_dir: &Path) -> Option<Hold> {
     match std::fs::read(&p) {
         Ok(bytes) => match serde_json::from_slice::<Hold>(&bytes) {
             Ok(h) => Some(h),
-            // A hand-written file (`echo "frozen for GROOT" > update-hold`)
+            // A hand-written file (`echo "frozen for a field test" > update-hold`)
             // holds with its text as the reason.
             Err(_) => {
                 let text: String = String::from_utf8_lossy(&bytes)
@@ -250,7 +250,7 @@ mod tests {
         let state = d.path().join("state");
         assert_eq!(read_hold(&state), None);
         let h = Hold {
-            reason: Some("GROOT Stage 2".into()),
+            reason: Some("frozen for a field test".into()),
             since: Some(1),
             version: Some("0.4.3".into()),
         };

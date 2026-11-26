@@ -134,7 +134,7 @@ anything, and a machine that must stay on its version should hold updates.
 ```bash
 lablink version --require '>=0.4.3,<0.4.4'          # exit 0 in range, 7 outside
 lablink version --require '>=0.4.3,<0.4.4' --json   # same, with a JSON answer
-lablink update --hold --reason 'GROOT Stage 2 build'  # refuse updates on this machine
+lablink update --hold --reason 'frozen for a field test'  # refuse updates on this machine
 lablink update --check                                # still reports (exit 10 if newer)
 lablink update --unhold                               # allow updates again
 ```
@@ -171,7 +171,7 @@ lablink version --require '>=0.4.3,<0.4.4' || { echo "wrong LabLink version" >&2
   only notes the hold. Because `lablink update` always downloads the newest
   installer, this also holds machines on an older CLI that has no `--hold`:
   create the file by hand, e.g.
-  `mkdir -p ~/.local/state/lablink && echo 'GROOT Stage 2' > ~/.local/state/lablink/update-hold`.
+  `mkdir -p ~/.local/state/lablink && echo 'frozen for a field test' > ~/.local/state/lablink/update-hold`.
   (A plain-text file holds with its text as the reason.) That covers
   `lablink update` and the one-command installer; installing a `.deb` by hand
   with `apt` or `dpkg` bypasses it.
