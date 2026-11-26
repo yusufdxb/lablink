@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Upgrade test: a user with a working 0.3.0 install (sites, adopted devices,
-# pinned host keys, an SSH key, an open SSH session) installs the 0.3.1 .deb
+# Upgrade test: a user with a working install of an earlier release (sites, adopted devices,
+# pinned host keys, an SSH key, an open SSH session) installs the new .deb
 # over it, with the old daemon still running.
 #
-#   0.3.0: init, adopt + trust + copy-id two robots, open a long SSH session
-#   -> install the 0.3.1 .deb over the running 0.3.0 daemon
+#   old release: init, adopt + trust + copy-id two robots, open a long SSH session
+#   -> install the new .deb (dist/) over the running old daemon
 #   -> state untouched on disk, open session untouched
 #   -> security-sensitive commands refuse the old daemon (exit 7), status warns
 #   -> restart the daemon -> new client and daemon agree, both robots GREEN,

@@ -95,6 +95,17 @@ own reason), one that never creates its socket, a socket on another path,
 a non-private state directory left by 0.4.2 (tightened; config, pins and
 history kept), and recovery after a failed start. No systemd is involved.
 
+`scripts/upgrade-test.sh OLD_DEB` (CI `upgrade` job, Ubuntu 20.04, 22.04 and
+24.04) installs an earlier release in a clean-room desktop container, sets up
+a site, two trusted robots and an open SSH session, then installs the `.deb`
+in `dist/` over the running old daemon and checks that state is untouched,
+the old daemon is refused by security-sensitive commands, and everything
+recovers after a restart. CI runs it from two baselines: 0.3.0 (built from
+its pinned commit) and the published 0.4.3 `.deb`, fetched and verified by
+`scripts/fetch-release-deb.sh` (the release's `SHA256SUMS` must match a hash
+pinned in `ci.yml`, and the `.deb` must match `SHA256SUMS`). When a new
+release is installed on lab machines, move the second baseline to it.
+
 `scripts/test-daemon-startup-systemd.sh` drives a real systemd user manager
 for a second account (uid 1001, umask 002) in a privileged clean-room
 container: it reproduces the 0.4.2 failure with `OLD_DEB`, upgrades to
