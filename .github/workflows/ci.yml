@@ -153,6 +153,14 @@ jobs:
             echo "$(basename "$b"): GLIBC_$v"
             [ "$(printf '%s\n2.31\n' "$v" | sort -V | tail -1)" = 2.31 ]
           done
+      - name: package relationships
+        run: |
+          deb=$(ls dist/lablink_*_amd64.deb)
+          rec=$(dpkg-deb -f "$deb" Recommends)
+          echo "Recommends: $rec"
+          [ "$rec" = "bash-completion, dbus-bin | dbus" ]
+          # dbus-send is optional for the desktop app; never a hard dependency.
+          ! dpkg-deb -f "$deb" Depends | grep -qw dbus
       - name: checksums cover every artifact
         run: |
           cd dist && sha256sum -c SHA256SUMS

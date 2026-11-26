@@ -145,6 +145,123 @@ pub fn apply(ctx: &egui::Context, name: &str) {
         "System Default" => egui::ThemePreference::System,
         _ => egui::ThemePreference::Dark,
     });
+    // On Linux winit reports no system theme (X11 never, Wayland only what
+    // the app set), so egui's System Default would always fall back to dark
+    // while the window frame follows the desktop. Use the desktop's own
+    // preference as the fallback instead (System Default only).
+    if name == "System Default" {
+        if let Some(t) = desktop_theme(ctx, query_desktop_theme) {
+            if ctx.options(|o| o.fallback_theme) != t {
+                ctx.options_mut(|o| o.fallback_theme = t);
+            }
+        }
+    }
+}
+
+/// When the desktop's light/dark preference is asked for: once at startup
+/// (the first frame with System Default) and again each time the window
+/// regains focus, which is when the user may have changed it. Never on a
+/// timer, and at most one query at a time. A failed query (no dbus-send, no
+/// portal) leaves the answer unknown and the dark fallback in place.
+#[derive(Clone)]
+struct DesktopThemeWatch {
+    /// 0 unknown, 1 dark, 2 light; written by the query thread.
+    answer: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    started: bool,
+    /// The window has been focused at least once (the startup query covers
+    /// the first focus).
+    seen_focus: bool,
+    was_focused: bool,
+}
+
+/// What a frame should do: `true` starts a query.
+fn wants_query(w: &mut DesktopThemeWatch, focused: bool) -> bool {
+    let mut query = false;
+    if !w.started {
+        w.started = true;
+        query = true;
+    } else if focused && !w.was_focused && w.seen_focus {
+        query = true;
+    }
+    if focused {
+        w.seen_focus = true;
+    }
+    w.was_focused = focused;
+    query
+}
+
+fn desktop_theme(ctx: &egui::Context, query: fn() -> Option<egui::Theme>) -> Option<egui::Theme> {
+    use std::sync::atomic::Ordering;
+    let id = egui::Id::new("lablink-desktop-theme-watch");
+    let focused = ctx.input(|i| i.focused);
+    let (watch, start) = ctx.data_mut(|d| {
+        let w = d.get_temp_mut_or_insert_with(id, || DesktopThemeWatch {
+            answer: Default::default(),
+            in_flight: Default::default(),
+            started: false,
+            seen_focus: false,
+            was_focused: false,
+        });
+        let start = wants_query(w, focused);
+        (w.clone(), start)
+    });
+    if start && !watch.in_flight.swap(true, Ordering::AcqRel) {
+        let (answer, in_flight, ctx2) =
+            (watch.answer.clone(), watch.in_flight.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new()
+            .name("desktop-theme".into())
+            .spawn(move || {
+                if let Some(t) = query() {
+                    let v = if t == egui::Theme::Dark { 1 } else { 2 };
+                    if answer.swap(v, Ordering::AcqRel) != v {
+                        ctx2.request_repaint();
+                    }
+                }
+                in_flight.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            watch.in_flight.store(false, Ordering::Release);
+        }
+    }
+    match watch.answer.load(Ordering::Acquire) {
+        1 => Some(egui::Theme::Dark),
+        2 => Some(egui::Theme::Light),
+        _ => None,
+    }
+}
+
+/// Ask the XDG desktop portal for `org.freedesktop.appearance color-scheme`,
+/// the setting GNOME, KDE and the window decorations use.
+fn query_desktop_theme() -> Option<egui::Theme> {
+    let out = std::process::Command::new("dbus-send")
+        .args([
+            "--reply-timeout=500",
+            "--print-reply=literal",
+            "--dest=org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings.Read",
+            "string:org.freedesktop.appearance",
+            "string:color-scheme",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_color_scheme(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `variant  variant  uint32 N`: 1 prefers dark; 0 (no preference) and 2
+/// prefer light, as GTK and libadwaita read it.
+fn parse_color_scheme(reply: &str) -> Option<egui::Theme> {
+    match reply.split_whitespace().last()? {
+        "1" => Some(egui::Theme::Dark),
+        "0" | "2" => Some(egui::Theme::Light),
+        _ => None,
+    }
 }
 
 /// Semantic colors keep the same meaning with sufficient contrast in light mode.
@@ -208,5 +325,120 @@ pub fn danger_text(ui: &egui::Ui) -> Color32 {
         Color32::WHITE
     } else {
         error(ui)
+    }
+}
+
+#[cfg(test)]
+mod window_theme_tests {
+    use super::*;
+
+    /// The window frame (Wayland client-side decorations) follows the app's
+    /// appearance: egui sends the window theme when it changes
+    /// (`Options::sync_window_theme`, on by default). True Black is a dark
+    /// frame, Light a light one, System Default lets the desktop decide.
+    #[test]
+    fn window_frame_follows_the_appearance() {
+        let ctx = egui::Context::default();
+        let sent = |name: &str| {
+            let mut out = ctx.run_ui(Default::default(), |ui| apply(ui.ctx(), name));
+            out.textures_delta.clear();
+            out.viewport_output
+                .values()
+                .flat_map(|v| v.commands.iter())
+                .filter_map(|c| match c {
+                    egui::ViewportCommand::SetTheme(t) => Some(*t),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sent("Light"), [egui::SystemTheme::Light]);
+        assert_eq!(sent("Light"), [], "an unchanged appearance is not resent");
+        assert_eq!(sent("True Black"), [egui::SystemTheme::Dark]);
+        assert_eq!(sent("System Default"), [egui::SystemTheme::SystemDefault]);
+    }
+
+    static QUERIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn counting_query() -> Option<egui::Theme> {
+        QUERIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(egui::Theme::Light)
+    }
+
+    /// Run one frame with the given focus; wait until no query is running.
+    fn frame(ctx: &egui::Context, focused: bool) -> Option<egui::Theme> {
+        let input = egui::RawInput {
+            focused,
+            ..Default::default()
+        };
+        let mut seen = None;
+        let mut out = ctx.run_ui(input, |ui| seen = desktop_theme(ui.ctx(), counting_query));
+        out.textures_delta.clear();
+        let id = egui::Id::new("lablink-desktop-theme-watch");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ctx
+            .data(|d| d.get_temp::<DesktopThemeWatch>(id))
+            .is_some_and(|w| w.in_flight.load(std::sync::atomic::Ordering::Acquire))
+        {
+            assert!(std::time::Instant::now() < deadline, "query never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        seen
+    }
+
+    /// Startup asks once; an unfocused, idle window never asks again, however
+    /// many frames run; regaining focus asks once more.
+    #[test]
+    fn desktop_theme_is_queried_at_startup_and_on_refocus_only() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ctx = egui::Context::default();
+        let n = || QUERIES.load(SeqCst);
+        frame(&ctx, false); // first frame: startup query
+        assert_eq!(n(), 1);
+        assert_eq!(frame(&ctx, false), Some(egui::Theme::Light));
+        frame(&ctx, true); // first focus: covered by the startup query
+        assert_eq!(n(), 1);
+        for _ in 0..50 {
+            frame(&ctx, true); // focused, no change of focus
+        }
+        assert_eq!(n(), 1, "staying focused does not query");
+        for _ in 0..200 {
+            frame(&ctx, false); // lost focus, then unfocused and idle
+        }
+        assert_eq!(n(), 1, "no query may run while the window is unfocused");
+        frame(&ctx, true); // regained focus
+        assert_eq!(n(), 2);
+    }
+
+    #[test]
+    fn focus_transitions_decide_queries() {
+        let mut w = DesktopThemeWatch {
+            answer: Default::default(),
+            in_flight: Default::default(),
+            started: false,
+            seen_focus: false,
+            was_focused: false,
+        };
+        assert!(wants_query(&mut w, true), "startup");
+        assert!(!wants_query(&mut w, true));
+        assert!(!wants_query(&mut w, false));
+        assert!(!wants_query(&mut w, false));
+        assert!(wants_query(&mut w, true), "regained focus");
+    }
+
+    #[test]
+    fn desktop_color_scheme_is_parsed_like_gtk() {
+        assert_eq!(
+            parse_color_scheme("   variant       variant          uint32 1\n"),
+            Some(egui::Theme::Dark)
+        );
+        assert_eq!(
+            parse_color_scheme("variant variant uint32 0"),
+            Some(egui::Theme::Light)
+        );
+        assert_eq!(
+            parse_color_scheme("variant variant uint32 2"),
+            Some(egui::Theme::Light)
+        );
+        assert_eq!(parse_color_scheme(""), None);
+        assert_eq!(parse_color_scheme("Error org.freedesktop.DBus"), None);
     }
 }

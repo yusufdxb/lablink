@@ -1,3 +1,4 @@
 [advisories]
 # Unmaintained notice only (no vulnerability): zvariant/zbus_names were merged into zbus 6. Reached only through eframe -> accesskit (Linux screen-reader support); the newest accesskit_unix (0.24.1) still requires zbus 5, so no upgrade exists. Revisit when accesskit moves to zbus 6.
-ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372"]
+# Unmaintained notice only (no vulnerability): ttf-parser is no longer maintained. Reached only through winit -> sctk-adwaita -> ab_glyph, which renders the window title of the Wayland client-side decorations from a local system font; no safe upgrade exists (ab_glyph 0.2.32 is the newest). Alternatives: winit's wayland-csd-adwaita-notitle (no title text) or -crossfont (FreeType/fontconfig). Revisit when ab_glyph or sctk-adwaita moves to skrifa.
+ignore = ["RUSTSEC-2026-0370", "RUSTSEC-2026-0371", "RUSTSEC-2026-0372", "RUSTSEC-2026-0192"]
