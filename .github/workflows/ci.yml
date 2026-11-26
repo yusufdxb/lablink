@@ -78,6 +78,23 @@ jobs:
           key: msrv
       - run: cargo "+$MSRV" check --workspace --all-targets --locked
 
+  # macOS runs LabLink (a MacBook in the lab) but has no package, installer
+  # or service management; see docs/PORTABILITY.md. This builds and tests the
+  # crates that have macOS code paths (core/paths.rs ACL check,
+  # files/fs.rs renameatx_np) and the CLI and daemon on top of them. The GUI
+  # and the Linux-only setup paths are not covered here.
+  macos:
+    timeout-minutes: 60
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build --locked -p lablink-core -p lablink-ssh -p lablink-files -p lablink-cli -p lablink-daemon --all-targets
+      - run: cargo test --locked --no-fail-fast -p lablink-core -p lablink-ssh -p lablink-files -p lablink-cli -p lablink-daemon
+
   dependencies:
     timeout-minutes: 60
     runs-on: ubuntu-24.04
