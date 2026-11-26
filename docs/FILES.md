@@ -1,5 +1,7 @@
 # Files workspace
 
+![Files workspace: local and remote panes, one upload in the queue](screenshots/files-workspace.png)
+
 Select a verified device on **Devices** and choose **Open Files**, or select a
 site-qualified device in **Files**. Local and remote panes retain independent
 paths, favorites and selection. Device identity remains `site/device` across
@@ -12,6 +14,8 @@ panes; desktop drops request confirmation before upload. Recursive transfers
 include empty files and directories. The queue shows progress, verification,
 completion and actionable failures. Cancellation stops future work; retry
 starts a new transfer rather than resuming an incomplete file.
+
+![Settings, Appearance](screenshots/settings-appearance.png)
 
 Choose **True Black**, **Light** or **System Default** in Settings. The same
 palette applies to navigation, device cards, onboarding, site management,

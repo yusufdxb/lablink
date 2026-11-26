@@ -235,7 +235,12 @@ you explicitly delete them.
 - **Device page:** where the device is in Adopt -> Trust -> SSH login ->
   Managed, the explanation of any problem with buttons that fix it, and
   every identity and health detail.
-- **Health:** the read-only doctor checks of the current site.
+- **Health:** the read-only doctor checks of the current site. A device
+  with `availability: on_demand` that does not answer is shown as
+  blue-grey **asleep/off (expected)**, not as a failure.
+- **Files:** a local and a remote pane for a verified device, drag and drop
+  between them, and a transfer queue with progress and verification
+  ([docs/FILES.md](docs/FILES.md)).
 - **Sites:** create and rename sites, choose their networks and active
   scanning, turn automatic detection on or off per site, and see the
   detection signals.
@@ -245,6 +250,15 @@ you explicitly delete them.
 | Site selector | Sites |
 |---|---|
 | ![The site selector](docs/screenshots/site-selector.png) | ![Managing sites](docs/screenshots/sites.png) |
+
+| Files | Health |
+|---|---|
+| ![Files workspace with an upload in the queue](docs/screenshots/files-workspace.png) | ![Health with one device asleep/off (expected)](docs/screenshots/health.png) |
+
+![Settings, Appearance](docs/screenshots/settings-appearance.png)
+
+Screenshots use fixture data only and are regenerated with
+`scripts/capture-readme-gui.py` and `scripts/capture-onboarding-gui.py`.
 
 ## Configuration
 
