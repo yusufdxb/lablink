@@ -185,6 +185,7 @@ jobs:
           name: lablink-dist
           path: ${{ runner.temp }}/first-build
       - run: scripts/release.sh
+      - run: scripts/test-reproduce-check.sh
       - run: scripts/reproduce-check.sh "$RUNNER_TEMP/first-build" dist
 
   baseline:
