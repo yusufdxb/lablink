@@ -8,7 +8,7 @@
 set -uo pipefail
 a=${1:?usage: reproduce-check.sh DIST_A DIST_B}; b=${2:?usage: reproduce-check.sh DIST_A DIST_B}
 bad=0
-for f in $( (cd "$a" && ls; cd "$b" && ls) | sort -u); do
+for f in $( { (cd "$a" && ls); (cd "$b" && ls); } | sort -u); do
     if [ ! -f "$a/$f" ] || [ ! -f "$b/$f" ]; then echo "MISSING   $f"; bad=1
     elif cmp -s "$a/$f" "$b/$f"; then echo "IDENTICAL $f  $(sha256sum < "$a/$f" | cut -c1-16)"
     else
