@@ -38,25 +38,29 @@ below).
 | Completion | bash completion is generated, but its end-to-end test fails with macOS bash 3.2 | see below |
 
 **Known test failures on macOS** (first run of the `macos` job; these are
-reported, not hidden, and each needs its own fix):
+reported, not hidden, and each needs its own fix). Until they are fixed the
+`macos` job runs with `continue-on-error`: it still shows red on every run,
+but does not fail the workflow. Remove `continue-on-error` when the last one
+is fixed. **File transfers on macOS are unverified** until #67 is fixed.
 
 - `lablink-cli`: four `update_*` tests (they expect the Linux updater; on
   macOS `lablink update` refuses by design), `bash_script_end_to_end`
   (completion under the system bash 3.2), and
   `exec_with_a_terminal_stdin_does_not_forward_or_hang` (a test helper that
-  is not installed on macOS).
+  is not installed on macOS). Issues #68, #69, #70.
 - `lablink-daemon`: `metrics::tests::proc_stats_readable` and
   `no_runaway_task_creation` (`/proc`), `via_command_runs_in_a_real_shell`
   (the gateway command exits 127 on macOS), and
   `a_configuration_on_a_pipe_is_refused` (a pipe on macOS is group-writable
   by group 20, so `lablinkd --config /dev/stdin` is refused by the
   trusted-path check: configuration on a pipe does not work on macOS).
+  Issues #71, #72, #73.
 - `lablink-files`: `changed_trust_and_daemon_ambiguity_stop_transfers`
   aborts the SFTP test binary on a `WouldBlock` socket error (on macOS an
   accepted socket inherits the listener's non-blocking mode), so the rest of
-  that binary does not run.
+  that binary does not run. Issue #67 (priority).
 - `lablink-ssh`: `a_hop_that_leaves_a_process_behind_leaks_nothing` and
-  `signals_to_parent_kill_the_owned_group_and_preserve_status`.
+  `signals_to_parent_kill_the_owned_group_and_preserve_status`. Issue #70.
 
 ## Installing and upgrading on macOS
 

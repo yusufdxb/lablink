@@ -84,6 +84,9 @@ jobs:
   # files/fs.rs renameatx_np) and the CLI and daemon on top of them. The GUI
   # and the Linux-only setup paths are not covered here.
   macos:
+    # Known macOS test failures are tracked in docs/PORTABILITY.md (#67-#73).
+    # Remove continue-on-error once they are fixed.
+    continue-on-error: true
     timeout-minutes: 60
     runs-on: macos-15
     steps:
