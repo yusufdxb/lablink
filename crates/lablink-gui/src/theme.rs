@@ -145,6 +145,75 @@ pub fn apply(ctx: &egui::Context, name: &str) {
         "System Default" => egui::ThemePreference::System,
         _ => egui::ThemePreference::Dark,
     });
+    // On Linux winit reports no system theme (X11 never, Wayland only what
+    // the app set), so egui's System Default would always fall back to dark
+    // while the window frame follows the desktop. Use the desktop's own
+    // preference as the fallback instead.
+    if let Some(t) = desktop_theme() {
+        if ctx.options(|o| o.fallback_theme) != t {
+            ctx.options_mut(|o| o.fallback_theme = t);
+        }
+    }
+}
+
+/// The desktop's light/dark preference, refreshed in the background every
+/// few seconds (`None` until the first answer, or when nothing answers).
+fn desktop_theme() -> Option<egui::Theme> {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Once;
+    static THEME: AtomicU8 = AtomicU8::new(0); // 0 unknown, 1 dark, 2 light
+    static START: Once = Once::new();
+    START.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("desktop-theme".into())
+            .spawn(|| loop {
+                if let Some(t) = query_desktop_theme() {
+                    THEME.store(
+                        if t == egui::Theme::Dark { 1 } else { 2 },
+                        Ordering::Relaxed,
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            });
+    });
+    match THEME.load(Ordering::Relaxed) {
+        1 => Some(egui::Theme::Dark),
+        2 => Some(egui::Theme::Light),
+        _ => None,
+    }
+}
+
+/// Ask the XDG desktop portal for `org.freedesktop.appearance color-scheme`,
+/// the setting GNOME, KDE and the window decorations use.
+fn query_desktop_theme() -> Option<egui::Theme> {
+    let out = std::process::Command::new("dbus-send")
+        .args([
+            "--reply-timeout=500",
+            "--print-reply=literal",
+            "--dest=org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings.Read",
+            "string:org.freedesktop.appearance",
+            "string:color-scheme",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_color_scheme(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `variant  variant  uint32 N`: 1 prefers dark; 0 (no preference) and 2
+/// prefer light, as GTK and libadwaita read it.
+fn parse_color_scheme(reply: &str) -> Option<egui::Theme> {
+    match reply.split_whitespace().last()? {
+        "1" => Some(egui::Theme::Dark),
+        "0" | "2" => Some(egui::Theme::Light),
+        _ => None,
+    }
 }
 
 /// Semantic colors keep the same meaning with sufficient contrast in light mode.
@@ -238,5 +307,23 @@ mod window_theme_tests {
         assert_eq!(sent("Light"), [], "an unchanged appearance is not resent");
         assert_eq!(sent("True Black"), [egui::SystemTheme::Dark]);
         assert_eq!(sent("System Default"), [egui::SystemTheme::SystemDefault]);
+    }
+
+    #[test]
+    fn desktop_color_scheme_is_parsed_like_gtk() {
+        assert_eq!(
+            parse_color_scheme("   variant       variant          uint32 1\n"),
+            Some(egui::Theme::Dark)
+        );
+        assert_eq!(
+            parse_color_scheme("variant variant uint32 0"),
+            Some(egui::Theme::Light)
+        );
+        assert_eq!(
+            parse_color_scheme("variant variant uint32 2"),
+            Some(egui::Theme::Light)
+        );
+        assert_eq!(parse_color_scheme(""), None);
+        assert_eq!(parse_color_scheme("Error org.freedesktop.DBus"), None);
     }
 }
