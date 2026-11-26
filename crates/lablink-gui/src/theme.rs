@@ -210,3 +210,33 @@ pub fn danger_text(ui: &egui::Ui) -> Color32 {
         error(ui)
     }
 }
+
+#[cfg(test)]
+mod window_theme_tests {
+    use super::*;
+
+    /// The window frame (Wayland client-side decorations) follows the app's
+    /// appearance: egui sends the window theme when it changes
+    /// (`Options::sync_window_theme`, on by default). True Black is a dark
+    /// frame, Light a light one, System Default lets the desktop decide.
+    #[test]
+    fn window_frame_follows_the_appearance() {
+        let ctx = egui::Context::default();
+        let sent = |name: &str| {
+            let mut out = ctx.run_ui(Default::default(), |ui| apply(ui.ctx(), name));
+            out.textures_delta.clear();
+            out.viewport_output
+                .values()
+                .flat_map(|v| v.commands.iter())
+                .filter_map(|c| match c {
+                    egui::ViewportCommand::SetTheme(t) => Some(*t),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sent("Light"), [egui::SystemTheme::Light]);
+        assert_eq!(sent("Light"), [], "an unchanged appearance is not resent");
+        assert_eq!(sent("True Black"), [egui::SystemTheme::Dark]);
+        assert_eq!(sent("System Default"), [egui::SystemTheme::SystemDefault]);
+    }
+}

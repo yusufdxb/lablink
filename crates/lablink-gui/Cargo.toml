@@ -20,6 +20,12 @@ lablink-doctor.workspace = true
 lablink-setup.workspace = true
 serde_json.workspace = true
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit"] }
+# eframe's default features turn this on through `winit/default`; with
+# default features off, winit draws a bare fallback frame on Wayland
+# compositors without server-side decorations (GNOME). Adwaita-style
+# client-side decorations instead: title, native-looking buttons, the
+# desktop's button layout, light/dark following the window theme.
+winit = { version = "0.30.13", default-features = false, features = ["wayland-csd-adwaita"] }
 
 lablink-files = { path = "../lablink-files" }
 rfd = "0.17.2"
