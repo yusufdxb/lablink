@@ -18,6 +18,22 @@ All notable changes are listed here. The format follows
   `--check` still reports. Any hold file holds, including one written by hand
   or one that cannot be parsed.
 
+### Fixed
+
+- Desktop app on GNOME Wayland: proper window decorations (title, Adwaita
+  minimize/maximize/close, the desktop's button layout, drag, double-click
+  maximize, edge resize) instead of winit's bare fallback frame.
+- Desktop app: System Default follows the desktop's light/dark preference
+  on Linux (it was always dark). Read from the desktop portal at startup and
+  when the window regains focus.
+
+### Changed
+
+- The `.deb` now recommends `dbus-bin | dbus` (for `dbus-send`, which the
+  desktop app uses to read the desktop's appearance and button layout).
+  Recommended only: without it the app falls back to a dark System Default
+  and the default button layout.
+
 ## [0.4.4] - 2026-11-25
 
 ### Behaviour changes

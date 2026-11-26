@@ -123,7 +123,12 @@ size=$(du -sk "$d/usr" | cut -f1)
     echo "Maintainer: $maintainer"
     echo "Installed-Size: $size"
     echo "Depends: libc6 (>= $glibc), libgcc-s1, openssh-client, libgl1, libegl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxrandr2, libxi6, libwayland-client0, libwayland-egl1"
-    echo "Recommends: bash-completion"
+    # dbus-send: the desktop app reads the light/dark preference and the
+    # window button layout from the desktop portal with it. Recommended, not
+    # required: the CLI and daemon run headless and the app works without it
+    # (dark System Default, default button layout). dbus-bin on 24.04, dbus
+    # on 20.04 and 22.04.
+    echo "Recommends: bash-completion, dbus-bin | dbus"
     echo "Section: net"
     echo "Priority: optional"
     echo "Homepage: $homepage"
