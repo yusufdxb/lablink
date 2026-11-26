@@ -27,16 +27,16 @@ OUT.mkdir(parents=True, exist_ok=True)
 class DiscoveryFixture(mod.GuiFixture):
     def sites(self):
         s = super().sites()
-        s[0]["networks"] = [dict(name="Bench LAN", cidr="192.168.77.0/24", active_scan=False, attached=True)]
+        s[0]["networks"] = [dict(name="bench-lan", cidr="10.9.0.0/24", active_scan=False, attached=True)]
         return s
 
     def hosts(self):
         base = self.host_record()
-        quiet = dict(base, ip="192.168.77.23", hostname=None, mac="48:b0:2d:00:00:23", ssh_port="filtered",
-                     sources=["neighbor table"], note=None, interface="eth0", network_name="Bench LAN")
-        gone = dict(base, ip="192.168.77.40", hostname="old-bench-pc", mac=None, ssh_port="unknown",
+        quiet = dict(base, ip="10.9.0.23", hostname=None, mac="02:00:00:00:00:23", ssh_port="filtered",
+                     sources=["neighbor table"], note=None, interface="eth0", network_name="bench-lan")
+        gone = dict(base, ip="10.9.0.40", hostname="gpu-workstation-old", mac=None, ssh_port="unknown",
                     sources=["neighbor table"], note=None, last_seen_ms_ago=40 * 60 * 1000, interface="eth0",
-                    network_name="Bench LAN")
+                    network_name="bench-lan")
         return [base, quiet, gone]
 
     def response(self, req):
