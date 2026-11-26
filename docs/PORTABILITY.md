@@ -1,10 +1,86 @@
 # Portability
 
-LabLink 0.3 supports Linux only (tested on Ubuntu 20.04, 22.04 and 24.04,
-x86_64; the CLI and daemon also build for aarch64 Linux). macOS is not
-supported yet. This page draws the line between the generic core, which
-should not need changes for another OS, and the platform layer, which would
-be reimplemented.
+LabLink is built, packaged and tested for Linux: Ubuntu 20.04, 22.04 and
+24.04 on x86_64 (the `.deb`, the installer and `lablink update`), and the
+CLI and daemon also build for aarch64 Linux. **macOS runs LabLink but is not
+packaged**: the CLI and daemon build and run from source, and CI builds and
+tests them on macOS (the `macos` job), with the gaps listed below. This page
+says what works on macOS today, what does not, and where the line runs
+between the generic core and the platform layer.
+
+## macOS today
+
+CI (`macos` job, macOS 15 on Apple silicon) builds `lablink-core`,
+`lablink-ssh`, `lablink-files`, `lablink-cli` and `lablink-daemon` with all
+targets and runs their tests. macOS has its own code for the private-path
+check (`core/paths.rs`, ACLs) and atomic no-replace renames
+(`files/fs.rs`, `renameatx_np`).
+
+**Works** (the tests for these pass on macOS in CI): configuration and its
+validation, sites, host-key pinning and trust, identity-attack handling,
+`status`, `devices`, `inspect`, `resolve`, `ssh`, `exec` (including piped
+stdin), `trust`, `forget`, `doctor`, `version`, and the daemon's
+monitoring, scanning and startup on the networks you allow. The security
+model is the same as on Linux: it lives in the generic code. **Not yet
+verified:** file transfers (the SFTP test binary aborts on macOS, see
+below).
+
+**Does not work, or works partly:**
+
+| Area | On macOS | Why |
+|---|---|---|
+| Installation and upgrade | no package, `lablink update` refuses ("supports Linux (Ubuntu) only"), the installer refuses | the `.deb` and `install-linux.sh` are Linux-only |
+| Service management | `lablink install-service`, `lablink init` service step and the desktop app's Start button need systemd; nothing installs a launchd agent | `lablink-setup::service` is systemd only |
+| Discovery: network changes | no rtnetlink: no interface/address snapshot and no change events, so the daemon falls back to periodic discovery | `lablink-discovery::netlink` is Linux-only |
+| Discovery: site hints | no Wi-Fi SSID and no gateway MAC from `/proc`; site detection has fewer signals and may stay UNKNOWN where Linux would be ACTIVE | `lablink-platform` reads `/proc` and wireless extensions |
+| Daemon metrics | `lablink metrics` has no process CPU/memory figures | read from `/proc/self` |
+| Desktop app | not built or tested by CI on macOS; "Open in terminal" knows only Linux terminals | `lablink-gui::term` |
+| Completion | bash completion is generated, but its end-to-end test fails with macOS bash 3.2 | see below |
+
+**Known test failures on macOS** (first run of the `macos` job; these are
+reported, not hidden, and each needs its own fix):
+
+- `lablink-cli`: four `update_*` tests (they expect the Linux updater; on
+  macOS `lablink update` refuses by design), `bash_script_end_to_end`
+  (completion under the system bash 3.2), and
+  `exec_with_a_terminal_stdin_does_not_forward_or_hang` (a test helper that
+  is not installed on macOS).
+- `lablink-daemon`: `metrics::tests::proc_stats_readable` and
+  `no_runaway_task_creation` (`/proc`), `via_command_runs_in_a_real_shell`
+  (the gateway command exits 127 on macOS), and
+  `a_configuration_on_a_pipe_is_refused` (a pipe on macOS is group-writable
+  by group 20, so `lablinkd --config /dev/stdin` is refused by the
+  trusted-path check: configuration on a pipe does not work on macOS).
+- `lablink-files`: `changed_trust_and_daemon_ambiguity_stop_transfers`
+  aborts the SFTP test binary on a `WouldBlock` socket error (on macOS an
+  accepted socket inherits the listener's non-blocking mode), so the rest of
+  that binary does not run.
+- `lablink-ssh`: `a_hop_that_leaves_a_process_behind_leaks_nothing` and
+  `signals_to_parent_kill_the_owned_group_and_preserve_status`.
+
+## Installing and upgrading on macOS
+
+There is no macOS package. Build the CLI and daemon from a release tag
+(Rust from [rustup](https://rustup.rs); `rust-toolchain.toml` selects the
+compiler):
+
+```bash
+git clone https://github.com/yusufdxb/lablink && cd lablink
+git checkout v0.4.4                      # the release you want, never an untagged main
+cargo build --release --locked -p lablink-cli -p lablink-daemon
+install -m 755 target/release/lablink target/release/lablinkd ~/.local/bin/
+```
+
+To upgrade: stop the running `lablinkd`, check out the new tag, build and
+install the same way, start `lablinkd` again, and check that
+`lablink version` shows the same version and commit for the CLI and the
+daemon. Configuration, devices and pinned keys stay in
+`~/.config/lablink` and `~/.local/state/lablink` (the XDG layout, the same
+as on Linux). Read the CHANGELOG's `Behaviour changes` first
+([COMPATIBILITY.md](COMPATIBILITY.md)); a machine that must stay on a
+version simply is not rebuilt (and, where `lablink update` is used, see
+`lablink update --hold`). The daemon is not started at login unless you add
+a launchd agent yourself.
 
 ## Generic (no OS assumptions)
 
@@ -23,7 +99,7 @@ The security model (host-key pinning, explicit trust, scan permission,
 local-only IPC, sites never changing trust) lives entirely in the generic
 part.
 
-## Platform-specific (Linux today)
+## Platform-specific (Linux implementation; macOS status above)
 
 | Concern | Where | Linux implementation | What another OS needs |
 |---|---|---|---|
